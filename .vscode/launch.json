@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "MSO5202D: live plot",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/mso5202d_plot.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/scripts",
+            "justMyCode": true
+        },
+        {
+            "name": "MSO5202D: probe",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/mso5202d_probe.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/scripts",
+            "justMyCode": true
+        }
+    ]
+}

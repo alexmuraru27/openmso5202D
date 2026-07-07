@@ -1,0 +1,11 @@
+# Hantek MSO5202D (USB 049f:505a) — grant the logged-in user access to the raw
+# USB device so libusb/pyusb (scripts/mso5202d.py, mso5202d_plot.py) can claim it
+# without root. The device is a vendor-specific bulk device.
+#   uaccess : grants the active-seat user access via ACL (systemd/logind)
+#   MODE    : 0666 fallback so it works even outside a seat session
+#
+# Install:
+#   sudo cp 70-mso5202d.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   (then unplug/replug the scope)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="049f", ATTRS{idProduct}=="505a", TAG+="uaccess", MODE="0666"
