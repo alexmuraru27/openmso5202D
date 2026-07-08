@@ -280,6 +280,13 @@ TRIG_SWAP_TYPE_NAMES = {0: 'Edge', 1: 'Video', 2: 'Pulse', 3: 'Overtime'}
 # (TRIG-PULSE-WHEN) — verified identical on both.
 TRIG_WHEN_NAMES = {0: '=', 1: '≠', 2: '>', 3: '<'}
 
+# Vertical (CHx) menu enums.
+VERT_COUP_NAMES = {0: 'DC', 1: 'AC', 2: 'GND'}           # VERT-CHx-COUP (NOT trigger coup)
+VERT_BW_NAMES = {0: 'Full', 1: '20MHz'}                  # VERT-CHx-20MHZ (BW limit)
+VERT_FINE_NAMES = {0: 'Coarse', 1: 'Fine'}               # VERT-CHx-FINE (V/div resolution)
+VERT_PROBE_NAMES = {0: '1x', 1: '10x', 2: '100x', 3: '1000x'}  # VERT-CHx-PROBE
+VERT_INVERT_NAMES = {0: 'Off', 1: 'On'}                  # VERT-CHx-RPHASE (invert)
+
 # Acquire menu enums (ACQURIE-* fields).
 ACQ_TYPE_NAMES = {0: 'Realtime', 1: 'Equ-time'}          # ACQURIE-TYPE
 ACQ_MODE_NAMES = {0: 'Normal', 1: 'Peak', 2: 'Average'}  # ACQURIE-MODE
@@ -295,15 +302,17 @@ ACQ_DEPTH_NAMES = {0: '4K', 4: '40K', 6: '512K', 7: '1M'}
 # captures; see MSO5202D-protocol.md §6). Partial — more menus to identify.
 # Trigger sub-menus that span two pages have consecutive ids (page1, page2).
 MENU_NAMES = {
-    2: 'CH (vertical)', 5: 'Trig:Edge', 6: 'Trig:Pulse p1', 7: 'Trig:Pulse p2',
-    8: 'Trig:Video', 10: 'default/none', 11: 'Trigger', 22: 'Trig:Slope p1',
+    1: 'CH1 (vertical)', 2: 'CH2 (vertical)', 3: 'Horizontal p1',
+    5: 'Trig:Edge', 6: 'Trig:Pulse p1', 7: 'Trig:Pulse p2',
+    8: 'Trig:Video', 10: 'default/none', 11: 'Trigger', 17: 'Acquire',
+    22: 'Trig:Slope p1',
     23: 'Trig:Slope p2', 24: 'Trig:Alter', 38: 'Trig:Overtime p1',
     39: 'Trig:Overtime p2',
     # Alter/Swap per-type submenus: CH1 block 26-29, CH2 block 30-33.
     26: 'Alter-CH1:Edge', 27: 'Alter-CH1:Pulse', 28: 'Alter-CH1:Video',
     29: 'Alter-CH1:Overtime', 30: 'Alter-CH2:Edge', 31: 'Alter-CH2:Pulse',
     32: 'Alter-CH2:Video', 33: 'Alter-CH2:Overtime',
-    3: 'Horizontal p1', 40: 'Horizontal p2', 61: 'Logic Analyzer',
+    40: 'Horizontal p2', 61: 'Logic Analyzer',
 }
 
 # Horizontal sample density. The vendor spec gives "sample interval = s/div /

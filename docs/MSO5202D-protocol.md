@@ -48,8 +48,10 @@ mapped menu ids 3/40 and the LA menu 61; window/mark controls don't touch the
 settings blob, §6), `mso5202d-horiz-position.pcapng` (horizontal-position
 knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6),
 `mso5202d-acquire.pcapng` (Acquire menu — mapped `ACQURIE-TYPE/MODE/AVG-CNT/
-STORE-DEPTH`, §6), and `mso5202d-acquire-1m.pcapng` (single-channel — captured
-the 1M store-depth code 7, §6).
+STORE-DEPTH`, §6), `mso5202d-acquire-1m.pcapng` (single-channel — captured
+the 1M store-depth code 7, §6), `mso5202d-ch1-menu.pcapng` (CH1 vertical
+menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), and
+`mso5202d-ch2-menu.pcapng` (CH2 vertical menu — confirmed channel symmetry, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -535,8 +537,25 @@ channel carries its **own independent trigger config** in the
 (`TRIG_SWAP_TYPE_NAMES` in `mso5202d.py`; per-channel enums reuse the main
 trigger name maps.)
 
+**Vertical (CHx) menu enums** — mapped by stepping the CH1 menu
+(`mso5202d-ch1-menu.pcapng`, menu id `[CONTROL-MENUID]` = **1**) and confirmed
+on CH2 (`mso5202d-ch2-menu.pcapng`, menu id **2**, identical layout & values):
+- `[VERT-CHx-COUP]`: `0` = **DC**, `1` = **AC**, `2` = **GND** (channel input
+  coupling — **not** the same enum as `[TRIG-COUP]`).
+- `[VERT-CHx-20MHZ]`: `0` = **Full** bandwidth, `1` = **20 MHz** limit.
+- `[VERT-CHx-FINE]`: `0` = **Coarse**, `1` = **Fine** (V/div resolution).
+- `[VERT-CHx-PROBE]`: `0` = **1×**, `1` = **10×**, `2` = **100×**, `3` = **1000×**.
+- `[VERT-CHx-RPHASE]`: `0` = **Off**, `1` = **On** — the **Invert** function.
+  Inverting also flips the sign of the trigger level (observed `TRIG-VPOS`
+  81→55, `TRIG-LEVEL-mV` +2600→−2600) since the trigger follows the inverted
+  trace — but **only for the trigger-source channel**: inverting CH2 (with the
+  trigger on CH1) left the level unchanged, confirming the source-binding.
+
+(`VERT_COUP_NAMES` / `VERT_BW_NAMES` / `VERT_FINE_NAMES` / `VERT_PROBE_NAMES` /
+`VERT_INVERT_NAMES` in `mso5202d.py`.)
+
 **Acquire-menu enums** — mapped by stepping the Acquire menu
-(`mso5202d-acquire.pcapng`):
+(`mso5202d-acquire.pcapng`, menu id `[CONTROL-MENUID]` = **17**):
 - `[ACQURIE-TYPE]`: `0` = **Realtime**, `1` = **Equivalent-time**.
 - `[ACQURIE-MODE]`: `0` = **Normal**, `1` = **Peak Detect**, `2` = **Average**.
 - `[ACQURIE-AVG-CNT]`: index → averages, `0`=4 `1`=8 `2`=16 `3`=32 `4`=64
@@ -844,20 +863,20 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 --- VERTICAL, CH1 ---
 4    1  VERT-CH1-DISP               0/1 channel displayed
 5    1  VERT-CH1-VB                 V/div index -> VB_TO_MV (0=2mV..10=5V; 10V/div re-uses 0)
-6    1  VERT-CH1-COUP               input coupling enum (DC/AC/GND? unmapped)
-7    1  VERT-CH1-20MHZ              0/1 20 MHz bandwidth limit
-8    1  VERT-CH1-FINE               0/1 fine (variable) gain
-9    1  VERT-CH1-PROBE              probe attenuation index (1x/10x/… unmapped)
-10   1  VERT-CH1-RPHASE             (unmapped)
+6    1  VERT-CH1-COUP               0=DC 1=AC 2=GND (channel coupling; NOT trigger coup)
+7    1  VERT-CH1-20MHZ              0=Full 1=20 MHz BW limit
+8    1  VERT-CH1-FINE               0=Coarse 1=Fine (V/div resolution)
+9    1  VERT-CH1-PROBE              0=1x 1=10x 2=100x 3=1000x
+10   1  VERT-CH1-RPHASE             0=Off 1=On (INVERT; also flips trigger-level sign)
 11   1  VERT-CH1-CNT-FINE           fine-gain counter (unmapped)
 12   2  VERT-CH1-POS                signed; vertical position, 1/25 div
 --- VERTICAL, CH2 (same layout) ---
 14   1  VERT-CH2-DISP               0/1 channel displayed
 15   1  VERT-CH2-VB                 V/div index -> VB_TO_MV
-16   1  VERT-CH2-COUP               coupling enum (unmapped)
-17   1  VERT-CH2-20MHZ              0/1 20 MHz BW limit
-18   1  VERT-CH2-FINE               0/1 fine gain
-19   1  VERT-CH2-PROBE              probe attenuation index
+16   1  VERT-CH2-COUP               0=DC 1=AC 2=GND
+17   1  VERT-CH2-20MHZ              0=Full 1=20 MHz BW limit
+18   1  VERT-CH2-FINE               0=Coarse 1=Fine
+19   1  VERT-CH2-PROBE              0=1x 1=10x 2=100x 3=1000x
 20   1  VERT-CH2-RPHASE             (unmapped)
 21   1  VERT-CH2-CNT-FINE           (unmapped)
 22   2  VERT-CH2-POS                signed; vertical position, 1/25 div
@@ -987,6 +1006,11 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 | `TRIG-PULSE-NEG` | 0 Positive · 1 Negative pulse |
 | `TRIG-OVERTIME-NEG` | 0 Positive · 1 Negative |
 | `TRIG-SWAP-CHx-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Overtime (per-channel type in Alter mode; 4-value, no Slope/Alter) |
+| `VERT-CHx-COUP` | 0 DC · 1 AC · 2 GND (channel coupling ≠ trigger coupling) |
+| `VERT-CHx-20MHZ` | 0 Full · 1 20 MHz limit |
+| `VERT-CHx-FINE` | 0 Coarse · 1 Fine |
+| `VERT-CHx-PROBE` | 0 1× · 1 10× · 2 100× · 3 1000× |
+| `VERT-CHx-RPHASE` | 0 Off · 1 On (Invert) |
 | `ACQURIE-TYPE` | 0 Realtime · 1 Equivalent-time |
 | `ACQURIE-MODE` | 0 Normal · 1 Peak Detect · 2 Average |
 | `ACQURIE-AVG-CNT` | 0=4 · 1=8 · 2=16 · 3=32 · 4=64 · 5=128 (count = 4·2ⁿ) |
@@ -994,21 +1018,24 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 | `VERT-CHx-VB` | V/div: 0=2mV 1=5mV 2=10 3=20 4=50 5=100 6=200 7=500mV 8=1V 9=2V 10=5V (10V/div → 0) |
 | `HORIZ-*TB` | time/div index, 2-4-8 sequence 2 ns…40 s (`TB_TO_NS`); WIN-TB = knob 0..31, HORIZ-TB clamps at 6 (200 ns) |
 
-Still-unmapped enums (need targeted captures): `VERT-CHx-COUP`,
-`VERT-CHx-PROBE`, the Pulse/Slope/Video condition enums (`*-WHEN`, `*-SET`),
-`ACQURIE-MODE`/`-TYPE`, `MATH-MODE`, `DISPLAY-*`, and the `MEASURE-ITEM*` ids.
+Still-unmapped enums (need targeted captures): `MATH-*`, `DISPLAY-*`, the
+`MEASURE-ITEM*` ids, `LA-*` thresholds, and the EXT-source trigger level in
+volts.
 
 ### `CONTROL-MENUID` — on-screen menu id (partial, mapped by context)
 
 | id | menu |
 |---|---|
-| 2 | CH / vertical menu (seen during CH1/CH2 V-div, position, timebase play) |
+| 1 | **CH1** vertical menu |
+| 2 | **CH2** vertical menu |
+| 3 | Horizontal menu, **page 1** (window ctrl / marks) |
 | 5 | Trigger → Edge submenu |
 | 6 | Trigger → Pulse submenu, **page 1** |
 | 7 | Trigger → Pulse submenu, **page 2** (When / Time) |
 | 8 | Trigger → Video submenu |
 | 10 | default / no active menu (vendor-app baseline) |
 | 11 | Trigger menu (level/base, Edge default) |
+| 17 | **Acquire** menu |
 | 22 | Trigger → Slope submenu, **page 1** |
 | 23 | Trigger → Slope submenu, **page 2** (V1/V2 / When / Time) |
 | 24 | Trigger → Alter submenu (base) |
@@ -1016,9 +1043,12 @@ Still-unmapped enums (need targeted captures): `VERT-CHx-COUP`,
 | 30 / 31 / 32 / 33 | Alter → **CH2** Edge / Pulse / Video / Overtime |
 | 38 | Trigger → Overtime submenu, **page 1** |
 | 39 | Trigger → Overtime submenu, **page 2** (Coupling) |
-| 3 | Horizontal menu, **page 1** (window ctrl / marks) |
 | 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
 | 61 | Logic Analyzer menu (`[LA-SWI]` = LA on/off) |
+
+Note some menus set `[CONTROL-MENUID]` but keep it constant while open (so it
+shows in the value, not as a change) — e.g. CH1=1, CH2=2, Acquire=17 stayed put
+throughout their captures; only `[CONTROL-DISP-MENU]` toggled 0↔1.
 
 Multi-page trigger submenus use **consecutive ids** for page 1 / page 2
 (Pulse 6/7, Slope 22/23, Overtime 38/39). `CONTROL-DISP-MENU` = 1 while a menu is shown, 0 when
