@@ -40,8 +40,10 @@ sweep — mapped the `TRIG-OVERTIME-*` fields and menu id 39, §6), and
 `mso5202d-trig-alter-ch1.pcapng` (Alter/Swap CH1 per-type config — mapped
 `TRIG-SWAP-CHx-TYPE` and the per-channel sub-params + menu ids 26–29, §6), and
 `mso5202d-trig-alter-ch2.pcapng` (Alter/Swap CH2 — confirmed CH2 symmetry, menu
-ids 30–33, §6), and `mso5202d-trig-holdoff.pcapng` (holdoff-knob sweep —
-confirmed `TRIG-HOLDTIME` tracks the knob, §6).
+ids 30–33, §6), `mso5202d-trig-holdoff.pcapng` (holdoff-knob sweep —
+confirmed `TRIG-HOLDTIME` tracks the knob, §6), and `mso5202d-trig-knob.pcapng`
+(trigger-level knob push — isolated it as "level to 0 V / channel ground",
+distinct from Set-50 %, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -353,10 +355,16 @@ vertical position, time/div and horizontal position all exercised):
   (25 counts/div), used for `VERT-CHx-POS`, `TRIG-VPOS` and the trigger level.
   *(Corrects an earlier guess of 1/100-div here — it was never scope-calibrated;
   the ×4 error surfaced when the scope's V readout was compared.)*
-  The front-panel **"Set 50 %"** button snaps `TRIG-VPOS` to the signal's
-  mid-amplitude: in `../captures/mso5202d-trig-buttons.pcapng` six presses from
-  different starting levels all landed on VPOS 63 = **2480 mV ≈ 50 % of the 5 V
-  cal** — a 3rd–5th cross-check of the calibration.
+  Two distinct level-reset controls, verified separately:
+  - The front-panel **"Set 50 %"** softkey snaps `TRIG-VPOS` to the signal's
+    **mid-amplitude**: in `../captures/mso5202d-trig-buttons.pcapng` six presses
+    from different starting levels all landed on VPOS 63 = **2480 mV ≈ 50 % of
+    the 5 V cal**.
+  - **Pushing the trigger-level knob** snaps `TRIG-VPOS` to the **source
+    channel's 0 V / ground** (`TRIG-VPOS := VERT-CHsrc-POS`, level = 0 mV):
+    in `../captures/mso5202d-trig-knob.pcapng` every push from various levels
+    (VPOS 54/41/48) landed on VPOS 35 = CH1 POS = **0 mV**. So the knob-push is
+    "level to ground", *not* Set-50 %.
 
 **8-byte time fields are PICOSECONDS.** `[TRIG-HOLDTIME-MIN]` = 100 000 =
 100 ns and `[TRIG-HOLDTIME-MAX]` = 10¹³ = 10 s — exactly the scope's holdoff
