@@ -10,41 +10,74 @@ Usage:
     python3 mso5202d_plot.py --frames 200   # live: stop after N frames
 
 Y axis is raw 8-bit ADC counts (0..255) until the counts->volts calibration table
-is recovered; the title shows the live decoded V/div index, timebase and trigger.
-X axis is sample index (sample rate not yet calibrated). CH2 is omitted because the
-device currently returns identical data for both channels (channel-select unsolved).
+is recovered; the title shows the live decoded V/div (real units), time/div and
+trigger state/level/frequency. X axis is sample index (sample rate not yet
+calibrated). Both channels are shown when displayed on the scope (channel select
+= the acquire value byte, solved 2026-07-08).
 """
 import argparse, sys, time
 import numpy as np
 import matplotlib
 
-def label(settings):
-    return (f"MSO5202D  |  V/div idx CH1={settings.get('vdiv_ch1')} "
-            f"CH2={settings.get('vdiv_ch2')}  |  timebase={settings.get('timebase')}  "
-            f"|  trig={settings.get('trigpos')}  status={settings.get('status')}")
+def fmt_vdiv(mv, vb=None):
+    if mv is None: return '?'
+    if vb == 0: return "2 mV or 10 V/div"   # VB=0 wraps: both extremes share it
+    return f"{mv/1000:g} V/div" if mv >= 1000 else f"{mv:g} mV/div"
+
+def fmt_tdiv(ns):
+    if ns is None: return '?'
+    for unit, scale in (('s', 1e9), ('ms', 1e6), ('µs', 1e3), ('ns', 1)):
+        if ns >= scale:
+            return f"{ns/scale:g} {unit}/div"
+    return f"{ns:g} ns/div"
+
+def fmt_level(mv):
+    if mv is None: return '?'
+    return f"{mv/1000:g} V" if abs(mv) >= 1000 else f"{mv:g} mV"
+
+def label(s):
+    return (f"MSO5202D  |  CH1 {fmt_vdiv(s.get('CH1-VDIV-mV'), s.get('VERT-CH1-VB'))}  "
+            f"CH2 {fmt_vdiv(s.get('CH2-VDIV-mV'), s.get('VERT-CH2-VB'))}  "
+            f"|  {fmt_tdiv(s.get('TDIV-ns'))}  |  trig state={s.get('TRIG-STATE')} "
+            f"level={fmt_level(s.get('TRIG-LEVEL-mV'))} f={s.get('TRIG-FREQUENCY', 0)/1000:g} Hz")
+
+CH_COLORS = ('#e6b400', '#0a84ff')          # CH1 yellow, CH2 blue (like the scope)
 
 def grab(scope):
+    """Read settings + one waveform block per displayed channel.
+    Returns ({ch: samples}, settings)."""
     from mso5202d import decode_settings
-    w = scope.read_waveform(0)
     s = decode_settings(scope.read_settings())
-    return np.frombuffer(w, dtype=np.uint8), s
+    waves = {}
+    for ch, disp in ((0, s['VERT-CH1-DISP']), (1, s['VERT-CH2-DISP'])):
+        if disp:
+            waves[ch] = np.frombuffer(scope.read_waveform(ch), dtype=np.uint8)
+    return waves, s
 
 def run_png(path, frames):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from mso5202d import Scope
     sc = Scope()
-    y, s = grab(sc)
+    waves, s = grab(sc)
     for _ in range(max(0, frames - 1)):        # warm up / latest frame
-        y, s = grab(sc)
+        waves, s = grab(sc)
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(np.arange(len(y)), y, lw=0.8, color='#0a84ff')
-    ax.set_ylim(0, 255); ax.set_xlim(0, len(y))
-    ax.set_xlabel("sample"); ax.set_ylabel("ADC counts (0-255)")
+    n = 0
+    for ch, y in waves.items():
+        ax.plot(np.arange(len(y)), y, lw=0.8, color=CH_COLORS[ch], label=f"CH{ch+1}")
+        n = max(n, len(y))
+    # Raw counts are inverted vs the screen (higher count = lower trace) —
+    # flip the Y axis so traces sit like they do on the scope display.
+    ax.set_ylim(255, 0); ax.set_xlim(0, n or 1)
+    ax.set_xlabel("sample"); ax.set_ylabel("ADC counts (0-255, screen-oriented)")
     ax.set_title(label(s), fontsize=9)
+    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     fig.tight_layout(); fig.savefig(path, dpi=110)
-    print(f"[+] saved {path}  ({len(y)} samples, min={int(y.min())} max={int(y.max())})")
+    for ch, y in waves.items():
+        print(f"[+] CH{ch+1}: {len(y)} samples, min={int(y.min())} max={int(y.max())}")
+    print(f"[+] saved {path}")
     sc.close()
 
 def run_live(max_frames):
@@ -60,26 +93,33 @@ def run_live(max_frames):
     from mso5202d import Scope
     sc = Scope()
     fig, ax = plt.subplots(figsize=(11, 5))
-    (line,) = ax.plot([], [], lw=0.8, color='#0a84ff')
-    ax.set_ylim(0, 255)
-    ax.set_xlabel("sample"); ax.set_ylabel("ADC counts (0-255)")
+    lines = [ax.plot([], [], lw=0.8, color=CH_COLORS[ch], label=f"CH{ch+1}")[0]
+             for ch in (0, 1)]
+    ax.set_ylim(255, 0)                  # inverted: match the scope's screen
+    ax.set_xlabel("sample"); ax.set_ylabel("ADC counts (0-255, screen-oriented)")
+    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     state = {'n': 0}
 
     def update(_):
         try:
-            y, s = grab(sc)
+            waves, s = grab(sc)
         except Exception as e:
-            ax.set_title(f"read error: {e}", fontsize=9); return line,
-        if len(y) == 0:                      # occasional empty read — keep last trace
-            return line,
-        line.set_data(np.arange(len(y)), y)
-        ax.set_xlim(0, len(y))
+            ax.set_title(f"read error: {e}", fontsize=9); return lines
+        n = 0
+        for ch, line in enumerate(lines):
+            y = waves.get(ch)
+            if y is None or len(y) == 0:     # off / empty read — keep last trace
+                continue
+            line.set_data(np.arange(len(y)), y)
+            n = max(n, len(y))
+        if n:
+            ax.set_xlim(0, n)
         ax.set_title(label(s), fontsize=9)
         state['n'] += 1
         if max_frames and state['n'] >= max_frames:
             plt.close(fig)
-        return line,
+        return lines
 
     # Keep a reference — a discarded FuncAnimation gets garbage-collected and
     # never renders.

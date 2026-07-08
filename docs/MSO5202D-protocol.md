@@ -9,7 +9,18 @@ and re-implement the driver is here.
 
 Everything below was decoded from two Wireshark/USBPcap captures of the vendor
 Windows app ("Scope 2.0.0.6") driving the scope, plus live experiments on the
-hardware. Captures live in `../captures/` (stripped to MSO-only traffic).
+hardware. Captures live in `../captures/` (stripped to MSO-only traffic):
+`mso5202d-session1/2.pcapng` (vendor app, Windows),
+`mso5202d-ch1-vdiv.pcapng` (Linux usbmon, 2026-07-08: our driver polling
+settings during a full CH1 V/div knob sweep 2 mV→10 V→2 mV — the capture that
+resolved the settings-blob alignment, §6), `mso5202d-timediv.pcapng`
+(same setup, full time/div knob sweep over both end stops — mapped the
+timebase indices, §6), `mso5202d-ch2-vdiv.pcapng` (clean CH2 V/div-only
+sweep — confirmed CH2 symmetry and that TRIG-VPOS is trigger-source-bound, §6),
+`mso5202d-combined.pcapng` (both channels, all four knob groups — resolved
+position/trigger-level units and the ps time fields, §6), and
+`mso5202d-2ch-readout.pcapng` (our driver alternating CH1/CH2 acquires — the
+dual-channel readout demonstration, §5).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -122,10 +133,15 @@ SET form is `selector | vlen | value…` (the selector doubles as the param id).
 Read-file form is `0x10 | 0x00 | <path>`.
 
 ### Payload — IN (scope → host)
-`payload = selectorEcho(1) | subtype(1) | data…`, where **`selectorEcho` = request
-selector OR'd with `0x80`** (`0x02`→`0x82`, `0x12`→`0x92`, `0x10`→`0x90`,
-`0x01`→`0x81`). `subtype` distinguishes content (`0x01`), end-marker (`0x02`),
-and size/ack (`0x00`) frames.
+`payload = selectorEcho(1) | data…`, where **`selectorEcho` = request selector
+OR'd with `0x80`** (`0x02`→`0x82`, `0x12`→`0x92`, `0x10`→`0x90`, `0x01`→`0x81`).
+
+For **file reads (`0x90`) and waveform acquisition (`0x82`/`0x92`)** the first
+data byte is a `subtype` distinguishing size/ack (`0x00`), content (`0x01`) and
+end-marker (`0x02`) frames. The **settings poll response (`0x81`) has NO subtype
+byte** — the 213 parameter bytes start immediately after the echo (its first
+byte was long misread as "subtype 0x01"; it is actually `[VERT-CH1-DISP] = 1`.
+Resolved 2026-07-08, see §6).
 
 ---
 
@@ -159,8 +175,10 @@ Per refresh the app runs (verified on hardware; samples confirmed as a 1 kHz cal
 square wave):
 
 ```
-OUT  53 04 00 12 01 00        ; select (value 0)     -> IN 53 04 00 92 01 00        (ack, subtype 01)
-OUT  53 04 00 02 01 00        ; latch / acquire       -> IN 53 07 00 82 00 00 00 0f 00  (subtype 00 = size; 0x0F00 = 3840)
+OUT  53 04 00 12 01 00        ; param 0x12 = 0 (NOT channel select; see below)
+                                                      -> IN 53 04 00 92 01 00        (ack, subtype 01)
+OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
+                                                      -> IN 53 07 00 82 00 00 00 0f 00  (subtype 00 = size; 0x0F00 = 3840)
                                                       -> IN 53 04 0f 82 01 00 <3840 samples>  (subtype 01 = data)
                                                       -> IN 53 04 00 82 02 00        (subtype 02 = end-marker)
 ```
@@ -168,56 +186,138 @@ OUT  53 04 00 02 01 00        ; latch / acquire       -> IN 53 07 00 82 00 00 00
 - **Samples: 8-bit unsigned, 1 byte each**, 3840 per block (block size depends on
   store-depth). The waveform frame payload is `82 01 00 <3840 bytes>`; the 3840
   data bytes follow the 3-byte `82 01 00` header.
+- **Sample polarity is INVERTED relative to the screen**: a larger count = a
+  lower trace (confirmed on hardware: CH2 parked at −0.64 div read ≈192, i.e.
+  above mid-scale 128; the on-screen up/down order of two traces is the mirror
+  of their count order). Display code should flip (e.g. plot `255 − sample` or
+  invert the Y axis).
 - The size frame (`53 07 00 82 00 00 00 0f 00`) reports the byte count as a little
   value inside `00 00 00 0f 00` → `0x0F00 = 3840`.
 - Raw counts only — **no scale is embedded**. Two levels of a cal square wave read
   as ≈`0x2E` low / ≈`0xED` high (0–255 full range). Converting counts→volts needs
   the calibration table (§8).
-- **OPEN — 2-channel readout:** the `0x12` param was assumed to select the readout
-  channel, but on hardware `ch=0` and `ch=1` return **byte-for-byte identical
-  data**. So `0x12` does *not* switch the channel (or the block is single-channel /
-  interleaved and needs de-interleaving). True 2-channel capture is unsolved.
+- **2-channel readout — SOLVED (2026-07-08):** the channel is selected by the
+  **acquire value byte**: `02 01 00` = CH1, `02 01 01` = CH2. Verified on
+  hardware with CH2's probe disconnected (CH1 returned the square wave, CH2 its
+  flat line); `../captures/mso5202d-2ch-readout.pcapng` records 6 alternating
+  CH1/CH2 acquire pairs with their distinct 3840-sample responses. The `0x12` param is **not** a channel select — early tests
+  varying it returned identical data because it does something else entirely
+  (the vendor app toggles it `1` → `0` around every refresh; run/hold?).
+  Values `12 01 02`/`03` make the next acquire return nothing. Note the vendor
+  captures (`session1/2`) were taken with **CH2 display off**, which is why
+  they never showed a CH2 fetch.
+- **OPEN — counts↔volts scaling:** the transfer amplitude does not track the
+  display V/div (a 5 V cal square read ≈70 counts p-p at 2 V/div but ≈233 p-p
+  in an earlier read at a different setting). A **flat** (no-signal) trace
+  follows `count = 128 − POS` exactly (verified at POS −64 → 192 and
+  POS +62 → 63; i.e. 1 count = 1/100 div, inverted), while a **live** 5 V
+  square at 2 V/div spans only ≈28 counts/div — flat and live traces obey
+  different scale factors. The transfer gain/offset model needs dedicated
+  experiments (§8).
 
 ---
 
-## 6. Handshake: settings-state blob (poll selector 0x01)
+## 6. Handshake: settings-state blob (poll selector 0x01) — alignment RESOLVED
 
-Polling `0x01` returns a single 218-byte frame `53 d7 00 81 01 <213 data bytes> <ck>`
-(`selectorEcho 0x81`, `subtype 0x01`). The app polls this continuously to mirror
-the scope's live state — **this is how the app shows the correct V/div and
+Polling `0x01` returns a single 218-byte frame `53 d7 00 81 <213 param bytes> <ck>`
+(`selectorEcho 0x81`, **no subtype byte**). The app polls this continuously to
+mirror the scope's live state — **this is how the app shows the correct V/div and
 time/div: it reads them from this blob, it does NOT compute them from the sample
 data.** Changing a front-panel knob updates the blob within one poll.
 
-The 213 data bytes correspond to the `/protocol.inf` parameter list (its
-`[TOTAL] 213`). **However, the exact byte alignment is NOT yet fully resolved:**
-- The first data byte is `0x09`, but the first parameter `[VERT-CH1-DISP]` should
-  be a 0/1 display flag — so the parameter region does **not** begin at the very
-  first data byte; there is an undetermined prefix/header inside the blob.
-- Summing `/protocol.inf` widths naively (assuming params start at data byte 0)
-  does not line up with the offsets that were empirically observed to change.
+**The alignment is fully resolved (2026-07-08):** the 213 data bytes are exactly
+the `/protocol.inf` parameter list (`[TOTAL] 213`, Appendix A), starting
+**immediately after the `0x81` echo** — i.e. at **raw frame offset 4** — with no
+prefix and no reordering. The old "unmodeled prefix" mystery was a misparse: the
+first data byte (`0x01`) was taken to be a frame subtype, when it is actually the
+first parameter `[VERT-CH1-DISP] = 1` (CH1 shown). Offset of any field = `4 +`
+the sum of the widths of all parameters before it, multi-byte fields
+little-endian (positions/levels signed).
 
-**Empirically observed** (by diffing 10 blob snapshots while V/div and timebase
-were changed on the front panel; offsets are into the **raw frame**, which begins
-`53 d7 00 81 01`):
+Proof — a 60 s capture of a full CH1 V/div knob sweep, 2 mV → 10 V and back
+(`captures/mso5202d-ch1-vdiv.pcapng`, 323 settings frames): across the whole
+sweep **only four raw offsets changed**, and each lands exactly on the computed
+offset of a field that *should* react:
 
-| raw offset(s) | observed values | notes |
+| raw offset | computed field | observed |
 |---|---|---|
-| 5 | 9, 10, 0, 8 | changes with acquisition/trigger activity |
-| 24 | 2, 3 | 2-state field |
-| 29–30 (LE16 signed) | 33, 3, −7, 83 | a signed position (trigger-related) |
-| 31–33 (LE) | 1,000,000 ↔ 1,203,000 ↔ 0 | a value field (time/holdtime/timebase-related) |
-| 159, 160 | stepped 0x10→0x11→0x12 together | index field(s) that track a scaling knob |
-| 217 (last) | — | frame checksum |
+| 5 | `[VERT-CH1-VB]` | V/div index, one step per click — see table below |
+| 24 | `[TRIG-STATE]` | 3→2→3 blips as the trigger dropped in/out at extreme V/div |
+| 29–30 | `[TRIG-VPOS]` (LE16) | trigger level in **screen-relative units**: rescaled as 1/V-div on every click because the absolute trigger voltage stayed fixed (`VPOS = 62000 // vdiv_mV` throughout that session) |
+| — | (nothing else moved) | `[VERT-CH2-VB]`@15 stayed 9, `[HORIZ-TB]`@159 stayed 15 ✓ |
 
-The working driver reads V/div-ish indices at raw 159/160 and a timebase-ish value
-at raw 31–33, and those values were **consistent with the capture baseline**
-(indices `0x0F`, value `1,000,000`). But mapping each raw offset to a *named*
-`/protocol.inf` field is the main unfinished piece — see §8 for the method to
-finish it. Treat the named interpretations above as provisional.
+Additional confirmations from the same frames: `[VERT-CH2-DISP]`@14 = 0 (CH2 was
+off), `[TRIG-SRC]`@26 = 0 (CH1), `[TRIG-FREQUENCY]`@31–38 (LE64) = 1,000,000 =
+the 1 kHz cal signal **in mHz** (this had been mislabeled "timebase"), and
+`[HORIZ-TB]`@159 / `[HORIZ-WIN-TB]`@160 are the real timebase indices (mislabeled
+"vdiv" before; their index→time/div table is still unmapped, see §8).
 
-`decode_settings()` in `mso5202d.py` currently exposes: `status@5`, `field24@24`,
-`trigpos@29`, `timebase@31`, `vdiv_ch1@159`, `vdiv_ch2@160` — using these raw
-offsets. If/when the alignment is resolved, rename them to the correct fields.
+**`[VERT-CHx-VB]` → V/div** (verified over the full range on hardware):
+
+| VB | V/div | VB | V/div | VB | V/div |
+|---|---|---|---|---|---|
+| 0 | 2 mV | 4 | 50 mV | 8 | 1 V |
+| 1 | 5 mV | 5 | 100 mV | 9 | 2 V |
+| 2 | 10 mV | 6 | 200 mV | 10 | 5 V |
+| 3 | 20 mV | 7 | 500 mV | 0 | **10 V (quirk: wraps mod 11!)** |
+
+The 10 V/div position re-uses VB=0 — a firmware quirk. If it matters, a nonzero
+`[TRIG-VPOS]` disambiguates (it scales as 1/V-div for a fixed trigger level).
+The table and the wrap quirk were confirmed **identical for CH2** by a clean CH2
+V/div sweep (`captures/mso5202d-ch2-vdiv.pcapng`, 2026-07-08): across 324
+frames the **only** changing offset was `[VERT-CH2-VB]`@15 — notably
+`[TRIG-VPOS]` did **not** move, so VPOS is bound to the **trigger source** (CH1
+here), not to the channel being adjusted.
+
+**Vertical position & trigger level — RESOLVED** (combined-knobs capture
+`captures/mso5202d-combined.pcapng`, 2026-07-08: both channels on; V/div,
+vertical position, time/div and horizontal position all exercised):
+
+- `[VERT-CHx-POS]` (signed LE16) is the channel's vertical position in
+  **1/100-division units** (knob fine step = 8 = 0.08 div).
+- `[TRIG-VPOS]` (signed LE16) = **`[VERT-CHsrc-POS]` + trigger level ⁄ V-div ×
+  100** — i.e. the trigger marker's screen position in the same 1/100-div
+  units. Proof: over a CH1 V/div sweep 5 V→100 mV with CH1-POS = −4,
+  `(VPOS − POS) × vdiv/100` = 780 mV **constant at every step**; VPOS tracked
+  the CH1 position knob exactly 1:1; CH2's knobs never moved it. (This also
+  retro-explains the `62000 // vdiv_mV` fit in the first sweep: level 620 mV,
+  POS 0.) Derived `TRIG-LEVEL-mV` is computed in `decode_settings()`.
+
+**8-byte time fields are PICOSECONDS.** `[TRIG-HOLDTIME-MIN]` = 100 000 =
+100 ns and `[TRIG-HOLDTIME-MAX]` = 10¹³ = 10 s — exactly the scope's holdoff
+limits. `[HORIZ-TRIGTIME]`@162–169 is the **horizontal trigger position
+(delay) in ps**: in the combined capture each click moved it by ≈0.3 div
+worth of time at every timebase tried (e.g. ±240 µs at 800 µs/div, ±1.2 ms at
+4 ms/div). The `TRIG-*-TIME` family (pulse/slope/overtime) reads sanely in ps
+too (e.g. 500 000 = 500 ns defaults).
+
+**`[HORIZ-TB]` / `[HORIZ-WIN-TB]` → time/div** (verified end stop to end stop by
+a full time/div knob sweep, `captures/mso5202d-timediv.pcapng`, 2026-07-08; only
+raw@159, raw@160 and `[TRIG-STATE]`@24 changed across 810 frames):
+
+- The knob has **32 positions** = the scope's 2 ns…40 s range in the **2-4-8
+  sequence** (2, 4, 8, 20, 40, 80, 200 ns, …, 8, 20, 40 s). Confirmed against
+  the on-screen readout — it is NOT the usual 1-2-4/1-2-5 sequence (8 ns, not
+  10 ns; 80 µs, not 100 µs; …).
+- **`[HORIZ-WIN-TB]`@160 tracks the knob over the full index range 0..31**
+  (0 = 2 ns/div … 31 = 40 s/div).
+- **`[HORIZ-TB]`@159 is the real acquisition timebase and clamps at index 6**
+  (200 ns/div): for the six fastest settings (80 ns…2 ns) only WIN-TB keeps
+  falling — the fast timebases are zoom/interpolation over a 200 ns/div
+  acquisition (a known trait of this scope family). At index ≥ 6 the two move
+  in lockstep (transient ±1 skews right around the clamp boundary).
+- `index → ns`: `TB_TO_NS` table in `mso5202d.py` ((2, 4, 8)·10ⁿ).
+
+**`[TRIG-STATE]` observed values** (all sweep captures): `3` = triggered/run,
+`6` = transient flicker while re-arming (appears in bursts when the signal
+drops out of range mid-adjustment), `4` = **scan/roll mode**, persistent at
+slow timebases (onset varies with trigger activity — seen from 80 ms/div in
+one session, from 2 s/div in another). Enum not exhaustively mapped.
+
+`decode_settings()` in `mso5202d.py` now decodes the **entire blob** into named
+`/protocol.inf` fields (plus derived `CH1-VDIV-mV`/`CH2-VDIV-mV`, `TDIV-ns`
+(knob, from WIN-TB) and `TDIV-ACQ-ns` (real acquisition TB)), driven by a
+`SETTINGS_PARAMS` (name, width) table transcribed from Appendix A.
 
 ---
 
@@ -231,36 +331,65 @@ offsets. If/when the alignment is resolved, rename them to the correct fields.
   IN-before-write it fails.
 - File-read handshake (content + end-marker) and the full contents of
   `/protocol.inf` and `/keyprotocol.inf`.
-- Poll → 218-byte settings blob.
+- Poll → 218-byte settings blob, and its **full field ↔ offset mapping**: the
+  213 param bytes are the `/protocol.inf` list verbatim, starting at raw
+  offset 4 (§6; proven by the CH1-V/div sweep capture, 2026-07-08). Includes
+  the `[VERT-CHx-VB]` → V/div table (2 mV…10 V, with the 10 V → VB=0 wrap
+  quirk; verified on **both channels**), `[VERT-CHx-POS]` and `[TRIG-VPOS]` in
+  signed 1/100-div units (`VPOS = POS_src + level/vdiv×100`), 8-byte time
+  fields in **picoseconds** (incl. `[HORIZ-TRIGTIME]` = horizontal delay), and
+  `[TRIG-FREQUENCY]` in mHz.
 - Waveform handshake and 8-bit sample format (1 kHz cal square wave confirmed).
 
+- `[HORIZ-TB]`/`[HORIZ-WIN-TB]` index → time/div table (2 ns…40 s, **2-4-8**
+  sequence, 32 steps; WIN-TB = knob, HORIZ-TB clamps at 200 ns — §6, proven by
+  the time/div sweep capture + on-screen readings).
+
+- **2-channel readout**: acquire value byte selects the channel (`02 01 <ch>`,
+  0 = CH1, 1 = CH2) — verified square-vs-flat on hardware (§5).
+
 **Inferred / open (see §8):**
-- Exact settings-blob field ↔ offset mapping (there's an unmodeled prefix).
-- 2-channel readout mechanism (`0x12` does not switch channels).
+- Enum-coded field values (coupling, trigger modes, `[TRIG-STATE]` beyond
+  {3 run, 4 scan, 6 re-arm}, …).
+- Meaning of param `0x12` (vendor toggles it 1→0 per refresh; run/hold?).
 - Host-side control (likely key-press events via `/keyprotocol.inf`, unconfirmed).
-- counts→volts and index→real-units calibration (needs a scope cal file).
+- counts→volts transfer scaling (does not track display V/div — §5) and
+  calibration (may need a scope cal file).
 
 ---
 
 ## 8. Next reverse-engineering steps
 
-1. **Resolve the settings-blob alignment.** Programmatically search for a prefix
-   length `P` and (if needed) a field reordering such that known values land in
-   the right `/protocol.inf` fields — e.g. force a *single* known change on the
-   scope (only CH1 V/div) and confirm only `[VERT-CH1-VB]`'s computed offset moves.
-   Repeat for `[HORIZ-TB]`, `[TRIG-VPOS]`. This nails every field.
+1. ~~**Resolve the settings-blob alignment.**~~ **DONE (2026-07-08)** — exactly by
+   the method described here: a single-knob CH1 V/div sweep capture
+   (`captures/mso5202d-ch1-vdiv.pcapng`) moved only `[VERT-CH1-VB]`,
+   `[TRIG-STATE]` and `[TRIG-VPOS]` at their computed offsets → params start at
+   raw offset 4, no prefix (§6). The *timebase* sweep followed the same day
+   (`captures/mso5202d-timediv.pcapng`) and mapped `[HORIZ-TB]`/`[HORIZ-WIN-TB]`
+   → time/div (§6); a CH2 sweep confirmed channel symmetry, and a combined
+   both-channels/all-knobs capture resolved position + trigger-level units
+   (1/100 div) and the ps time fields (§6). **Remaining follow-up of the same
+   shape:** toggle coupling / trigger-mode / acquire menus to enumerate the
+   enum-coded fields.
 2. **Dump more scope files** via selector `0x10`: try `/system.inf`, `/cal.inf`,
    `/calibration.inf`, `/factory.inf`, a directory listing, etc. One of these
    should hold the **counts→volts / index→"1 V/div" / timebase→seconds** tables.
    (We can now do this directly with `mso5202d.py`.)
-3. **Crack 2-channel readout:** try other values/params for the pre-acquire
-   select; check whether the 3840-byte block is actually interleaved (de-interleave
-   even/odd) or whether a separate command fetches CH2.
+3. ~~**Crack 2-channel readout**~~ **DONE (2026-07-08)** — the acquire value
+   byte is the channel: `02 01 00` = CH1, `02 01 01` = CH2 (§5). Follow-up:
+   figure out the **counts↔volts transfer scaling** (it does not track the
+   display V/div; vary V-div/position with a known signal and model
+   gain/offset), and what param `0x12` actually does.
 4. **Host-side control:** find the command that presses a `/keyprotocol.inf` key
    (likely another selector with a key id), enabling PC control of V/div, timebase,
    trigger, autoset, single-seq, etc. A fresh capture of the app *changing settings
    from the PC* (if it supports it) would reveal this directly.
-5. **Sample rate / timebase units** so the X axis becomes real seconds.
+5. **Sample rate** so the X axis becomes real seconds: time/div is now known
+   (§6) — what's left is how many divisions (or seconds) the 3840-sample block
+   spans. **Preliminary:** counting 1 kHz cal cycles per block gives ~4 cycles
+   at 200 µs/div and ~8 at 400 µs/div → the block spans ≈ 20 divisions,
+   i.e. **192 samples/div** (needs confirming at more timebases / vs the
+   store-depth setting).
 
 ---
 

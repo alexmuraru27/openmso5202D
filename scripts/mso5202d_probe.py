@@ -107,8 +107,8 @@ class Scope:
         return b'\x53\x00\x00' + p           # re-prefix a dummy SOF+len -> raw offsets
 
     def read_waveform(self, ch=0) -> bytes:
-        self.transact(bytes([0x12, 0x01, ch]))           # select channel (ack)
-        frame = self.transact(bytes([0x02, 0x01, 0x00])) # acquire -> size frame (subtype 0x00)
+        self.transact(bytes([0x12, 0x01, 0x00]))         # param 0x12=0 (run/hold?; ack)
+        frame = self.transact(bytes([0x02, 0x01, ch]))   # acquire CHANNEL ch -> size frame
         data = b''
         for _ in range(5):                               # size(00) -> data(01) -> end(02)
             st = frame[1] if len(frame) > 1 else 0xff
@@ -124,14 +124,18 @@ class Scope:
 
 # --- decode ----------------------------------------------------------------
 def decode_settings(raw: bytes):
-    def u(o, n): return int.from_bytes(raw[o:o+n], 'little')
+    # Key fields only, at their resolved raw-frame offsets: the blob is the
+    # /protocol.inf parameter list starting at raw offset 4 (right after the
+    # 0x81 echo — no subtype byte). Full decode lives in mso5202d.py; spec in
+    # MSO5202D-protocol.md §6.
+    def u(o, n, signed=False): return int.from_bytes(raw[o:o+n], 'little', signed=signed)
     return {
-        'status@5':     raw[5]  if len(raw) > 5   else None,
-        'field@24':     raw[24] if len(raw) > 24  else None,
-        'trigpos@29':   struct.unpack_from('<h', raw, 29)[0] if len(raw) > 30 else None,
-        'timebase@31':  u(31, 3) if len(raw) > 33 else None,
-        'vdiv_ch1@159': raw[159] if len(raw) > 159 else None,
-        'vdiv_ch2@160': raw[160] if len(raw) > 160 else None,
+        'VERT-CH1-VB@5':    raw[5]  if len(raw) > 5   else None,   # 0=2mV..10=5V (10V wraps to 0)
+        'TRIG-STATE@24':    raw[24] if len(raw) > 24  else None,
+        'TRIG-VPOS@29':     u(29, 2, True) if len(raw) > 30 else None,
+        'TRIG-FREQ@31':     u(31, 8) if len(raw) > 38 else None,   # mHz (1 kHz cal -> 1000000)
+        'HORIZ-TB@159':     raw[159] if len(raw) > 159 else None,  # acq timebase idx (clamps at 6 = 200ns)
+        'HORIZ-WIN-TB@160': raw[160] if len(raw) > 160 else None,  # knob idx 0..31 = 2ns..40s (1-2-4); table in mso5202d.py
     }
 
 def preview(samples, width=120, rows=8):

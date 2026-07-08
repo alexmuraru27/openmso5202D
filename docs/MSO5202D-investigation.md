@@ -111,11 +111,21 @@ Running:
 ## 5. Recommended next actions
 
 See `MSO5202D-protocol.md` §8 for the detailed reverse-engineering to-do. In brief:
-1. **Resolve the settings-blob field alignment** (there is an unmodeled prefix; the
-   naive `/protocol.inf` width-sum does not line up with observed offsets).
+1. ~~**Resolve the settings-blob field alignment**~~ — **DONE 2026-07-08** via a
+   CH1 V/div knob-sweep capture (`captures/mso5202d-ch1-vdiv.pcapng`): the params
+   start right after the `0x81` echo (raw offset 4), no prefix; the supposed
+   "subtype 0x01" was `[VERT-CH1-DISP]=1`. See protocol doc §6. A time/div sweep
+   (`captures/mso5202d-timediv.pcapng`) then mapped `[HORIZ-TB]`/`[HORIZ-WIN-TB]`
+   → 2 ns…40 s (2-4-8 sequence, 32 steps; acquisition TB clamps at 200 ns), and a
+   combined all-knobs capture (`captures/mso5202d-combined.pcapng`) resolved
+   vertical-position/trigger-level units (1/100 div) and the picosecond time
+   fields. Same method still pending for the menu enums.
 2. **Dump more scope files** via selector `0x10` (`/system.inf`, `/cal.inf`, …) to
    find the counts→volts / index→units **calibration table** — we can do this now
    directly with `scripts/mso5202d.py`.
-3. **Crack 2-channel readout** (`0x12` does not switch channels).
+3. ~~**Crack 2-channel readout**~~ — **DONE 2026-07-08**: the acquire value byte
+   selects the channel (`02 01 00` = CH1, `02 01 01` = CH2); `0x12` is
+   something else (run/hold?). See protocol doc §5. Counts↔volts transfer
+   scaling still open.
 4. **Host-side control:** find the command that presses a `/keyprotocol.inf` key
    (likely how the PC sets V/div, timebase, trigger, autoset, …).

@@ -11,7 +11,7 @@ write. File reads return a content frame (subtype 0x01) + an end-marker frame
 Needs a udev rule granting access to 049f:505a to run without root (see
 70-mso5202d.rules); otherwise run as root.
 """
-import sys, struct, time, threading
+import struct, time, threading
 import usb.core, usb.util
 
 VID, PID = 0x049F, 0x505A
@@ -118,19 +118,25 @@ class Scope:
         return data
 
     def read_settings(self) -> bytes:
-        """poll selector 0x01 -> settings-state blob. Returns a byte string on
-        which the documented RAW offsets (status@5, timebase@31, vdiv@159/160) apply."""
-        p = self.transact(b'\x01')      # payload = 81 01 <data...>
-        return b'\x53\x00\x00' + p      # re-prefix dummy SOF+len so raw offsets match
+        """Poll selector 0x01 -> settings payload: selectorEcho 0x81 followed
+        directly by the 213 /protocol.inf parameter bytes (no subtype byte —
+        resolved 2026-07-08, see MSO5202D-protocol.md §6). Feed to
+        decode_settings()."""
+        return self.transact(b'\x01')
 
     def read_waveform(self, ch=0, retries=2) -> bytes:
+        """Acquire one 3840-sample block. ch: 0 = CH1, 1 = CH2 — the channel is
+        selected by the ACQUIRE value byte (02 01 <ch>), NOT by param 0x12
+        (which the vendor app toggles 1->0 around each refresh; run/hold?).
+        Verified on hardware 2026-07-08: with CH2's probe disconnected,
+        02 01 00 returns CH1's square wave and 02 01 01 returns CH2's flat line."""
         # The acquire is a multi-frame sequence; retry the whole thing (with a
         # resync) if it times out or returns no data frame, so transient USB
         # timeouts self-heal instead of surfacing to the caller.
         for _ in range(retries + 1):
             try:
-                self.transact(bytes([0x12, 0x01, ch]))            # select (ack)
-                frame = self.transact(bytes([0x02, 0x01, 0x00]))  # acquire -> size(00)
+                self.transact(bytes([0x12, 0x01, 0x00]))          # 12=0 (vendor: run/live?)
+                frame = self.transact(bytes([0x02, 0x01, ch]))    # acquire ch -> size(00)
                 data = b''
                 for _ in range(5):
                     st = frame[1] if len(frame) > 1 else 0xFF
@@ -145,27 +151,124 @@ class Scope:
         return b''
 
 
-def decode_settings(raw: bytes) -> dict:
-    # NOTE: these are EMPIRICAL raw-frame offsets (frame begins 53 d7 00 81 01).
-    # The exact field<->offset alignment vs /protocol.inf is NOT fully resolved
-    # (there is an unmodeled prefix in the blob) — the names below are provisional.
-    # See docs/MSO5202D-protocol.md §6 and §8.
-    def u(o, n): return int.from_bytes(raw[o:o+n], 'little')
-    g = lambda o: raw[o] if len(raw) > o else None
-    return {
-        'status':    g(5),
-        'field24':   g(24),
-        'trigpos':   struct.unpack_from('<h', raw, 29)[0] if len(raw) > 30 else None,
-        'timebase':  u(31, 3) if len(raw) > 33 else None,
-        'vdiv_ch1':  g(159),
-        'vdiv_ch2':  g(160),
-    }
+# /protocol.inf parameter list (name, byte width) in wire order. The settings
+# payload is exactly: selectorEcho 0x81 | these 213 bytes — no subtype, no
+# prefix. Alignment resolved 2026-07-08 by diffing a CH1-V/div knob sweep
+# (captures/mso5202d-ch1-vdiv.pcapng); see MSO5202D-protocol.md §6.
+SETTINGS_PARAMS = [
+    ('VERT-CH1-DISP',1),('VERT-CH1-VB',1),('VERT-CH1-COUP',1),('VERT-CH1-20MHZ',1),
+    ('VERT-CH1-FINE',1),('VERT-CH1-PROBE',1),('VERT-CH1-RPHASE',1),('VERT-CH1-CNT-FINE',1),
+    ('VERT-CH1-POS',2),
+    ('VERT-CH2-DISP',1),('VERT-CH2-VB',1),('VERT-CH2-COUP',1),('VERT-CH2-20MHZ',1),
+    ('VERT-CH2-FINE',1),('VERT-CH2-PROBE',1),('VERT-CH2-RPHASE',1),('VERT-CH2-CNT-FINE',1),
+    ('VERT-CH2-POS',2),
+    ('TRIG-STATE',1),('TRIG-TYPE',1),('TRIG-SRC',1),('TRIG-MODE',1),('TRIG-COUP',1),
+    ('TRIG-VPOS',2),('TRIG-FREQUENCY',8),
+    ('TRIG-HOLDTIME-MIN',8),('TRIG-HOLDTIME-MAX',8),('TRIG-HOLDTIME',8),
+    ('TRIG-EDGE-SLOPE',1),
+    ('TRIG-VIDEO-NEG',1),('TRIG-VIDEO-PAL',1),('TRIG-VIDEO-SYN',1),('TRIG-VIDEO-LINE',2),
+    ('TRIG-PULSE-NEG',1),('TRIG-PULSE-WHEN',1),('TRIG-PULSE-TIME',8),
+    ('TRIG-SLOPE-SET',1),('TRIG-SLOPE-WIN',1),('TRIG-SLOPE-WHEN',1),
+    ('TRIG-SLOPE-V1',2),('TRIG-SLOPE-V2',2),('TRIG-SLOPE-TIME',8),
+    ('TRIG-SWAP-CH1-TYPE',1),('TRIG-SWAP-CH1-MODE',1),('TRIG-SWAP-CH1-COUP',1),
+    ('TRIG-SWAP-CH1-EDGE-SLOPE',1),('TRIG-SWAP-CH1-VIDEO-NEG',1),('TRIG-SWAP-CH1-VIDEO-PAL',1),
+    ('TRIG-SWAP-CH1-VIDEO-SYN',1),('TRIG-SWAP-CH1-VIDEO-LINE',2),
+    ('TRIG-SWAP-CH1-PULSE-NEG',1),('TRIG-SWAP-CH1-PULSE-WHEN',1),('TRIG-SWAP-CH1-PULSE-TIME',8),
+    ('TRIG-SWAP-CH1-OVERTIME-NEG',1),('TRIG-SWAP-CH1-OVERTIME-TIME',8),
+    ('TRIG-SWAP-CH2-TYPE',1),('TRIG-SWAP-CH2-MODE',1),('TRIG-SWAP-CH2-COUP',1),
+    ('TRIG-SWAP-CH2-EDGE-SLOPE',1),('TRIG-SWAP-CH2-VIDEO-NEG',1),('TRIG-SWAP-CH2-VIDEO-PAL',1),
+    ('TRIG-SWAP-CH2-VIDEO-SYN',1),('TRIG-SWAP-CH2-VIDEO-LINE',2),
+    ('TRIG-SWAP-CH2-PULSE-NEG',1),('TRIG-SWAP-CH2-PULSE-WHEN',1),('TRIG-SWAP-CH2-PULSE-TIME',8),
+    ('TRIG-SWAP-CH2-OVERTIME-NEG',1),('TRIG-SWAP-CH2-OVERTIME-TIME',8),
+    ('TRIG-OVERTIME-NEG',1),('TRIG-OVERTIME-TIME',8),
+    ('HORIZ-TB',1),('HORIZ-WIN-TB',1),('HORIZ-WIN-STATE',1),('HORIZ-TRIGTIME',8),
+    ('MATH-DISP',1),('MATH-MODE',1),('MATH-FFT-SRC',1),('MATH-FFT-WIN',1),
+    ('MATH-FFT-FACTOR',1),('MATH-FFT-DB',1),
+    ('DISPLAY-MODE',1),('DISPLAY-PERSIST',1),('DISPLAY-FORMAT',1),('DISPLAY-CONTRAST',1),
+    ('DISPLAY-MAXCONTRAST',1),('DISPLAY-GRID-KIND',1),('DISPLAY-GRID-BRIGHT',1),
+    ('DISPLAY-MAXGRID-BRIGHT',1),
+    ('ACQURIE-MODE',1),('ACQURIE-AVG-CNT',1),('ACQURIE-TYPE',1),('ACQURIE-STORE-DEPTH',1),
+    ('MEASURE-ITEM1-SRC',1),('MEASURE-ITEM1',1),('MEASURE-ITEM2-SRC',1),('MEASURE-ITEM2',1),
+    ('MEASURE-ITEM3-SRC',1),('MEASURE-ITEM3',1),('MEASURE-ITEM4-SRC',1),('MEASURE-ITEM4',1),
+    ('MEASURE-ITEM5-SRC',1),('MEASURE-ITEM5',1),('MEASURE-ITEM6-SRC',1),('MEASURE-ITEM6',1),
+    ('MEASURE-ITEM7-SRC',1),('MEASURE-ITEM7',1),('MEASURE-ITEM8-SRC',1),('MEASURE-ITEM8',1),
+    ('CONTROL-TYPE',1),('CONTROL-MENUID',1),('CONTROL-DISP-MENU',1),
+    ('LA-SWI',1),('LA-CHANNEL-STATE',2),('LA-CURRENT-CHANNEL',1),
+    ('LA-D7-D0-THRESHOLD-TYPE',1),('LA-D15-D8-THRESHOLD-TYPE',1),
+    ('LA-D7-D0-USER-THRESHOLD-VOLT',2),('LA-D15-D8-USER-THRESHOLD-VOLT',2),
+]
+assert sum(w for _, w in SETTINGS_PARAMS) == 213    # == /protocol.inf [TOTAL]
+
+# Units (verified on hardware, see MSO5202D-protocol.md §6):
+#  - 8-byte time fields (HOLDTIME*, *-TIME, HORIZ-TRIGTIME) are PICOSECONDS
+#    (HOLDTIME-MIN 100000 = 100 ns, MAX 1e13 = 10 s = the holdoff limits).
+#  - VERT-CHx-POS and TRIG-VPOS are signed 1/100-DIVISION units;
+#    TRIG-VPOS = VERT-CHsrc-POS + trig_level/vdiv*100.
+#  - TRIG-FREQUENCY is mHz (frequency counter).
+# Multi-byte fields that are plausibly signed (positions / levels).
+_SIGNED = {'VERT-CH1-POS', 'VERT-CH2-POS', 'TRIG-VPOS', 'TRIG-SLOPE-V1',
+           'TRIG-SLOPE-V2', 'LA-D7-D0-USER-THRESHOLD-VOLT',
+           'LA-D15-D8-USER-THRESHOLD-VOLT'}
+
+# VERT-CHx-VB index -> mV/div, verified on hardware over a full 2mV..10V sweep.
+# Quirk: 10 V/div also stores VB=0 (wraps mod 11) — at that setting TRIG-VPOS
+# can disambiguate if the trigger level is nonzero.
+VB_TO_MV = {0: 2, 1: 5, 2: 10, 3: 20, 4: 50, 5: 100,
+            6: 200, 7: 500, 8: 1000, 9: 2000, 10: 5000}
+
+# HORIZ-TB / HORIZ-WIN-TB index -> time/div in ns. 2-4-8 sequence over the
+# scope's 2 ns..40 s range: 32 steps, verified end stop to end stop on hardware
+# (captures/mso5202d-timediv.pcapng) and anchored against the on-screen
+# readings (8 ns, 80 ns, 800 ns, ... — NOT a 1-2-4/1-2-5 sequence).
+# HORIZ-WIN-TB follows the time/div knob over the full 0..31; HORIZ-TB (the
+# real acquisition timebase) clamps at 6 (200 ns/div) — the 2..80 ns settings
+# are zoom/interpolation.
+TB_TO_NS = {
+    0: 2, 1: 4, 2: 8, 3: 20, 4: 40, 5: 80, 6: 200, 7: 400,
+    8: 800, 9: 2_000, 10: 4_000, 11: 8_000, 12: 20_000, 13: 40_000,
+    14: 80_000, 15: 200_000, 16: 400_000, 17: 800_000, 18: 2_000_000,
+    19: 4_000_000, 20: 8_000_000, 21: 20_000_000, 22: 40_000_000,
+    23: 80_000_000, 24: 200_000_000, 25: 400_000_000, 26: 800_000_000,
+    27: 2_000_000_000, 28: 4_000_000_000, 29: 8_000_000_000,
+    30: 20_000_000_000, 31: 40_000_000_000,
+}
+
+
+def decode_settings(payload: bytes) -> dict:
+    """Decode a settings payload from read_settings() (0x81 echo + 213 param
+    bytes) into named /protocol.inf fields, plus derived 'CH1-VDIV-mV' /
+    'CH2-VDIV-mV' (None if the VB index is unknown)."""
+    if len(payload) != 214 or payload[0] != 0x81:
+        raise ValueError(f"not a settings payload: len={len(payload)} "
+                         f"first={payload[:1].hex()}")
+    d, off = {}, 1                       # params start right after the echo
+    for name, width in SETTINGS_PARAMS:
+        d[name] = int.from_bytes(payload[off:off+width], 'little',
+                                 signed=name in _SIGNED)
+        off += width
+    d['CH1-VDIV-mV'] = VB_TO_MV.get(d['VERT-CH1-VB'])
+    d['CH2-VDIV-mV'] = VB_TO_MV.get(d['VERT-CH2-VB'])
+    d['TDIV-ns'] = TB_TO_NS.get(d['HORIZ-WIN-TB'])       # knob / displayed
+    d['TDIV-ACQ-ns'] = TB_TO_NS.get(d['HORIZ-TB'])       # real acquisition TB
+    # Trigger level: TRIG-VPOS = source-channel POS + level in 1/100-div units.
+    src = d['TRIG-SRC']
+    if src in (0, 1):
+        vdiv = d['CH1-VDIV-mV'] if src == 0 else d['CH2-VDIV-mV']
+        pos = d['VERT-CH1-POS'] if src == 0 else d['VERT-CH2-POS']
+        d['TRIG-LEVEL-mV'] = (d['TRIG-VPOS'] - pos) * vdiv / 100 if vdiv else None
+    else:
+        d['TRIG-LEVEL-mV'] = None                        # ext/alt source: unknown
+    return d
 
 
 if __name__ == '__main__':
     s = Scope()
     print("/protocol.inf head:\n", s.read_file('/protocol.inf').decode('latin1')[:200])
-    print("settings:", decode_settings(s.read_settings()))
+    d = decode_settings(s.read_settings())
+    print("settings:", {k: d[k] for k in (
+        'VERT-CH1-DISP', 'VERT-CH1-VB', 'CH1-VDIV-mV', 'VERT-CH2-DISP',
+        'CH2-VDIV-mV', 'TRIG-STATE', 'TRIG-VPOS', 'TRIG-LEVEL-mV',
+        'TRIG-FREQUENCY', 'HORIZ-TB', 'TDIV-ns', 'TDIV-ACQ-ns')})
     w = s.read_waveform(0)
     print(f"waveform: {len(w)} samples, min={min(w)} max={max(w)}")
     s.close()
