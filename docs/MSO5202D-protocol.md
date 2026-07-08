@@ -51,8 +51,9 @@ knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6),
 STORE-DEPTH`, §6), `mso5202d-acquire-1m.pcapng` (single-channel — captured
 the 1M store-depth code 7, §6), `mso5202d-ch1-menu.pcapng` (CH1 vertical
 menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), `mso5202d-ch2-menu.pcapng` (CH2 vertical menu — confirmed channel symmetry, §6),
-and `mso5202d-pos-knob-push.pcapng` (position-knob pushes — vertical and
-horizontal position knobs reset their axis to 0/centre, §6).
+`mso5202d-pos-knob-push.pcapng` (position-knob pushes — vertical and
+horizontal position knobs reset their axis to 0/centre, §6), and
+`mso5202d-autoset.pcapng` (AUTOSET button — compound reconfigure; §6 note).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -571,6 +572,16 @@ on CH2 (`mso5202d-ch2-menu.pcapng`, menu id **2**, identical layout & values):
 
 (`ACQ_TYPE_NAMES` / `ACQ_MODE_NAMES` / `ACQ_AVG_COUNTS` / `ACQ_DEPTH_NAMES` in
 `mso5202d.py`.)
+
+**AUTOSET** (front-panel button, `mso5202d-autoset.pcapng`) is a **compound
+reconfigure**, not a single field: it re-scales the timebase
+(`[HORIZ-TB]`/`[HORIZ-WIN-TB]`), can set `[TRIG-EDGE-SLOPE]`, and cycles
+`[TRIG-STATE]` (stop → auto → trig'd) as it re-arms. **Caveat:** while Autoset
+runs the scope goes briefly unresponsive — the settings poll times out for a
+second or two (a driver should tolerate this), so some fast intermediate changes
+(e.g. the vertical V/div the manual says Autoset also adjusts) were not captured
+cleanly. Autoset thus wasn't mapped to a single command; it's a firmware macro
+that ends in a normal settings state.
 
 `decode_settings()` in `mso5202d.py` now decodes the **entire blob** into named
 `/protocol.inf` fields (plus derived `CH1-VDIV-mV`/`CH2-VDIV-mV`, `TDIV-ns`
