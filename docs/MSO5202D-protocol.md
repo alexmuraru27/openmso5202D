@@ -20,7 +20,28 @@ sweep — confirmed CH2 symmetry and that TRIG-VPOS is trigger-source-bound, §6
 `mso5202d-combined.pcapng` (both channels, all four knob groups — resolved
 position/trigger-level units and the ps time fields, §6), and
 `mso5202d-2ch-readout.pcapng` (our driver alternating CH1/CH2 acquires — the
-dual-channel readout demonstration, §5).
+dual-channel readout demonstration, §5), `mso5202d-ch1-vpos.pcapng` (fixed
+5 V/1 kHz trace moved on- and off-screen — established the screen-rendered
+readout scale and off-screen rail-clipping, §5), `mso5202d-trig-level.pcapng`
+(full trigger-level sweep — scope-calibrated the 1/25-div level unit, §6), `mso5202d-trig-buttons.pcapng` (Set-50 % / Force-Trig / Run-Stop — `TRIG-STATE`
+0/1 values and the Set-50 % behaviour, §6), `mso5202d-trig-runstop.pcapng`
+(a known stop/run/single/force sequence — mapped `TRIG-STATE` 0=STOP, 5=SINGLE,
+§6), `mso5202d-trig-type.pcapng` (stepping the trigger-type menu — mapped
+`TRIG-TYPE` Edge/Video/Pulse/Slope/Overtime/Alter, §6), and
+`mso5202d-trig-edge.pcapng` (Edge-trigger source/slope/mode/coupling sweep —
+mapped `TRIG-SRC`, `TRIG-EDGE-SLOPE`, `TRIG-MODE`, `TRIG-COUP`, and resolved
+`TRIG-STATE`=1=WAIT, §6), `mso5202d-trig-video.pcapng` (Video-trigger
+source/polarity/standard/sync sweep — mapped the `TRIG-VIDEO-*` fields, §6), and
+`mso5202d-trig-slope.pcapng` (Slope-trigger set/window/V1/V2/when/time sweep —
+mapped the `TRIG-SLOPE-*` fields, §6), `mso5202d-trig-pulse.pcapng`
+(Pulse-trigger polarity/when/width sweep — mapped the `TRIG-PULSE-*` fields, §6),
+`mso5202d-trig-overtime.pcapng` (Overtime-trigger polarity/time/coupling
+sweep — mapped the `TRIG-OVERTIME-*` fields and menu id 39, §6), and
+`mso5202d-trig-alter-ch1.pcapng` (Alter/Swap CH1 per-type config — mapped
+`TRIG-SWAP-CHx-TYPE` and the per-channel sub-params + menu ids 26–29, §6), and
+`mso5202d-trig-alter-ch2.pcapng` (Alter/Swap CH2 — confirmed CH2 symmetry, menu
+ids 30–33, §6), and `mso5202d-trig-holdoff.pcapng` (holdoff-knob sweep —
+confirmed `TRIG-HOLDTIME` tracks the knob, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -186,16 +207,37 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
 - **Samples: 8-bit unsigned, 1 byte each**, 3840 per block (block size depends on
   store-depth). The waveform frame payload is `82 01 00 <3840 bytes>`; the 3840
   data bytes follow the 3-byte `82 01 00` header.
-- **Sample polarity is INVERTED relative to the screen**: a larger count = a
-  lower trace (confirmed on hardware: CH2 parked at −0.64 div read ≈192, i.e.
-  above mid-scale 128; the on-screen up/down order of two traces is the mirror
-  of their count order). Display code should flip (e.g. plot `255 − sample` or
-  invert the Y axis).
+- **Sample polarity (screen layout): smaller count = HIGHER on screen.**
+  Matching the scope's static layout needs an *inverted* Y axis: with CH2 at the
+  top of the scope reading bytes ~17–85 and CH1 at the bottom reading ~161–189,
+  the smaller bytes belong up top. **Caveat / open:** while a trace is *moved*
+  the byte can track the *opposite* way (a controlled on-screen raise of CH1
+  drove `VERT-CH1-POS` −82→−20 while the byte went 184→239, i.e. the wrong
+  direction for the static rule) — the vertical byte↔position mapping is
+  self-inconsistent, entangled with the unresolved amplitude-scaling bug below.
+  Match the static layout (invert); don't trust it for absolute volts yet.
+- **Horizontal scale: 200 samples per division** → sample interval =
+  `TDIV / 200`, sample rate = `200 / TDIV`. So a 3840-sample block spans
+  **19.2 divisions**. The vendor MSO5000-series manual states "sample interval
+  = s/div ÷ 200"; confirmed to the digit on our hardware (500 samples/period
+  of the 1 kHz cal at 400 µs/div → 2 µs interval → 0.5 MSa/s, and the cal
+  cycle count per block matches at every timebase). `decode_settings()` exposes
+  `SAMPLE-INTERVAL-ns` and `SAMPLERATE-HZ`; the block max rate is 500 MSa/s
+  (dual-channel) per the manual.
 - The size frame (`53 07 00 82 00 00 00 0f 00`) reports the byte count as a little
   value inside `00 00 00 0f 00` → `0x0F00 = 3840`.
-- Raw counts only — **no scale is embedded**. Two levels of a cal square wave read
-  as ≈`0x2E` low / ≈`0xED` high (0–255 full range). Converting counts→volts needs
-  the calibration table (§8).
+- 8-bit samples, screen-oriented (see the polarity note below). Beyond that the
+  **vertical amplitude scale is NOT yet modelled** — see the open item below;
+  don't assume a fixed counts/div.
+- **Off-screen positioning yields CLIPPED / invalid bytes.** Part of a trace
+  moved past a graticule edge clamps to that rail (top ≈ `0x0A`, bottom
+  ≈ `0xF2`), and while a trace is scrolled across/through the screen a block can
+  come back **rail-to-rail bimodal** — ~50 % of samples at each rail, nothing in
+  between (the "full-height hash" seen when moving a trace off and back on
+  screen). In `../captures/mso5202d-ch1-vpos.pcapng` such blocks show e.g. 1919
+  samples at `0x0A` + 1921 at `0xF2`. **Display/decoding code must treat
+  rail-pinned samples (≈0/≈255) as clipped, not real** and can flag "off
+  screen" (the plotter does).
 - **2-channel readout — SOLVED (2026-07-08):** the channel is selected by the
   **acquire value byte**: `02 01 00` = CH1, `02 01 01` = CH2. Verified on
   hardware with CH2's probe disconnected (CH1 returned the square wave, CH2 its
@@ -206,14 +248,32 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
   Values `12 01 02`/`03` make the next acquire return nothing. Note the vendor
   captures (`session1/2`) were taken with **CH2 display off**, which is why
   they never showed a CH2 fetch.
-- **OPEN — counts↔volts scaling:** the transfer amplitude does not track the
-  display V/div (a 5 V cal square read ≈70 counts p-p at 2 V/div but ≈233 p-p
-  in an earlier read at a different setting). A **flat** (no-signal) trace
-  follows `count = 128 − POS` exactly (verified at POS −64 → 192 and
-  POS +62 → 63; i.e. 1 count = 1/100 div, inverted), while a **live** 5 V
-  square at 2 V/div spans only ≈28 counts/div — flat and live traces obey
-  different scale factors. The transfer gain/offset model needs dedicated
-  experiments (§8).
+- **OPEN — vertical amplitude depends on the trace's DISTANCE FROM SCREEN
+  CENTRE (the "0 axis").** The returned amplitude is **full-swing (~200+ counts
+  p-p) when the trace baseline sits near the centre/0 line, and compressed
+  (~25 counts) when it is parked well away from centre.** User-observed live
+  ("when it crosses the 0 axis the app goes full-screen") and confirmed by
+  measurement (2026-07-08): with both channels on the same 5 V/1 kHz cal,
+  CH1 @ 5 V/div at `POS=-78` (far below centre) → **25 counts**, while
+  CH2 @ 2 V/div at `POS=-16` (near centre) → **217 counts**. Read repeatedly the
+  values are stable per position. So the byte encoding appears to be referenced
+  to screen centre at a high fixed gain, not to the channel's positioned
+  baseline — moving the trace off-centre shrinks/rescales the returned swing
+  (and also drives the "raise → app-trace-descends" polarity anomaly). This is a
+  *characterisation, not a model.* Ruled out: `VERT-CHx-FINE=0`,
+  `VERT-CHx-PROBE=0`, `TRIG-STATE=3`, acquire mode/type (all identical across
+  channels). Vendor-manual context: 8-bit ADC per channel, DC gain ±3%,
+  graticule 8 div tall. Resolve with a controlled sweep that logs amplitude &
+  baseline vs `VERT-POS` (one channel, fixed signal) to pin the amplitude =
+  f(distance-from-centre) law, then a V/div sweep at fixed centre position (§8).
+- **OPEN — inter-channel PHASE is not preserved.** CH1 and CH2 are fetched as
+  two separate acquires (~100 ms apart) with no shared trigger lock, so their
+  returned phase is uncorrelated: the CH1→CH2 first-rising-edge offset jittered
+  66/89/30/94 samples across reads (one 1 kHz period = 500 samples at
+  400 µs/div). On the scope the two channels are sampled simultaneously and look
+  in-phase; our plotter shows them phase-shifted. A single-acquire "both
+  channels" command (if one exists) would fix it; otherwise the readout can't
+  reproduce cross-channel timing.
 
 ---
 
@@ -274,22 +334,44 @@ here), not to the channel being adjusted.
 vertical position, time/div and horizontal position all exercised):
 
 - `[VERT-CHx-POS]` (signed LE16) is the channel's vertical position in
-  **1/100-division units** (knob fine step = 8 = 0.08 div).
+  **1/25-division units** (knob fine step = 8 = 0.32 div; see the calibration
+  below).
 - `[TRIG-VPOS]` (signed LE16) = **`[VERT-CHsrc-POS]` + trigger level ⁄ V-div ×
-  100** — i.e. the trigger marker's screen position in the same 1/100-div
-  units. Proof: over a CH1 V/div sweep 5 V→100 mV with CH1-POS = −4,
-  `(VPOS − POS) × vdiv/100` = 780 mV **constant at every step**; VPOS tracked
-  the CH1 position knob exactly 1:1; CH2's knobs never moved it. (This also
-  retro-explains the `62000 // vdiv_mV` fit in the first sweep: level 620 mV,
-  POS 0.) Derived `TRIG-LEVEL-mV` is computed in `decode_settings()`.
+  25** — i.e. the trigger marker's screen position, where the position/level
+  fields are in **1/25-division units** (see below). VPOS tracks the CH1
+  position knob 1:1 and CH2's knobs never move it, confirming it is bound to the
+  trigger *source*. Derived `TRIG-LEVEL-mV` is computed in `decode_settings()`.
+
+  **Unit = 1/25 division, calibrated against the scope readout (2026-07-08).**
+  A full trigger-level sweep clamped `TRIG-VPOS` at **±200**, which the scope
+  displayed as **+13.4 V … −18.5 V at 2 V/div** and **+33.6 V … −46.4 V at
+  5 V/div** (`../captures/mso5202d-trig-level.pcapng`, CH1 POS +32). Both fit
+  `level = (VPOS − POS) × vdiv / 25` to <1 %:
+  (200−32)/25×2 V = +13.44 V, (−200−32)/25×2 V = −18.56 V; ×5 V → +33.6/−46.4 V.
+  So **±200 = ±8 divisions** (200/25), matching the manual's "±8 divisions from
+  centre" trigger range — and the general rule is `1 unit = 1/25 div`
+  (25 counts/div), used for `VERT-CHx-POS`, `TRIG-VPOS` and the trigger level.
+  *(Corrects an earlier guess of 1/100-div here — it was never scope-calibrated;
+  the ×4 error surfaced when the scope's V readout was compared.)*
+  The front-panel **"Set 50 %"** button snaps `TRIG-VPOS` to the signal's
+  mid-amplitude: in `../captures/mso5202d-trig-buttons.pcapng` six presses from
+  different starting levels all landed on VPOS 63 = **2480 mV ≈ 50 % of the 5 V
+  cal** — a 3rd–5th cross-check of the calibration.
 
 **8-byte time fields are PICOSECONDS.** `[TRIG-HOLDTIME-MIN]` = 100 000 =
 100 ns and `[TRIG-HOLDTIME-MAX]` = 10¹³ = 10 s — exactly the scope's holdoff
-limits. `[HORIZ-TRIGTIME]`@162–169 is the **horizontal trigger position
-(delay) in ps**: in the combined capture each click moved it by ≈0.3 div
-worth of time at every timebase tried (e.g. ±240 µs at 800 µs/div, ±1.2 ms at
-4 ms/div). The `TRIG-*-TIME` family (pulse/slope/overtime) reads sanely in ps
-too (e.g. 500 000 = 500 ns defaults).
+limits (the vendor manual lists **Holdoff Range 100 ns to 10 s**, confirming
+both the unit and the field). `[TRIG-HOLDTIME]` is the **live holdoff value**,
+verified to track the knob (`mso5202d-trig-holdoff.pcapng`): it lives under the
+**HORIZONTAL menu → F4 (Holdoff Time)** — turn the multi-function knob to adjust,
+push it to reset to 100 ns (the observed floor). Note the Horizontal/holdoff
+menu does **not** change `[CONTROL-MENUID]` (which only tracks the CH and
+Trigger menus). `[HORIZ-TRIGTIME]`@162–169 is the **horizontal
+trigger position (delay) in ps**: in the combined capture each click moved it
+by ≈0.3 div worth of time at every timebase tried (e.g. ±240 µs at 800 µs/div,
+±1.2 ms at 4 ms/div). The `TRIG-*-TIME` family (pulse/slope/overtime) reads
+sanely in ps too (500 000 = 500 ns defaults; the manual gives pulse/slope/
+overtime ranges of **20 ns to 10 s**).
 
 **`[HORIZ-TB]` / `[HORIZ-WIN-TB]` → time/div** (verified end stop to end stop by
 a full time/div knob sweep, `captures/mso5202d-timediv.pcapng`, 2026-07-08; only
@@ -298,7 +380,10 @@ raw@159, raw@160 and `[TRIG-STATE]`@24 changed across 810 frames):
 - The knob has **32 positions** = the scope's 2 ns…40 s range in the **2-4-8
   sequence** (2, 4, 8, 20, 40, 80, 200 ns, …, 8, 20, 40 s). Confirmed against
   the on-screen readout — it is NOT the usual 1-2-4/1-2-5 sequence (8 ns, not
-  10 ns; 80 µs, not 100 µs; …).
+  10 ns; 80 µs, not 100 µs; …). The vendor manual states **"SEC/DIV Range:
+  4 ns/div to 40 s/div, in a 2, 4, 8 sequence"** — matching the sequence; the
+  manual is for the 60/100 MHz MSO5000B base model (min 4 ns/div, index 1),
+  while our 200 MHz MSO5202D extends one detent faster to 2 ns/div (index 0).
 - **`[HORIZ-WIN-TB]`@160 tracks the knob over the full index range 0..31**
   (0 = 2 ns/div … 31 = 40 s/div).
 - **`[HORIZ-TB]`@159 is the real acquisition timebase and clamps at index 6**
@@ -308,11 +393,125 @@ raw@159, raw@160 and `[TRIG-STATE]`@24 changed across 810 frames):
   in lockstep (transient ±1 skews right around the clamp boundary).
 - `index → ns`: `TB_TO_NS` table in `mso5202d.py` ((2, 4, 8)·10ⁿ).
 
-**`[TRIG-STATE]` observed values** (all sweep captures): `3` = triggered/run,
-`6` = transient flicker while re-arming (appears in bursts when the signal
-drops out of range mid-adjustment), `4` = **scan/roll mode**, persistent at
-slow timebases (onset varies with trigger activity — seen from 80 ms/div in
-one session, from 2 s/div in another). Enum not exhaustively mapped.
+**`[TRIG-STATE]` observed values** — mapped by a known button sequence
+(`mso5202d-trig-runstop.pcapng`: stop→run→stop→run→single→run→stop→run→force):
+- `0` = **STOPPED** — pressing Run/Stop takes 3→0 (confirmed 3×). Run resumes
+  via 0→2→3.
+- `2` = **not triggered / auto-searching** (free-running in Auto with no valid
+  trigger; also seen when the level is swept off the signal in
+  `mso5202d-trig-level.pcapng`, 3→2→3).
+- `3` = **triggered / running**. Force-Trigger while already running causes no
+  state change (just forces an acquire).
+- `4` = **scan/roll mode** (slow timebase, see below).
+- `5` = **SINGLE (armed)** — Single-Seq takes 3→5; the next Run leaves it 5→2→3.
+- `6` = transient flicker while re-arming (bursts when the signal drops out of
+  range mid-adjustment).
+- `1` = **WAIT / READY** (Normal mode, armed but no valid trigger yet) —
+  resolved in `mso5202d-trig-edge.pcapng`: setting `TRIG-MODE`→Normal with the
+  level off the signal took `TRIG-STATE`→1, and Auto→2. So the untriggered state
+  is **1 in Normal mode, 2 in Auto mode**.
+
+Run/Stop/Single state lives in this field, not a separate one
+(`TRIG-MODE`/`ACQURIE-MODE` never changed). The manual pins
+the scan-mode threshold: *"With the SEC/DIV control set to 80 ms/div or slower
+and the trigger mode set to Auto, the oscilloscope works in the scan
+acquisition mode."* — i.e. `[HORIZ-WIN-TB]` index ≥ 23 (80 ms/div), which
+matches our earliest `state=4` onset; the later onset in another session was
+Normal-mode trigger holding `state=3` longer. Enum not exhaustively mapped.
+
+**`[TRIG-TYPE]` enum** — mapped by stepping the trigger-type menu twice
+(`mso5202d-trig-type.pcapng`, both passes identical): `0` = **Edge**,
+`1` = **Video**, `2` = **Pulse**, `3` = **Slope**, `4` = **Overtime**,
+`5` = **Alter** (swap — at this type `[TRIG-SRC]` rapidly toggles 0↔1 as the
+alternating trigger flips between CH1/CH2). `[CONTROL-MENUID]` follows each
+type's submenu (Edge 5, Video 8, Pulse 6, Slope 22, O.T. 38, Alter 24), and
+opening the trigger menu sets `[CONTROL-DISP-MENU]` 0→1. (`TRIG_TYPE_NAMES` in
+`mso5202d.py`.)
+
+**Edge-trigger enums** — mapped by stepping the Edge trigger menu twice
+(`mso5202d-trig-edge.pcapng`, both passes identical):
+- `[TRIG-SRC]`: `0` = **CH1**, `1` = **CH2**, `2` = **EXT**, `3` = **EXT/5**,
+  `4` = **AC line**. (`TRIG-LEVEL-mV` is only derived for CH1/CH2; for EXT the
+  manual range is ±1.2 V, EXT/5 ±6 V.)
+- `[TRIG-MODE]`: `0` = **Auto**, `1` = **Normal**. Setting it also mirrors into
+  `[TRIG-SWAP-CH1-MODE]`/`[TRIG-SWAP-CH2-MODE]`. (Determines the untriggered
+  `TRIG-STATE`: Auto→2, Normal→1.)
+- `[TRIG-EDGE-SLOPE]`: `0` = **Rising**, `1` = **Falling**.
+- `[TRIG-COUP]`: `0` = **DC**, `1` = **AC**, `2` = **Noise Reject**,
+  `3` = **HF Reject**, `4` = **LF Reject**.
+
+(`TRIG_SRC_NAMES` / `TRIG_MODE_NAMES` / `TRIG_SLOPE_NAMES` / `TRIG_COUP_NAMES`
+in `mso5202d.py`.)
+
+**Video-trigger enums** — mapped by stepping the Video trigger menu
+(`mso5202d-trig-video.pcapng`). Video sources are CH1/CH2/EXT/EXT/5 (no AC line):
+- `[TRIG-VIDEO-NEG]`: `0` = **Normal** (positive video), `1` = **Inverted**.
+- `[TRIG-VIDEO-PAL]`: `0` = **NTSC**, `1` = **PAL/SECAM**.
+- `[TRIG-VIDEO-SYN]`: `0` = **All Lines**, `1` = **Line Num**, `2` = **Odd
+  Field**, `3` = **Even Field**, `4` = **All Fields**.
+- `[TRIG-VIDEO-LINE]` (LE16): selected line number, active when SYN = Line Num;
+  range **1…525** for NTSC (1…625 for PAL/SECAM).
+
+(`TRIG_VIDEO_NEG_NAMES` / `TRIG_VIDEO_STD_NAMES` / `TRIG_VIDEO_SYN_NAMES` in
+`mso5202d.py`.)
+
+**Slope-trigger enums** — mapped by stepping the Slope trigger menu
+(`mso5202d-trig-slope.pcapng`; source/mode/coupling behave as for Edge):
+- `[TRIG-SLOPE-SET]`: `0` = **Positive** slope, `1` = **Negative**.
+- `[TRIG-SLOPE-WIN]`: `0` = **V1** (upper), `1` = **V2** (lower), `2` = **Both**
+  — selects which threshold the knob adjusts (at Both, V1 and V2 move together).
+- `[TRIG-SLOPE-V1]`, `[TRIG-SLOPE-V2]` (signed LE16): the two slope thresholds
+  in **1/25-div** units, using the **same volts calibration as the trigger
+  level** — scope-verified at CH1 5 V/div (V1/V2 range read **+12 V … −36 V**,
+  matching `(field − POS) × vdiv/25`). `decode_settings()` exposes derived
+  `TRIG-SLOPE-V1-mV` / `TRIG-SLOPE-V2-mV`.
+- `[TRIG-SLOPE-WHEN]`: `0` = **=**, `1` = **≠**, `2` = **>**, `3` = **<** (the
+  slope-time condition; likely the same enum as `[TRIG-PULSE-WHEN]`).
+- `[TRIG-SLOPE-TIME]` (ps): 20 ns (`20000`) … 10 s.
+
+(`TRIG_SLOPE_SET_NAMES` / `TRIG_SLOPE_WIN_NAMES` / `TRIG_WHEN_NAMES` in
+`mso5202d.py`.)
+
+**Pulse-trigger enums** — mapped by stepping the Pulse trigger menu
+(`mso5202d-trig-pulse.pcapng`):
+- `[TRIG-PULSE-NEG]`: `0` = **Positive** pulse, `1` = **Negative**.
+- `[TRIG-PULSE-WHEN]`: `0` = **=**, `1` = **≠**, `2` = **>**, `3` = **<**
+  — **confirmed identical to `[TRIG-SLOPE-WHEN]`** (shared `TRIG_WHEN_NAMES`).
+- `[TRIG-PULSE-TIME]` (ps): pulse width, **20 ns (`20000`) … 10 s** (both limits
+  hardware-confirmed).
+
+(`TRIG_PULSE_NEG_NAMES` in `mso5202d.py`.)
+
+**Overtime-trigger enums** — mapped by stepping the O.T. trigger menu
+(`mso5202d-trig-overtime.pcapng`):
+- `[TRIG-OVERTIME-NEG]`: `0` = **Positive**, `1` = **Negative**.
+- `[TRIG-OVERTIME-TIME]` (ps): the overtime, **20 ns … 10 s**.
+- Coupling (page 2) uses the same `[TRIG-COUP]` enum as Edge. New menu id:
+  `[CONTROL-MENUID]` 38 = Overtime page 1, **39 = page 2** (38/39 consecutive,
+  as with Pulse 6/7 and Slope 22/23).
+
+(`TRIG_OVERTIME_NEG_NAMES` in `mso5202d.py`.)
+
+**Alter/Swap trigger** (`mso5202d-trig-alter-ch1.pcapng`) — in Alter mode each
+channel carries its **own independent trigger config** in the
+`[TRIG-SWAP-CH1-*]` / `[TRIG-SWAP-CH2-*]` blocks (offsets 94–121 / 122–149), and
+`[TRIG-SRC]` alternates CH1↔CH2 as the scope switches between them.
+- `[TRIG-SWAP-CHx-TYPE]`: a **4-value** enum (no Slope/Alter): `0` = **Edge**,
+  `1` = **Video**, `2` = **Pulse**, `3` = **Overtime**. (Distinct from the main
+  6-value `[TRIG-TYPE]`.)
+- All the per-channel sub-params **reuse the main-trigger enums**:
+  `[TRIG-SWAP-CHx-EDGE-SLOPE]` = 0 Rising/1 Falling, `-COUP` = the 5-value
+  `TRIG-COUP` set, `-MODE` = Auto/Normal, `-VIDEO-NEG/PAL/SYN/LINE` = the video
+  enums, `-PULSE-NEG/WHEN/TIME` and `-OVERTIME-NEG/TIME` = the pulse/overtime
+  fields (ps times). Verified independently on **both channels** (CH1 and CH2
+  blocks are identical layout).
+- Menu ids for the Alter per-type submenus (`[CONTROL-MENUID]`): 24 = Alter
+  base; **CH1** block **26 Edge / 27 Pulse / 28 Video / 29 Overtime**; **CH2**
+  block **30 Edge / 31 Pulse / 32 Video / 33 Overtime** (so the menu id encodes
+  both the selected channel and its type).
+
+(`TRIG_SWAP_TYPE_NAMES` in `mso5202d.py`; per-channel enums reuse the main
+trigger name maps.)
 
 `decode_settings()` in `mso5202d.py` now decodes the **entire blob** into named
 `/protocol.inf` fields (plus derived `CH1-VDIV-mV`/`CH2-VDIV-mV`, `TDIV-ns`
@@ -336,7 +535,8 @@ one session, from 2 s/div in another). Enum not exhaustively mapped.
   offset 4 (§6; proven by the CH1-V/div sweep capture, 2026-07-08). Includes
   the `[VERT-CHx-VB]` → V/div table (2 mV…10 V, with the 10 V → VB=0 wrap
   quirk; verified on **both channels**), `[VERT-CHx-POS]` and `[TRIG-VPOS]` in
-  signed 1/100-div units (`VPOS = POS_src + level/vdiv×100`), 8-byte time
+  signed **1/25-div** units (`level_V = (VPOS − POS_src) × vdiv/25`,
+  scope-calibrated), 8-byte time
   fields in **picoseconds** (incl. `[HORIZ-TRIGTIME]` = horizontal delay), and
   `[TRIG-FREQUENCY]` in mHz.
 - Waveform handshake and 8-bit sample format (1 kHz cal square wave confirmed).
@@ -347,6 +547,10 @@ one session, from 2 s/div in another). Enum not exhaustively mapped.
 
 - **2-channel readout**: acquire value byte selects the channel (`02 01 <ch>`,
   0 = CH1, 1 = CH2) — verified square-vs-flat on hardware (§5).
+
+- **Horizontal sample rate**: 200 samples/div → sample interval `TDIV/200`,
+  block = 19.2 div — matches the vendor manual and our cal-signal cycle counts
+  to the digit (§5). X axis can now be plotted in real seconds.
 
 **Inferred / open (see §8):**
 - Enum-coded field values (coupling, trigger modes, `[TRIG-STATE]` beyond
@@ -368,7 +572,7 @@ one session, from 2 s/div in another). Enum not exhaustively mapped.
    (`captures/mso5202d-timediv.pcapng`) and mapped `[HORIZ-TB]`/`[HORIZ-WIN-TB]`
    → time/div (§6); a CH2 sweep confirmed channel symmetry, and a combined
    both-channels/all-knobs capture resolved position + trigger-level units
-   (1/100 div) and the ps time fields (§6). **Remaining follow-up of the same
+   (1/25 div, scope-calibrated) and the ps time fields (§6). **Remaining follow-up of the same
    shape:** toggle coupling / trigger-mode / acquire menus to enumerate the
    enum-coded fields.
 2. **Dump more scope files** via selector `0x10`: try `/system.inf`, `/cal.inf`,
@@ -376,20 +580,23 @@ one session, from 2 s/div in another). Enum not exhaustively mapped.
    should hold the **counts→volts / index→"1 V/div" / timebase→seconds** tables.
    (We can now do this directly with `mso5202d.py`.)
 3. ~~**Crack 2-channel readout**~~ **DONE (2026-07-08)** — the acquire value
-   byte is the channel: `02 01 00` = CH1, `02 01 01` = CH2 (§5). Follow-up:
-   figure out the **counts↔volts transfer scaling** (it does not track the
-   display V/div; vary V-div/position with a known signal and model
-   gain/offset), and what param `0x12` actually does.
+   byte is the channel: `02 01 00` = CH1, `02 01 01` = CH2 (§5). Also
+   established: off-screen positioning clips samples to the rails / returns
+   rail-to-rail blocks (§5, `mso5202d-ch1-vpos.pcapng`). **Still open — vertical
+   amplitude** depends on the trace's distance from screen centre (full-swing
+   near the 0 axis, compressed far from it — §5); model it with a POS sweep
+   logging amplitude+baseline, then a V/div sweep at fixed centre position.
+   **Also open — inter-channel phase** is lost (sequential acquires, no shared
+   trigger — §5); look for a single-acquire both-channels command. And: what
+   param `0x12` does.
 4. **Host-side control:** find the command that presses a `/keyprotocol.inf` key
    (likely another selector with a key id), enabling PC control of V/div, timebase,
    trigger, autoset, single-seq, etc. A fresh capture of the app *changing settings
    from the PC* (if it supports it) would reveal this directly.
-5. **Sample rate** so the X axis becomes real seconds: time/div is now known
-   (§6) — what's left is how many divisions (or seconds) the 3840-sample block
-   spans. **Preliminary:** counting 1 kHz cal cycles per block gives ~4 cycles
-   at 200 µs/div and ~8 at 400 µs/div → the block spans ≈ 20 divisions,
-   i.e. **192 samples/div** (needs confirming at more timebases / vs the
-   store-depth setting).
+5. ~~**Sample rate**~~ **DONE (2026-07-08)** — **200 samples/div** exactly
+   (sample interval = `TDIV/200`), so the 3840-sample block spans 19.2 div.
+   Confirmed against the vendor manual's "sample interval = s/div ÷ 200" and
+   our cal-cycle counts to the digit; X axis now plots in real seconds (§5).
 
 ---
 
@@ -580,3 +787,197 @@ confirm this schema is shared across the MSO5000 family.)
 53 04 0f 82 01 00 30 2d 2d 2e 30 2f 2d 2d ... ; 3840 8-bit samples
 53 04 00 82 02 00 db                          ; end-marker
 ```
+
+## Appendix D — settings-blob field datasheet (offsets, units, enums)
+
+The settings poll (`0x01`) returns `53 <len> 81 <213 param bytes> <ck>`. The 213
+bytes are the `/protocol.inf` list (Appendix A) starting at **raw frame
+offset 4** (right after the `0x81` echo). Multi-byte fields are little-endian;
+positions/levels are signed. `decode_settings()` in `mso5202d.py` decodes all of
+these. Offsets below are into the raw frame (`53 xx xx 81 …`).
+
+**Units summary:** position/level fields (`VERT-CHx-POS`, `TRIG-VPOS`) are signed
+**1/25-division** units (25 counts/div; ±200 = ±8 div) — scope-calibrated §6;
+all 8-byte time fields are **picoseconds**; `TRIG-FREQUENCY` is **mHz**;
+`*-VB` are V/div indices (`VB_TO_MV`); `HORIZ-*TB` are timebase indices
+(`TB_TO_NS`, 2-4-8 sequence, §6).
+
+```
+off  w  field                       decoded meaning / enum (blank = raw value, meaning TBD)
+--- VERTICAL, CH1 ---
+4    1  VERT-CH1-DISP               0/1 channel displayed
+5    1  VERT-CH1-VB                 V/div index -> VB_TO_MV (0=2mV..10=5V; 10V/div re-uses 0)
+6    1  VERT-CH1-COUP               input coupling enum (DC/AC/GND? unmapped)
+7    1  VERT-CH1-20MHZ              0/1 20 MHz bandwidth limit
+8    1  VERT-CH1-FINE               0/1 fine (variable) gain
+9    1  VERT-CH1-PROBE              probe attenuation index (1x/10x/… unmapped)
+10   1  VERT-CH1-RPHASE             (unmapped)
+11   1  VERT-CH1-CNT-FINE           fine-gain counter (unmapped)
+12   2  VERT-CH1-POS                signed; vertical position, 1/25 div
+--- VERTICAL, CH2 (same layout) ---
+14   1  VERT-CH2-DISP               0/1 channel displayed
+15   1  VERT-CH2-VB                 V/div index -> VB_TO_MV
+16   1  VERT-CH2-COUP               coupling enum (unmapped)
+17   1  VERT-CH2-20MHZ              0/1 20 MHz BW limit
+18   1  VERT-CH2-FINE               0/1 fine gain
+19   1  VERT-CH2-PROBE              probe attenuation index
+20   1  VERT-CH2-RPHASE             (unmapped)
+21   1  VERT-CH2-CNT-FINE           (unmapped)
+22   2  VERT-CH2-POS                signed; vertical position, 1/25 div
+--- TRIGGER (main) ---
+24   1  TRIG-STATE                  0=STOP 1=WAIT(Normal) 2=AUTO 3=TRIG'D 4=SCAN 5=SINGLE 6=ARMING
+25   1  TRIG-TYPE                   0=Edge 1=Video 2=Pulse 3=Slope 4=Overtime 5=Alter
+26   1  TRIG-SRC                    0=CH1 1=CH2 2=EXT 3=EXT/5 4=AC-line
+27   1  TRIG-MODE                   0=Auto 1=Normal (mirrors TRIG-SWAP-CHx-MODE)
+28   1  TRIG-COUP                   0=DC 1=AC 2=NoiseRej 3=HFRej 4=LFRej
+29   2  TRIG-VPOS                   signed; trigger marker pos, 1/25 div.
+                                    level_V = (TRIG-VPOS - POS_src) * vdiv / 25
+31   8  TRIG-FREQUENCY              frequency counter, mHz (0 = not triggering)
+39   8  TRIG-HOLDTIME-MIN           ps (= 100 ns, holdoff lower limit)
+47   8  TRIG-HOLDTIME-MAX           ps (= 10 s, holdoff upper limit)
+55   8  TRIG-HOLDTIME               ps; live holdoff (HORIZONTAL menu > F4; knob-push resets to 100 ns)
+63   1  TRIG-EDGE-SLOPE             0=Rising 1=Falling
+--- TRIGGER: Video sub-params ---
+64   1  TRIG-VIDEO-NEG              0=Normal 1=Inverted
+65   1  TRIG-VIDEO-PAL             0=NTSC 1=PAL/SECAM
+66   1  TRIG-VIDEO-SYN             0=AllLines 1=LineNum 2=OddField 3=EvenField 4=AllFields
+67   2  TRIG-VIDEO-LINE            line number (1..525 NTSC / 1..625 PAL), used when SYN=LineNum
+--- TRIGGER: Pulse sub-params ---
+69   1  TRIG-PULSE-NEG             0=Positive 1=Negative pulse
+70   1  TRIG-PULSE-WHEN            0='=' 1='≠' 2='>' 3='<' (== TRIG-SLOPE-WHEN)
+71   8  TRIG-PULSE-TIME            ps; pulse width 20 ns .. 10 s (default 500000 = 500 ns)
+--- TRIGGER: Slope sub-params ---
+79   1  TRIG-SLOPE-SET             0=Positive slope 1=Negative
+80   1  TRIG-SLOPE-WIN             0=V1(upper) 1=V2(lower) 2=Both (knob-adjust select)
+81   1  TRIG-SLOPE-WHEN            0='=' 1='≠' 2='>' 3='<'
+82   2  TRIG-SLOPE-V1              signed; upper slope threshold, 1/25 div (volts = (V1-POS)*vdiv/25, scope-verified)
+84   2  TRIG-SLOPE-V2              signed; lower slope threshold, 1/25 div
+86   8  TRIG-SLOPE-TIME            ps (20 ns .. 10 s)
+--- TRIGGER: Alter/Swap per-channel blocks (CH1 @94, CH2 @122) ---
+; In Alter mode each channel has its own trigger config here; sub-params reuse
+; the main-trigger enums. TRIG-SRC alternates CH1<->CH2 as the scope switches.
+94   1  TRIG-SWAP-CH1-TYPE          0=Edge 1=Video 2=Pulse 3=Overtime (4-value, no Slope/Alter)
+95   1  TRIG-SWAP-CH1-MODE
+96   1  TRIG-SWAP-CH1-COUP
+97   1  TRIG-SWAP-CH1-EDGE-SLOPE
+98   1  TRIG-SWAP-CH1-VIDEO-NEG
+99   1  TRIG-SWAP-CH1-VIDEO-PAL
+100  1  TRIG-SWAP-CH1-VIDEO-SYN
+101  2  TRIG-SWAP-CH1-VIDEO-LINE
+103  1  TRIG-SWAP-CH1-PULSE-NEG
+104  1  TRIG-SWAP-CH1-PULSE-WHEN
+105  8  TRIG-SWAP-CH1-PULSE-TIME    ps
+113  1  TRIG-SWAP-CH1-OVERTIME-NEG
+114  8  TRIG-SWAP-CH1-OVERTIME-TIME ps
+122  1  TRIG-SWAP-CH2-TYPE          (CH2 block, same layout as CH1 @94..121)
+123  1  TRIG-SWAP-CH2-MODE
+124  1  TRIG-SWAP-CH2-COUP
+125  1  TRIG-SWAP-CH2-EDGE-SLOPE
+126  1  TRIG-SWAP-CH2-VIDEO-NEG
+127  1  TRIG-SWAP-CH2-VIDEO-PAL
+128  1  TRIG-SWAP-CH2-VIDEO-SYN
+129  2  TRIG-SWAP-CH2-VIDEO-LINE
+131  1  TRIG-SWAP-CH2-PULSE-NEG
+132  1  TRIG-SWAP-CH2-PULSE-WHEN
+133  8  TRIG-SWAP-CH2-PULSE-TIME    ps
+141  1  TRIG-SWAP-CH2-OVERTIME-NEG
+142  8  TRIG-SWAP-CH2-OVERTIME-TIME ps
+--- TRIGGER: Overtime sub-params ---
+150  1  TRIG-OVERTIME-NEG          0=Positive 1=Negative
+151  8  TRIG-OVERTIME-TIME         ps; overtime 20 ns .. 10 s
+--- HORIZONTAL ---
+159  1  HORIZ-TB                   acquisition timebase index -> TB_TO_NS (clamps at 6 = 200 ns)
+160  1  HORIZ-WIN-TB               knob timebase index 0..31 -> TB_TO_NS (2-4-8 seq)
+161  1  HORIZ-WIN-STATE            window/zoom state (unmapped)
+162  8  HORIZ-TRIGTIME             ps; horizontal trigger position (delay)
+--- MATH ---
+170  1  MATH-DISP                  0/1
+171  1  MATH-MODE                  math op enum (unmapped)
+172  1  MATH-FFT-SRC               FFT source
+173  1  MATH-FFT-WIN               FFT window
+174  1  MATH-FFT-FACTOR            (unmapped)
+175  1  MATH-FFT-DB                FFT dB/div (unmapped)
+--- DISPLAY ---
+176  1  DISPLAY-MODE               (unmapped)
+177  1  DISPLAY-PERSIST            persistence (unmapped)
+178  1  DISPLAY-FORMAT             YT/XY (unmapped)
+179  1  DISPLAY-CONTRAST           contrast
+180  1  DISPLAY-MAXCONTRAST        max contrast (=15 seen)
+181  1  DISPLAY-GRID-KIND          graticule kind
+182  1  DISPLAY-GRID-BRIGHT        graticule brightness
+183  1  DISPLAY-MAXGRID-BRIGHT     max (=15 seen)
+--- ACQUIRE ---
+184  1  ACQURIE-MODE               acquire mode enum (unmapped)
+185  1  ACQURIE-AVG-CNT            average count
+186  1  ACQURIE-TYPE               acquire type (Normal/Peak/Average? unmapped)
+187  1  ACQURIE-STORE-DEPTH        record length setting (unmapped)
+--- MEASURE (8 slots, each: SRC then item id) ---
+188  1  MEASURE-ITEM1-SRC          measurement source (0=CH1,1=CH2 seen)
+189  1  MEASURE-ITEM1              measurement id (unmapped)
+190..203                          ITEM2..ITEM8 (SRC,id) pairs, same layout
+--- CONTROL (menu/UI state) ---
+204  1  CONTROL-TYPE               always 0 observed
+205  1  CONTROL-MENUID             current menu id (see table below)
+206  1  CONTROL-DISP-MENU          0/1 menu displayed on screen
+--- LOGIC ANALYZER ---
+207  1  LA-SWI                     LA enable (unmapped)
+208  2  LA-CHANNEL-STATE           per-bit D0..D15 enable mask (=255 seen)
+210  1  LA-CURRENT-CHANNEL         (unmapped)
+211  1  LA-D7-D0-THRESHOLD-TYPE
+212  1  LA-D15-D8-THRESHOLD-TYPE
+213  2  LA-D7-D0-USER-THRESHOLD-VOLT   signed
+215  2  LA-D15-D8-USER-THRESHOLD-VOLT  signed
+(217 = checksum)
+```
+
+### Enum tables (mapped so far)
+
+| field | value → meaning |
+|---|---|
+| `TRIG-STATE` | 0 STOP · 1 WAIT (Normal, no trig) · 2 AUTO (no trig) · 3 TRIG'D · 4 SCAN/roll · 5 SINGLE (armed) · 6 ARMING flicker |
+| `TRIG-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Slope · 4 Overtime · 5 Alter (swap; alternates `TRIG-SRC` CH1↔CH2) |
+| `TRIG-SRC` | 0 CH1 · 1 CH2 · 2 EXT · 3 EXT/5 · 4 AC line |
+| `TRIG-MODE` | 0 Auto · 1 Normal (mirrors into `TRIG-SWAP-CHx-MODE`) |
+| `TRIG-EDGE-SLOPE` | 0 Rising · 1 Falling |
+| `TRIG-COUP` | 0 DC · 1 AC · 2 Noise Reject · 3 HF Reject · 4 LF Reject |
+| `TRIG-VIDEO-NEG` | 0 Normal · 1 Inverted |
+| `TRIG-VIDEO-PAL` | 0 NTSC · 1 PAL/SECAM |
+| `TRIG-VIDEO-SYN` | 0 All Lines · 1 Line Num · 2 Odd Field · 3 Even Field · 4 All Fields |
+| `TRIG-VIDEO-LINE` | line number 1…525 (NTSC) / 1…625 (PAL); used when SYN = Line Num |
+| `TRIG-SLOPE-SET` | 0 Positive slope · 1 Negative |
+| `TRIG-SLOPE-WIN` | 0 V1 (upper) · 1 V2 (lower) · 2 Both |
+| `TRIG-SLOPE-WHEN` / `TRIG-PULSE-WHEN` | 0 = · 1 ≠ · 2 > · 3 < (same enum, confirmed on both) |
+| `TRIG-PULSE-NEG` | 0 Positive · 1 Negative pulse |
+| `TRIG-OVERTIME-NEG` | 0 Positive · 1 Negative |
+| `TRIG-SWAP-CHx-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Overtime (per-channel type in Alter mode; 4-value, no Slope/Alter) |
+| `VERT-CHx-VB` | V/div: 0=2mV 1=5mV 2=10 3=20 4=50 5=100 6=200 7=500mV 8=1V 9=2V 10=5V (10V/div → 0) |
+| `HORIZ-*TB` | time/div index, 2-4-8 sequence 2 ns…40 s (`TB_TO_NS`); WIN-TB = knob 0..31, HORIZ-TB clamps at 6 (200 ns) |
+
+Still-unmapped enums (need targeted captures): `VERT-CHx-COUP`,
+`VERT-CHx-PROBE`, the Pulse/Slope/Video condition enums (`*-WHEN`, `*-SET`),
+`ACQURIE-MODE`/`-TYPE`, `MATH-MODE`, `DISPLAY-*`, and the `MEASURE-ITEM*` ids.
+
+### `CONTROL-MENUID` — on-screen menu id (partial, mapped by context)
+
+| id | menu |
+|---|---|
+| 2 | CH / vertical menu (seen during CH1/CH2 V-div, position, timebase play) |
+| 5 | Trigger → Edge submenu |
+| 6 | Trigger → Pulse submenu, **page 1** |
+| 7 | Trigger → Pulse submenu, **page 2** (When / Time) |
+| 8 | Trigger → Video submenu |
+| 10 | default / no active menu (vendor-app baseline) |
+| 11 | Trigger menu (level/base, Edge default) |
+| 22 | Trigger → Slope submenu, **page 1** |
+| 23 | Trigger → Slope submenu, **page 2** (V1/V2 / When / Time) |
+| 24 | Trigger → Alter submenu (base) |
+| 26 / 27 / 28 / 29 | Alter → **CH1** Edge / Pulse / Video / Overtime |
+| 30 / 31 / 32 / 33 | Alter → **CH2** Edge / Pulse / Video / Overtime |
+| 38 | Trigger → Overtime submenu, **page 1** |
+| 39 | Trigger → Overtime submenu, **page 2** (Coupling) |
+
+Multi-page trigger submenus use **consecutive ids** for page 1 / page 2
+(Pulse 6/7, Slope 22/23, Overtime 38/39). `CONTROL-DISP-MENU` = 1 while a menu is shown, 0 when
+closed. `CONTROL-TYPE` stayed 0 in every capture. (`MENU_NAMES` in
+`mso5202d.py`.) More menu ids (Acquire, Display, Measure, Math, Utility,
+Save/Recall, LA…) remain to be mapped by opening each menu.

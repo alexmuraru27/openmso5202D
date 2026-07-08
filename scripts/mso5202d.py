@@ -202,9 +202,12 @@ assert sum(w for _, w in SETTINGS_PARAMS) == 213    # == /protocol.inf [TOTAL]
 # Units (verified on hardware, see MSO5202D-protocol.md §6):
 #  - 8-byte time fields (HOLDTIME*, *-TIME, HORIZ-TRIGTIME) are PICOSECONDS
 #    (HOLDTIME-MIN 100000 = 100 ns, MAX 1e13 = 10 s = the holdoff limits).
-#  - VERT-CHx-POS and TRIG-VPOS are signed 1/100-DIVISION units;
-#    TRIG-VPOS = VERT-CHsrc-POS + trig_level/vdiv*100.
+#  - VERT-CHx-POS and TRIG-VPOS are signed 1/25-DIVISION units (so ±200 =
+#    ±8 div = the manual's trigger-level range). Trigger level in volts =
+#    (TRIG-VPOS - POS_src) * vdiv / 25 — verified against the scope readout
+#    (±200 -> +13.4 V / -18.5 V at 2 V/div, POS +32).
 #  - TRIG-FREQUENCY is mHz (frequency counter).
+DIV_UNIT = 25          # settings position/level fields are in 1/25-division units
 # Multi-byte fields that are plausibly signed (positions / levels).
 _SIGNED = {'VERT-CH1-POS', 'VERT-CH2-POS', 'TRIG-VPOS', 'TRIG-SLOPE-V1',
            'TRIG-SLOPE-V2', 'LA-D7-D0-USER-THRESHOLD-VOLT',
@@ -233,6 +236,68 @@ TB_TO_NS = {
     30: 20_000_000_000, 31: 40_000_000_000,
 }
 
+# Trigger enums -> labels (mapped by stepping each menu on hardware, see
+# MSO5202D-protocol.md §6). All verified twice.
+TRIG_STATE_NAMES = {   # 1 = WAIT resolved via Normal-mode-no-trigger
+    0: 'STOP', 1: 'WAIT', 2: 'AUTO', 3: "TRIG'D", 4: 'SCAN', 5: 'SINGLE', 6: 'ARMING',
+}
+TRIG_TYPE_NAMES = {
+    0: 'Edge', 1: 'Video', 2: 'Pulse', 3: 'Slope', 4: 'Overtime', 5: 'Alter',
+}
+TRIG_SRC_NAMES = {0: 'CH1', 1: 'CH2', 2: 'EXT', 3: 'EXT/5', 4: 'AC line'}
+TRIG_MODE_NAMES = {0: 'Auto', 1: 'Normal'}
+TRIG_SLOPE_NAMES = {0: 'Rising', 1: 'Falling'}
+TRIG_COUP_NAMES = {0: 'DC', 1: 'AC', 2: 'Noise Rej', 3: 'HF Rej', 4: 'LF Rej'}
+# Video-type sub-params (TRIG-VIDEO-*).
+TRIG_VIDEO_NEG_NAMES = {0: 'Normal', 1: 'Inverted'}
+TRIG_VIDEO_STD_NAMES = {0: 'NTSC', 1: 'PAL/SECAM'}      # TRIG-VIDEO-PAL
+TRIG_VIDEO_SYN_NAMES = {
+    0: 'All Lines', 1: 'Line Num', 2: 'Odd Field', 3: 'Even Field', 4: 'All Fields',
+}   # when SYN=1 (Line Num), TRIG-VIDEO-LINE = selected line number
+    # (1..525 for NTSC; PAL/SECAM would be 1..625)
+
+# Slope-type sub-params (TRIG-SLOPE-*).
+TRIG_SLOPE_SET_NAMES = {0: 'Positive', 1: 'Negative'}   # slope direction
+TRIG_SLOPE_WIN_NAMES = {0: 'V1', 1: 'V2', 2: 'Both'}    # which threshold the knob adjusts
+# TRIG-SLOPE-V1/V2: two thresholds, signed 1/25-div; TRIG-SLOPE-TIME: ps (20ns..10s)
+
+# Pulse-type sub-params (TRIG-PULSE-*). TRIG-PULSE-TIME: ps (20ns..10s width).
+TRIG_PULSE_NEG_NAMES = {0: 'Positive', 1: 'Negative'}   # pulse polarity
+
+# Overtime-type sub-params (TRIG-OVERTIME-*). TRIG-OVERTIME-TIME: ps (20ns..10s).
+TRIG_OVERTIME_NEG_NAMES = {0: 'Positive', 1: 'Negative'}
+
+# Alter/Swap: each channel has its OWN trigger config in the TRIG-SWAP-CHx-*
+# block. TRIG-SWAP-CHx-TYPE is a 4-value enum (no Slope/Alter, unlike the
+# main 6-value TRIG-TYPE). Its sub-params reuse the main-trigger enums
+# (SWAP-*-EDGE-SLOPE=TRIG_SLOPE_NAMES, -COUP=TRIG_COUP_NAMES, -VIDEO-*, -PULSE-*,
+# -OVERTIME-*, -MODE=TRIG_MODE_NAMES).
+TRIG_SWAP_TYPE_NAMES = {0: 'Edge', 1: 'Video', 2: 'Pulse', 3: 'Overtime'}
+
+# Shared "when" condition enum for Slope (TRIG-SLOPE-WHEN) and Pulse
+# (TRIG-PULSE-WHEN) — verified identical on both.
+TRIG_WHEN_NAMES = {0: '=', 1: '≠', 2: '>', 3: '<'}
+
+# CONTROL-MENUID -> which on-screen menu is shown (mapped by context across
+# captures; see MSO5202D-protocol.md §6). Partial — more menus to identify.
+# Trigger sub-menus that span two pages have consecutive ids (page1, page2).
+MENU_NAMES = {
+    2: 'CH (vertical)', 5: 'Trig:Edge', 6: 'Trig:Pulse p1', 7: 'Trig:Pulse p2',
+    8: 'Trig:Video', 10: 'default/none', 11: 'Trigger', 22: 'Trig:Slope p1',
+    23: 'Trig:Slope p2', 24: 'Trig:Alter', 38: 'Trig:Overtime p1',
+    39: 'Trig:Overtime p2',
+    # Alter/Swap per-type submenus: CH1 block 26-29, CH2 block 30-33.
+    26: 'Alter-CH1:Edge', 27: 'Alter-CH1:Pulse', 28: 'Alter-CH1:Video',
+    29: 'Alter-CH1:Overtime', 30: 'Alter-CH2:Edge', 31: 'Alter-CH2:Pulse',
+    32: 'Alter-CH2:Video', 33: 'Alter-CH2:Overtime',
+}
+
+# Horizontal sample density. The vendor spec gives "sample interval = s/div /
+# 200" (i.e. 200 samples per division); confirmed to the digit against our own
+# cal signal (500 samples/period at 400 us/div, 1 kHz). A waveform block is
+# 3840 samples = 19.2 divisions.
+SAMPLES_PER_DIV = 200
+
 
 def decode_settings(payload: bytes) -> dict:
     """Decode a settings payload from read_settings() (0x81 echo + 213 param
@@ -250,14 +315,23 @@ def decode_settings(payload: bytes) -> dict:
     d['CH2-VDIV-mV'] = VB_TO_MV.get(d['VERT-CH2-VB'])
     d['TDIV-ns'] = TB_TO_NS.get(d['HORIZ-WIN-TB'])       # knob / displayed
     d['TDIV-ACQ-ns'] = TB_TO_NS.get(d['HORIZ-TB'])       # real acquisition TB
-    # Trigger level: TRIG-VPOS = source-channel POS + level in 1/100-div units.
+    # Horizontal calibration: 200 samples/div (spec, hw-confirmed).
+    tdiv = d['TDIV-ns']
+    d['SAMPLE-INTERVAL-ns'] = tdiv / SAMPLES_PER_DIV if tdiv else None
+    d['SAMPLERATE-HZ'] = SAMPLES_PER_DIV / (tdiv * 1e-9) if tdiv else None
+    # Trigger level & slope thresholds (volts) = (field - source POS) * vdiv / 25,
+    # since the position/level fields are in 1/25-division units (verified vs
+    # scope for the level, and for the slope V1/V2 at CH1 5V/div: +12V/-36V).
     src = d['TRIG-SRC']
     if src in (0, 1):
         vdiv = d['CH1-VDIV-mV'] if src == 0 else d['CH2-VDIV-mV']
         pos = d['VERT-CH1-POS'] if src == 0 else d['VERT-CH2-POS']
-        d['TRIG-LEVEL-mV'] = (d['TRIG-VPOS'] - pos) * vdiv / 100 if vdiv else None
+        volt = lambda f: (f - pos) * vdiv / DIV_UNIT if vdiv else None
+        d['TRIG-LEVEL-mV'] = volt(d['TRIG-VPOS'])
+        d['TRIG-SLOPE-V1-mV'] = volt(d['TRIG-SLOPE-V1'])
+        d['TRIG-SLOPE-V2-mV'] = volt(d['TRIG-SLOPE-V2'])
     else:
-        d['TRIG-LEVEL-mV'] = None                        # ext/alt source: unknown
+        d['TRIG-LEVEL-mV'] = d['TRIG-SLOPE-V1-mV'] = d['TRIG-SLOPE-V2-mV'] = None
     return d
 
 
@@ -268,7 +342,7 @@ if __name__ == '__main__':
     print("settings:", {k: d[k] for k in (
         'VERT-CH1-DISP', 'VERT-CH1-VB', 'CH1-VDIV-mV', 'VERT-CH2-DISP',
         'CH2-VDIV-mV', 'TRIG-STATE', 'TRIG-VPOS', 'TRIG-LEVEL-mV',
-        'TRIG-FREQUENCY', 'HORIZ-TB', 'TDIV-ns', 'TDIV-ACQ-ns')})
+        'TRIG-FREQUENCY', 'HORIZ-TB', 'TDIV-ns', 'SAMPLERATE-HZ')})
     w = s.read_waveform(0)
     print(f"waveform: {len(w)} samples, min={min(w)} max={max(w)}")
     s.close()

@@ -118,14 +118,32 @@ See `MSO5202D-protocol.md` §8 for the detailed reverse-engineering to-do. In br
    (`captures/mso5202d-timediv.pcapng`) then mapped `[HORIZ-TB]`/`[HORIZ-WIN-TB]`
    → 2 ns…40 s (2-4-8 sequence, 32 steps; acquisition TB clamps at 200 ns), and a
    combined all-knobs capture (`captures/mso5202d-combined.pcapng`) resolved
-   vertical-position/trigger-level units (1/100 div) and the picosecond time
-   fields. Same method still pending for the menu enums.
+   vertical-position/trigger-level units and the picosecond time fields. A
+   trigger-level sweep (`captures/mso5202d-trig-level.pcapng`) then calibrated
+   those units against the scope's V readout: **1/25 div** (`level_V =
+   (TRIG-VPOS − POS_src) × vdiv/25`; ±200 = ±8 div), and pinned `TRIG-STATE`
+   2 = untriggered. Same method still pending for the coupling/type/mode enums.
 2. **Dump more scope files** via selector `0x10` (`/system.inf`, `/cal.inf`, …) to
    find the counts→volts / index→units **calibration table** — we can do this now
    directly with `scripts/mso5202d.py`.
 3. ~~**Crack 2-channel readout**~~ — **DONE 2026-07-08**: the acquire value byte
    selects the channel (`02 01 00` = CH1, `02 01 01` = CH2); `0x12` is
-   something else (run/hold?). See protocol doc §5. Counts↔volts transfer
-   scaling still open.
-4. **Host-side control:** find the command that presses a `/keyprotocol.inf` key
+   something else (run/hold?). See protocol doc §5. Off-screen positioning clips
+   the waveform to the rails / returns rail-to-rail blocks
+   (`captures/mso5202d-ch1-vpos.pcapng`). The vertical amplitude / counts→volts
+   scale is still **unmodelled** — deterministic but differs per channel/V/div
+   (CH1@5V/div→27 counts vs CH2@2V/div→192 counts for the same cal signal;
+   fine/probe/trigger ruled out).
+4. ~~**Sample rate / X-axis calibration**~~ — **DONE 2026-07-08**: 200
+   samples/div (sample interval = time/div ÷ 200), block = 19.2 div. Confirmed
+   against the vendor MSO5000-series manual and our own cal-signal cycle counts.
+5. **Host-side control:** find the command that presses a `/keyprotocol.inf` key
    (likely how the PC sets V/div, timebase, trigger, autoset, …).
+
+**Cross-checked against the vendor MSO5000-series user manual (Ch. 8 specs).**
+Confirmed: 2-4-8 SEC/DIV sequence; holdoff 100 ns–10 s (⇒ ps time fields);
+trigger level ±8 div (= VPOS ±200 ⇒ 1/25-div units); scan/roll mode at ≥80 ms/div
+(⇒ `[TRIG-STATE]`=4); 200 samples/div; 8-bit ADC, channels sampled
+simultaneously (⇒ non-interleaved dual readout). The manual is the 60/100 MHz
+**MSO5000B** base model (SEC/DIV from 4 ns, VOLTS to 5 V/div); our 200 MHz
+**MSO5202D** extends the fast end to 2 ns/div (TB index 0).

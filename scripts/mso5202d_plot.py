@@ -9,13 +9,14 @@ Usage:
     python3 mso5202d_plot.py --png out.png  # headless: grab a few frames, save a PNG
     python3 mso5202d_plot.py --frames 200   # live: stop after N frames
 
-Y axis is raw 8-bit ADC counts (0..255) until the counts->volts calibration table
-is recovered; the title shows the live decoded V/div (real units), time/div and
-trigger state/level/frequency. X axis is sample index (sample rate not yet
-calibrated). Both channels are shown when displayed on the scope (channel select
-= the acquire value byte, solved 2026-07-08).
+Y axis is raw 8-bit ADC counts (0..255, screen-oriented: small byte = top, so
+the layout matches the scope) until counts->volts is recovered; title shows V/div
+(real units), time/div, sample rate and trigger state/level/frequency. X axis is
+real time (200 samples/div, so a 3840-sample block spans 19.2 div). Both channels
+are shown when displayed on the scope (channel select = the acquire value byte,
+solved 2026-07-08).
 """
-import argparse, sys, time
+import argparse
 import numpy as np
 import matplotlib
 
@@ -35,13 +36,54 @@ def fmt_level(mv):
     if mv is None: return '?'
     return f"{mv/1000:g} V" if abs(mv) >= 1000 else f"{mv:g} mV"
 
+def fmt_rate(hz):
+    if not hz: return '?'
+    for unit, scale in (('GSa/s', 1e9), ('MSa/s', 1e6), ('kSa/s', 1e3), ('Sa/s', 1)):
+        if hz >= scale:
+            return f"{hz/scale:g} {unit}"
+    return f"{hz:g} Sa/s"
+
+def fmt_state(st):
+    from mso5202d import TRIG_STATE_NAMES
+    return TRIG_STATE_NAMES.get(st, f"?{st}")
+
+def fmt_type(t):
+    from mso5202d import TRIG_TYPE_NAMES
+    return TRIG_TYPE_NAMES.get(t, f"?{t}")
+
+def fmt_src(v):
+    from mso5202d import TRIG_SRC_NAMES
+    return TRIG_SRC_NAMES.get(v, f"?{v}")
+
 def label(s):
+    from mso5202d import TRIG_MODE_NAMES, TRIG_SLOPE_NAMES
+    mode = TRIG_MODE_NAMES.get(s.get('TRIG-MODE'), '')
+    slope = {0: '↑', 1: '↓'}.get(s.get('TRIG-EDGE-SLOPE'), '')
     return (f"MSO5202D  |  CH1 {fmt_vdiv(s.get('CH1-VDIV-mV'), s.get('VERT-CH1-VB'))}  "
             f"CH2 {fmt_vdiv(s.get('CH2-VDIV-mV'), s.get('VERT-CH2-VB'))}  "
-            f"|  {fmt_tdiv(s.get('TDIV-ns'))}  |  trig state={s.get('TRIG-STATE')} "
+            f"|  {fmt_tdiv(s.get('TDIV-ns'))} ({fmt_rate(s.get('SAMPLERATE-HZ'))})  |  "
+            f"trig {fmt_state(s.get('TRIG-STATE'))} {fmt_type(s.get('TRIG-TYPE'))}{slope} "
+            f"{fmt_src(s.get('TRIG-SRC'))} {mode} "
             f"level={fmt_level(s.get('TRIG-LEVEL-mV'))} f={s.get('TRIG-FREQUENCY', 0)/1000:g} Hz")
 
 CH_COLORS = ('#e6b400', '#0a84ff')          # CH1 yellow, CH2 blue (like the scope)
+
+def clip_note(waves):
+    """The readout is the screen-rendered buffer; samples pinned to the top
+    (<=2) or bottom (>=253) rail mean the trace is (partly) off-screen and
+    those samples are invalid. Flag it so an off-screen trace isn't mistaken
+    for a real waveform."""
+    flags = []
+    for ch, y in sorted(waves.items()):
+        railed = ((y <= 2) | (y >= 253)).mean() if len(y) else 0
+        if railed > 0.02:
+            flags.append(f"CH{ch+1} CLIPPED {railed*100:.0f}%")
+    return ("  |  ⚠ " + ", ".join(flags)) if flags else ""
+
+def time_axis(n, s):
+    """Sample indices -> seconds, block start = 0 (200 samples/div)."""
+    dt = s.get('SAMPLE-INTERVAL-ns')
+    return np.arange(n) * (dt * 1e-9) if dt else np.arange(n)
 
 def grab(scope):
     """Read settings + one waveform block per displayed channel.
@@ -65,13 +107,17 @@ def run_png(path, frames):
     fig, ax = plt.subplots(figsize=(10, 4.5))
     n = 0
     for ch, y in waves.items():
-        ax.plot(np.arange(len(y)), y, lw=0.8, color=CH_COLORS[ch], label=f"CH{ch+1}")
+        ax.plot(time_axis(len(y), s), y, lw=0.8, color=CH_COLORS[ch], label=f"CH{ch+1}")
         n = max(n, len(y))
-    # Raw counts are inverted vs the screen (higher count = lower trace) —
-    # flip the Y axis so traces sit like they do on the scope display.
-    ax.set_ylim(255, 0); ax.set_xlim(0, n or 1)
-    ax.set_xlabel("sample"); ax.set_ylabel("ADC counts (0-255, screen-oriented)")
-    ax.set_title(label(s), fontsize=9)
+    t = time_axis(n or 1, s)
+    # Match the scope's static layout: small byte = top of screen, large =
+    # bottom, so invert the Y axis (e.g. CH2 @ bytes ~17-85 sits above CH1 @
+    # ~161-189, as on the scope). NB: while a trace is *moved* the byte can
+    # track the wrong way — a symptom of the unresolved vertical-scaling bug (§5).
+    ax.set_ylim(255, 0); ax.set_xlim(0, t[-1] if len(t) else 1)
+    ax.set_xlabel("time (s)" if s.get('SAMPLE-INTERVAL-ns') else "sample")
+    ax.set_ylabel("ADC counts (0-255, screen-oriented)")
+    ax.set_title(label(s) + clip_note(waves), fontsize=9)
     ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     fig.tight_layout(); fig.savefig(path, dpi=110)
@@ -95,8 +141,8 @@ def run_live(max_frames):
     fig, ax = plt.subplots(figsize=(11, 5))
     lines = [ax.plot([], [], lw=0.8, color=CH_COLORS[ch], label=f"CH{ch+1}")[0]
              for ch in (0, 1)]
-    ax.set_ylim(255, 0)                  # inverted: match the scope's screen
-    ax.set_xlabel("sample"); ax.set_ylabel("ADC counts (0-255, screen-oriented)")
+    ax.set_ylim(255, 0)                  # small byte = top, matches scope layout
+    ax.set_xlabel("time (s)"); ax.set_ylabel("ADC counts (0-255, screen-oriented)")
     ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     state = {'n': 0}
@@ -111,11 +157,13 @@ def run_live(max_frames):
             y = waves.get(ch)
             if y is None or len(y) == 0:     # off / empty read — keep last trace
                 continue
-            line.set_data(np.arange(len(y)), y)
+            line.set_data(time_axis(len(y), s), y)
             n = max(n, len(y))
         if n:
-            ax.set_xlim(0, n)
-        ax.set_title(label(s), fontsize=9)
+            t = time_axis(n, s)
+            ax.set_xlim(0, t[-1])
+            ax.set_xlabel("time (s)" if s.get('SAMPLE-INTERVAL-ns') else "sample")
+        ax.set_title(label(s) + clip_note(waves), fontsize=9)
         state['n'] += 1
         if max_frames and state['n'] >= max_frames:
             plt.close(fig)
