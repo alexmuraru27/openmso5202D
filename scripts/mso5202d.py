@@ -280,6 +280,17 @@ TRIG_SWAP_TYPE_NAMES = {0: 'Edge', 1: 'Video', 2: 'Pulse', 3: 'Overtime'}
 # (TRIG-PULSE-WHEN) — verified identical on both.
 TRIG_WHEN_NAMES = {0: '=', 1: '≠', 2: '>', 3: '<'}
 
+# Acquire menu enums (ACQURIE-* fields).
+ACQ_TYPE_NAMES = {0: 'Realtime', 1: 'Equ-time'}          # ACQURIE-TYPE
+ACQ_MODE_NAMES = {0: 'Normal', 1: 'Peak', 2: 'Average'}  # ACQURIE-MODE
+# ACQURIE-AVG-CNT: index -> number of averages (count = 4 << index = 2^(idx+2)).
+ACQ_AVG_COUNTS = {0: 4, 1: 8, 2: 16, 3: 32, 4: 64, 5: 128}
+# ACQURIE-STORE-DEPTH: record length. Codes are gapped because unavailable
+# depths (greyed out in the current mode) still occupy enum slots. 0=4K, 4=40K,
+# 6=512K (all channels), 7=1M (single-channel only; captured with one channel
+# on). The gaps (1/2/3/5) are the greyed-out depths (e.g. 20K).
+ACQ_DEPTH_NAMES = {0: '4K', 4: '40K', 6: '512K', 7: '1M'}
+
 # CONTROL-MENUID -> which on-screen menu is shown (mapped by context across
 # captures; see MSO5202D-protocol.md §6). Partial — more menus to identify.
 # Trigger sub-menus that span two pages have consecutive ids (page1, page2).

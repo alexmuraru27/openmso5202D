@@ -45,8 +45,11 @@ confirmed `TRIG-HOLDTIME` tracks the knob, §6), `mso5202d-trig-knob.pcapng`
 (trigger-level knob push — isolated it as "level to 0 V / channel ground",
 distinct from Set-50 %, §6), and `mso5202d-horiz-menu.pcapng` (Horizontal menu —
 mapped menu ids 3/40 and the LA menu 61; window/mark controls don't touch the
-settings blob, §6), and `mso5202d-horiz-position.pcapng` (horizontal-position
-knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6).
+settings blob, §6), `mso5202d-horiz-position.pcapng` (horizontal-position
+knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6),
+`mso5202d-acquire.pcapng` (Acquire menu — mapped `ACQURIE-TYPE/MODE/AVG-CNT/
+STORE-DEPTH`, §6), and `mso5202d-acquire-1m.pcapng` (single-channel — captured
+the 1M store-depth code 7, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -532,6 +535,21 @@ channel carries its **own independent trigger config** in the
 (`TRIG_SWAP_TYPE_NAMES` in `mso5202d.py`; per-channel enums reuse the main
 trigger name maps.)
 
+**Acquire-menu enums** — mapped by stepping the Acquire menu
+(`mso5202d-acquire.pcapng`):
+- `[ACQURIE-TYPE]`: `0` = **Realtime**, `1` = **Equivalent-time**.
+- `[ACQURIE-MODE]`: `0` = **Normal**, `1` = **Peak Detect**, `2` = **Average**.
+- `[ACQURIE-AVG-CNT]`: index → averages, `0`=4 `1`=8 `2`=16 `3`=32 `4`=64
+  `5`=128 (count = 4·2ⁿ).
+- `[ACQURIE-STORE-DEPTH]`: record length, **gapped codes** (unavailable/greyed
+  depths still occupy enum slots): `0` = **4K**, `4` = **40K**, `6` = **512K**,
+  `7` = **1M**. 1M is single-channel only (captured with one channel on;
+  `mso5202d-acquire-1m.pcapng`); dual-channel maxes at 512K, matching the manual.
+  The gaps (1/2/3/5) are greyed-out depths (e.g. 20K).
+
+(`ACQ_TYPE_NAMES` / `ACQ_MODE_NAMES` / `ACQ_AVG_COUNTS` / `ACQ_DEPTH_NAMES` in
+`mso5202d.py`.)
+
 `decode_settings()` in `mso5202d.py` now decodes the **entire blob** into named
 `/protocol.inf` fields (plus derived `CH1-VDIV-mV`/`CH2-VDIV-mV`, `TDIV-ns`
 (knob, from WIN-TB) and `TDIV-ACQ-ns` (real acquisition TB)), driven by a
@@ -926,10 +944,10 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 182  1  DISPLAY-GRID-BRIGHT        graticule brightness
 183  1  DISPLAY-MAXGRID-BRIGHT     max (=15 seen)
 --- ACQUIRE ---
-184  1  ACQURIE-MODE               acquire mode enum (unmapped)
-185  1  ACQURIE-AVG-CNT            average count
-186  1  ACQURIE-TYPE               acquire type (Normal/Peak/Average? unmapped)
-187  1  ACQURIE-STORE-DEPTH        record length setting (unmapped)
+184  1  ACQURIE-MODE               0=Normal 1=Peak 2=Average
+185  1  ACQURIE-AVG-CNT            avg index: 0=4 1=8 2=16 3=32 4=64 5=128 (count=4*2^n)
+186  1  ACQURIE-TYPE               0=Realtime 1=Equivalent-time
+187  1  ACQURIE-STORE-DEPTH        record length: 0=4K 4=40K 6=512K 7=1M (1M single-ch only; gaps=greyed depths)
 --- MEASURE (8 slots, each: SRC then item id) ---
 188  1  MEASURE-ITEM1-SRC          measurement source (0=CH1,1=CH2 seen)
 189  1  MEASURE-ITEM1              measurement id (unmapped)
@@ -969,6 +987,10 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 | `TRIG-PULSE-NEG` | 0 Positive · 1 Negative pulse |
 | `TRIG-OVERTIME-NEG` | 0 Positive · 1 Negative |
 | `TRIG-SWAP-CHx-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Overtime (per-channel type in Alter mode; 4-value, no Slope/Alter) |
+| `ACQURIE-TYPE` | 0 Realtime · 1 Equivalent-time |
+| `ACQURIE-MODE` | 0 Normal · 1 Peak Detect · 2 Average |
+| `ACQURIE-AVG-CNT` | 0=4 · 1=8 · 2=16 · 3=32 · 4=64 · 5=128 (count = 4·2ⁿ) |
+| `ACQURIE-STORE-DEPTH` | 0=4K · 4=40K · 6=512K · 7=1M (1M single-ch; gaps 1/2/3/5 = greyed depths) |
 | `VERT-CHx-VB` | V/div: 0=2mV 1=5mV 2=10 3=20 4=50 5=100 6=200 7=500mV 8=1V 9=2V 10=5V (10V/div → 0) |
 | `HORIZ-*TB` | time/div index, 2-4-8 sequence 2 ns…40 s (`TB_TO_NS`); WIN-TB = knob 0..31, HORIZ-TB clamps at 6 (200 ns) |
 
