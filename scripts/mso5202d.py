@@ -208,9 +208,11 @@ assert sum(w for _, w in SETTINGS_PARAMS) == 213    # == /protocol.inf [TOTAL]
 #    (±200 -> +13.4 V / -18.5 V at 2 V/div, POS +32).
 #  - TRIG-FREQUENCY is mHz (frequency counter).
 DIV_UNIT = 25          # settings position/level fields are in 1/25-division units
-# Multi-byte fields that are plausibly signed (positions / levels).
+# Multi-byte SIGNED fields: positions/levels (2-byte, 1/25 div) and the
+# horizontal delay HORIZ-TRIGTIME (8-byte ps) — the delay goes negative
+# (post-trigger), which otherwise decodes as a huge ~2^64 value.
 _SIGNED = {'VERT-CH1-POS', 'VERT-CH2-POS', 'TRIG-VPOS', 'TRIG-SLOPE-V1',
-           'TRIG-SLOPE-V2', 'LA-D7-D0-USER-THRESHOLD-VOLT',
+           'TRIG-SLOPE-V2', 'HORIZ-TRIGTIME', 'LA-D7-D0-USER-THRESHOLD-VOLT',
            'LA-D15-D8-USER-THRESHOLD-VOLT'}
 
 # VERT-CHx-VB index -> mV/div, verified on hardware over a full 2mV..10V sweep.
@@ -290,6 +292,7 @@ MENU_NAMES = {
     26: 'Alter-CH1:Edge', 27: 'Alter-CH1:Pulse', 28: 'Alter-CH1:Video',
     29: 'Alter-CH1:Overtime', 30: 'Alter-CH2:Edge', 31: 'Alter-CH2:Pulse',
     32: 'Alter-CH2:Video', 33: 'Alter-CH2:Overtime',
+    3: 'Horizontal p1', 40: 'Horizontal p2', 61: 'Logic Analyzer',
 }
 
 # Horizontal sample density. The vendor spec gives "sample interval = s/div /

@@ -41,9 +41,12 @@ sweep — mapped the `TRIG-OVERTIME-*` fields and menu id 39, §6), and
 `TRIG-SWAP-CHx-TYPE` and the per-channel sub-params + menu ids 26–29, §6), and
 `mso5202d-trig-alter-ch2.pcapng` (Alter/Swap CH2 — confirmed CH2 symmetry, menu
 ids 30–33, §6), `mso5202d-trig-holdoff.pcapng` (holdoff-knob sweep —
-confirmed `TRIG-HOLDTIME` tracks the knob, §6), and `mso5202d-trig-knob.pcapng`
+confirmed `TRIG-HOLDTIME` tracks the knob, §6), `mso5202d-trig-knob.pcapng`
 (trigger-level knob push — isolated it as "level to 0 V / channel ground",
-distinct from Set-50 %, §6).
+distinct from Set-50 %, §6), and `mso5202d-horiz-menu.pcapng` (Horizontal menu —
+mapped menu ids 3/40 and the LA menu 61; window/mark controls don't touch the
+settings blob, §6), and `mso5202d-horiz-position.pcapng` (horizontal-position
+knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -372,12 +375,20 @@ limits (the vendor manual lists **Holdoff Range 100 ns to 10 s**, confirming
 both the unit and the field). `[TRIG-HOLDTIME]` is the **live holdoff value**,
 verified to track the knob (`mso5202d-trig-holdoff.pcapng`): it lives under the
 **HORIZONTAL menu → F4 (Holdoff Time)** — turn the multi-function knob to adjust,
-push it to reset to 100 ns (the observed floor). Note the Horizontal/holdoff
-menu does **not** change `[CONTROL-MENUID]` (which only tracks the CH and
-Trigger menus). `[HORIZ-TRIGTIME]`@162–169 is the **horizontal
+push it to reset to 100 ns (the observed floor). The Horizontal menu is
+`[CONTROL-MENUID]` **3 (page 1)** / **40 (page 2, holdoff)`
+(`mso5202d-horiz-menu.pcapng`). **Window ctrl (Major/Minor), Mark right/left,
+Set/Clear, Clear-all produce NO change in the polled settings blob** —
+`[HORIZ-WIN-STATE]` never moved over 2 min of trying, so the dual-window/zoom
+and mark state must live in a separate structure (not the 213-byte state), or
+require dual-window mode to be actively engaged first. The horizontal *position*
+knob moves `[HORIZ-TRIGTIME]` (delay, ps). `[HORIZ-TRIGTIME]`@162–169 is the **horizontal
 trigger position (delay) in ps**: in the combined capture each click moved it
 by ≈0.3 div worth of time at every timebase tried (e.g. ±240 µs at 800 µs/div,
-±1.2 ms at 4 ms/div). The `TRIG-*-TIME` family (pulse/slope/overtime) reads
+±1.2 ms at 4 ms/div). It is **SIGNED** (int64) — the horizontal-position sweep
+in `mso5202d-horiz-position.pcapng` drove it from ≈−4 ms through 0 to +29 ms;
+negative values (post-trigger) show up as ≈2⁶⁴−x if read unsigned, so
+`decode_settings()` treats it as signed. The `TRIG-*-TIME` family (pulse/slope/overtime) reads
 sanely in ps too (500 000 = 500 ns defaults; the manual gives pulse/slope/
 overtime ranges of **20 ns to 10 s**).
 
@@ -896,8 +907,8 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 --- HORIZONTAL ---
 159  1  HORIZ-TB                   acquisition timebase index -> TB_TO_NS (clamps at 6 = 200 ns)
 160  1  HORIZ-WIN-TB               knob timebase index 0..31 -> TB_TO_NS (2-4-8 seq)
-161  1  HORIZ-WIN-STATE            window/zoom state (unmapped)
-162  8  HORIZ-TRIGTIME             ps; horizontal trigger position (delay)
+161  1  HORIZ-WIN-STATE            window/zoom state (never changed via Horizontal menu; needs dual-window engaged?)
+162  8  HORIZ-TRIGTIME             SIGNED ps; horizontal position/delay (goes negative = post-trigger)
 --- MATH ---
 170  1  MATH-DISP                  0/1
 171  1  MATH-MODE                  math op enum (unmapped)
@@ -928,7 +939,7 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 205  1  CONTROL-MENUID             current menu id (see table below)
 206  1  CONTROL-DISP-MENU          0/1 menu displayed on screen
 --- LOGIC ANALYZER ---
-207  1  LA-SWI                     LA enable (unmapped)
+207  1  LA-SWI                     0/1 logic-analyzer on/off (LA menu = CONTROL-MENUID 61)
 208  2  LA-CHANNEL-STATE           per-bit D0..D15 enable mask (=255 seen)
 210  1  LA-CURRENT-CHANNEL         (unmapped)
 211  1  LA-D7-D0-THRESHOLD-TYPE
@@ -983,6 +994,9 @@ Still-unmapped enums (need targeted captures): `VERT-CHx-COUP`,
 | 30 / 31 / 32 / 33 | Alter → **CH2** Edge / Pulse / Video / Overtime |
 | 38 | Trigger → Overtime submenu, **page 1** |
 | 39 | Trigger → Overtime submenu, **page 2** (Coupling) |
+| 3 | Horizontal menu, **page 1** (window ctrl / marks) |
+| 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
+| 61 | Logic Analyzer menu (`[LA-SWI]` = LA on/off) |
 
 Multi-page trigger submenus use **consecutive ids** for page 1 / page 2
 (Pulse 6/7, Slope 22/23, Overtime 38/39). `CONTROL-DISP-MENU` = 1 while a menu is shown, 0 when
