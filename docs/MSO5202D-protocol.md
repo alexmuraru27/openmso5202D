@@ -50,8 +50,9 @@ knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6),
 `mso5202d-acquire.pcapng` (Acquire menu — mapped `ACQURIE-TYPE/MODE/AVG-CNT/
 STORE-DEPTH`, §6), `mso5202d-acquire-1m.pcapng` (single-channel — captured
 the 1M store-depth code 7, §6), `mso5202d-ch1-menu.pcapng` (CH1 vertical
-menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), and
-`mso5202d-ch2-menu.pcapng` (CH2 vertical menu — confirmed channel symmetry, §6).
+menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), `mso5202d-ch2-menu.pcapng` (CH2 vertical menu — confirmed channel symmetry, §6),
+and `mso5202d-pos-knob-push.pcapng` (position-knob pushes — vertical and
+horizontal position knobs reset their axis to 0/centre, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -345,7 +346,8 @@ vertical position, time/div and horizontal position all exercised):
 
 - `[VERT-CHx-POS]` (signed LE16) is the channel's vertical position in
   **1/25-division units** (knob fine step = 8 = 0.32 div; see the calibration
-  below).
+  below). **Pushing the vertical-position knob resets it to 0** (channel to
+  vertical centre) — `mso5202d-pos-knob-push.pcapng`, matching the manual.
 - `[TRIG-VPOS]` (signed LE16) = **`[VERT-CHsrc-POS]` + trigger level ⁄ V-div ×
   25** — i.e. the trigger marker's screen position, where the position/level
   fields are in **1/25-division units** (see below). VPOS tracks the CH1
@@ -393,7 +395,8 @@ by ≈0.3 div worth of time at every timebase tried (e.g. ±240 µs at 800 µs/d
 ±1.2 ms at 4 ms/div). It is **SIGNED** (int64) — the horizontal-position sweep
 in `mso5202d-horiz-position.pcapng` drove it from ≈−4 ms through 0 to +29 ms;
 negative values (post-trigger) show up as ≈2⁶⁴−x if read unsigned, so
-`decode_settings()` treats it as signed. The `TRIG-*-TIME` family (pulse/slope/overtime) reads
+`decode_settings()` treats it as signed. **Pushing the horizontal-position knob
+resets it to 0** (delay to centre) — `mso5202d-pos-knob-push.pcapng`. The `TRIG-*-TIME` family (pulse/slope/overtime) reads
 sanely in ps too (500 000 = 500 ns defaults; the manual gives pulse/slope/
 overtime ranges of **20 ns to 10 s**).
 
