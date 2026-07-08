@@ -52,8 +52,9 @@ STORE-DEPTH`, §6), `mso5202d-acquire-1m.pcapng` (single-channel — captured
 the 1M store-depth code 7, §6), `mso5202d-ch1-menu.pcapng` (CH1 vertical
 menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), `mso5202d-ch2-menu.pcapng` (CH2 vertical menu — confirmed channel symmetry, §6),
 `mso5202d-pos-knob-push.pcapng` (position-knob pushes — vertical and
-horizontal position knobs reset their axis to 0/centre, §6), and
-`mso5202d-autoset.pcapng` (AUTOSET button — compound reconfigure; §6 note).
+horizontal position knobs reset their axis to 0/centre, §6), `mso5202d-autoset.pcapng` (AUTOSET button — compound reconfigure; §6 note), and
+`mso5202d-display.pcapng` (Display menu — mapped `DISPLAY-MODE/FORMAT/GRID-KIND/
+GRID-BRIGHT/CONTRAST/PERSIST` + menu ids 4/36, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -573,6 +574,25 @@ on CH2 (`mso5202d-ch2-menu.pcapng`, menu id **2**, identical layout & values):
 (`ACQ_TYPE_NAMES` / `ACQ_MODE_NAMES` / `ACQ_AVG_COUNTS` / `ACQ_DEPTH_NAMES` in
 `mso5202d.py`.)
 
+**Display-menu enums** — mapped by stepping the Display menu
+(`mso5202d-display.pcapng`; two pages: `[CONTROL-MENUID]` **4** =
+Type/Persist/Contrast, **36** = Grid/Format):
+- `[DISPLAY-MODE]`: `0` = **Vectors**, `1` = **Dots** (waveform draw type).
+- `[DISPLAY-FORMAT]`: `0` = **XT** (YT), `1` = **XY**.
+- `[DISPLAY-GRID-KIND]`: `0` = **Off**, `1` = **Dotted**, `2` = **RealLine**
+  (grid style; the Off/Dotted/RealLine↔0/1/2 order is inferred from cycle order).
+- `[DISPLAY-GRID-BRIGHT]`: grid intensity **0…15** (max = `[DISPLAY-MAXGRID-BRIGHT]`=15).
+- `[DISPLAY-CONTRAST]`: waveform/display intensity **0…15** (max =
+  `[DISPLAY-MAXCONTRAST]`=15).
+- `[DISPLAY-PERSIST]`: persistence, **gapped codes** `0`=Auto, `2`=0.2s,
+  `4`=0.4s, `8`=0.8s, `10`=1.0s, `11`=2.0s, `13`=4.0s, `17`=8.0s, `19`=Infinity.
+
+Not captured in the blob: the **Refresh rate** control (Auto/30/40/50 fps —
+no field changed when adjusted) and the second of the two 0…15 waveform
+controls (only `DISPLAY-CONTRAST` moved; "wave intensity" vs "contrast" not
+distinctly separable here). (`DISPLAY_MODE_NAMES` / `DISPLAY_FORMAT_NAMES` /
+`DISPLAY_GRID_NAMES` / `DISPLAY_PERSIST_NAMES` in `mso5202d.py`.)
+
 **AUTOSET** (front-panel button, `mso5202d-autoset.pcapng`) is a **compound
 reconfigure**, not a single field: it re-scales the timebase
 (`[HORIZ-TB]`/`[HORIZ-WIN-TB]`), can set `[TRIG-EDGE-SLOPE]`, and cycles
@@ -968,14 +988,14 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 174  1  MATH-FFT-FACTOR            (unmapped)
 175  1  MATH-FFT-DB                FFT dB/div (unmapped)
 --- DISPLAY ---
-176  1  DISPLAY-MODE               (unmapped)
-177  1  DISPLAY-PERSIST            persistence (unmapped)
-178  1  DISPLAY-FORMAT             YT/XY (unmapped)
-179  1  DISPLAY-CONTRAST           contrast
-180  1  DISPLAY-MAXCONTRAST        max contrast (=15 seen)
-181  1  DISPLAY-GRID-KIND          graticule kind
-182  1  DISPLAY-GRID-BRIGHT        graticule brightness
-183  1  DISPLAY-MAXGRID-BRIGHT     max (=15 seen)
+176  1  DISPLAY-MODE               0=Vectors 1=Dots (draw type)
+177  1  DISPLAY-PERSIST            0=Auto 2=0.2s 4=0.4s 8=0.8s 10=1.0s 11=2.0s 13=4.0s 17=8.0s 19=Infinity
+178  1  DISPLAY-FORMAT             0=XT 1=XY
+179  1  DISPLAY-CONTRAST           waveform/display intensity 0..15
+180  1  DISPLAY-MAXCONTRAST        max contrast (=15)
+181  1  DISPLAY-GRID-KIND          0=Off 1=Dotted 2=RealLine (order inferred)
+182  1  DISPLAY-GRID-BRIGHT        grid intensity 0..15
+183  1  DISPLAY-MAXGRID-BRIGHT     max grid brightness (=15)
 --- ACQUIRE ---
 184  1  ACQURIE-MODE               0=Normal 1=Peak 2=Average
 185  1  ACQURIE-AVG-CNT            avg index: 0=4 1=8 2=16 3=32 4=64 5=128 (count=4*2^n)
@@ -1029,6 +1049,11 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 | `ACQURIE-MODE` | 0 Normal · 1 Peak Detect · 2 Average |
 | `ACQURIE-AVG-CNT` | 0=4 · 1=8 · 2=16 · 3=32 · 4=64 · 5=128 (count = 4·2ⁿ) |
 | `ACQURIE-STORE-DEPTH` | 0=4K · 4=40K · 6=512K · 7=1M (1M single-ch; gaps 1/2/3/5 = greyed depths) |
+| `DISPLAY-MODE` | 0 Vectors · 1 Dots |
+| `DISPLAY-FORMAT` | 0 XT · 1 XY |
+| `DISPLAY-GRID-KIND` | 0 Off · 1 Dotted · 2 RealLine |
+| `DISPLAY-PERSIST` | 0 Auto · 2 0.2s · 4 0.4s · 8 0.8s · 10 1.0s · 11 2.0s · 13 4.0s · 17 8.0s · 19 Infinity |
+| `DISPLAY-CONTRAST` / `-GRID-BRIGHT` | 0…15 intensity (max = the `-MAX*` fields = 15) |
 | `VERT-CHx-VB` | V/div: 0=2mV 1=5mV 2=10 3=20 4=50 5=100 6=200 7=500mV 8=1V 9=2V 10=5V (10V/div → 0) |
 | `HORIZ-*TB` | time/div index, 2-4-8 sequence 2 ns…40 s (`TB_TO_NS`); WIN-TB = knob 0..31, HORIZ-TB clamps at 6 (200 ns) |
 
@@ -1043,6 +1068,7 @@ volts.
 | 1 | **CH1** vertical menu |
 | 2 | **CH2** vertical menu |
 | 3 | Horizontal menu, **page 1** (window ctrl / marks) |
+| 4 | Display menu (Type / Persist / Contrast page) |
 | 5 | Trigger → Edge submenu |
 | 6 | Trigger → Pulse submenu, **page 1** |
 | 7 | Trigger → Pulse submenu, **page 2** (When / Time) |
@@ -1057,6 +1083,7 @@ volts.
 | 30 / 31 / 32 / 33 | Alter → **CH2** Edge / Pulse / Video / Overtime |
 | 38 | Trigger → Overtime submenu, **page 1** |
 | 39 | Trigger → Overtime submenu, **page 2** (Coupling) |
+| 36 | Display menu (Grid / Format page) |
 | 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
 | 61 | Logic Analyzer menu (`[LA-SWI]` = LA on/off) |
 

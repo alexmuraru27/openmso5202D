@@ -298,6 +298,18 @@ ACQ_AVG_COUNTS = {0: 4, 1: 8, 2: 16, 3: 32, 4: 64, 5: 128}
 # on). The gaps (1/2/3/5) are the greyed-out depths (e.g. 20K).
 ACQ_DEPTH_NAMES = {0: '4K', 4: '40K', 6: '512K', 7: '1M'}
 
+# Display menu enums (DISPLAY-* fields).
+DISPLAY_MODE_NAMES = {0: 'Vectors', 1: 'Dots'}           # DISPLAY-MODE (draw type)
+DISPLAY_FORMAT_NAMES = {0: 'XT', 1: 'XY'}                # DISPLAY-FORMAT
+DISPLAY_GRID_NAMES = {0: 'Off', 1: 'Dotted', 2: 'RealLine'}  # DISPLAY-GRID-KIND (order inferred)
+# DISPLAY-PERSIST: gapped codes -> persistence time (label). 0=Auto..19=Infinity.
+DISPLAY_PERSIST_NAMES = {
+    0: 'Auto', 2: '0.2s', 4: '0.4s', 8: '0.8s', 10: '1.0s', 11: '2.0s',
+    13: '4.0s', 17: '8.0s', 19: 'Infinity',
+}
+# DISPLAY-CONTRAST and DISPLAY-GRID-BRIGHT are 0..15 intensity (max = the
+# DISPLAY-MAXCONTRAST / DISPLAY-MAXGRID-BRIGHT fields, both 15).
+
 # CONTROL-MENUID -> which on-screen menu is shown (mapped by context across
 # captures; see MSO5202D-protocol.md §6). Partial — more menus to identify.
 # Trigger sub-menus that span two pages have consecutive ids (page1, page2).
@@ -313,6 +325,7 @@ MENU_NAMES = {
     29: 'Alter-CH1:Overtime', 30: 'Alter-CH2:Edge', 31: 'Alter-CH2:Pulse',
     32: 'Alter-CH2:Video', 33: 'Alter-CH2:Overtime',
     40: 'Horizontal p2', 61: 'Logic Analyzer',
+    4: 'Display (Type/Persist/Contrast)', 36: 'Display (Grid/Format)',
 }
 
 # Horizontal sample density. The vendor spec gives "sample interval = s/div /
