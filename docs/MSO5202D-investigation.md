@@ -147,3 +147,26 @@ trigger level ±8 div (= VPOS ±200 ⇒ 1/25-div units); scan/roll mode at ≥80
 simultaneously (⇒ non-interleaved dual readout). The manual is the 60/100 MHz
 **MSO5000B** base model (SEC/DIV from 4 ns, VOLTS to 5 V/div); our 200 MHz
 **MSO5202D** extends the fast end to 2 ns/div (TB index 0).
+
+---
+
+## 6. Menus still to capture (TODO)
+
+Method: `pkexec tshark` on `usbmon` + the settings poller
+(`scratchpad/log_all.py`), step the menu on the front panel, then map the
+changed `[…]` fields + record the `[CONTROL-MENUID]`. Fold every new field/enum
+into `protocol.md` (Appendix D) and the enum maps in `mso5202d.py`.
+
+- [ ] **Save/Recall menu** — setups (1–10), waveform save (Ref A/B), CSV/image
+  export? Map its fields (if any land in the blob) and menu id.
+- [ ] **Utility menu** — self-cal, language, sound/beep, interface, system info,
+  pass/fail?, date/time. Likely several sub-pages; map fields + menu ids.
+- [ ] **Measure menu** — the 8 `[MEASURE-ITEM*-SRC]` / `[MEASURE-ITEM*]` slots
+  and the measurement-item id enum (voltage/time/etc.). Richest remaining menu.
+- [ ] **LA (logic-analyzer) menus** — `[LA-*]` fields: `LA-CHANNEL-STATE`
+  (D0–D15 enable mask), `LA-CURRENT-CHANNEL`, threshold type/volts
+  (`LA-D7-D0-*`, `LA-D15-D8-*`). LA menu id = 61 (from the cursor capture).
+
+Smaller leftovers also open: EXT/EXT-5 trigger level in volts; `MATH-FFT-WIN`
+codes 3/4 (Bartlett/Blackman, inferred); the Display **refresh-rate** control
+and the second FFT/wave-intensity 0–15 control (neither appeared in the blob).

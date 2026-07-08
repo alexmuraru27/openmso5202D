@@ -298,9 +298,24 @@ ACQ_AVG_COUNTS = {0: 4, 1: 8, 2: 16, 3: 32, 4: 64, 5: 128}
 # on). The gaps (1/2/3/5) are the greyed-out depths (e.g. 20K).
 ACQ_DEPTH_NAMES = {0: '4K', 4: '40K', 6: '512K', 7: '1M'}
 
+# Math menu enums (MATH-* fields).
+MATH_MODE_NAMES = {
+    0: 'CH1+CH2', 1: 'CH1-CH2', 2: 'CH2-CH1', 3: 'CH1*CH2',
+    4: 'CH1/CH2', 5: 'CH2/CH1', 6: 'FFT',
+}
+MATH_FFT_SRC_NAMES = {0: 'CH1', 1: 'CH2'}
+# FFT window: 0/1/2 verified; 3/4 inferred (only Hanning/Flattop/Rect swept).
+MATH_FFT_WIN_NAMES = {
+    0: 'Hanning', 1: 'Flattop', 2: 'Rectangular', 3: 'Bartlett', 4: 'Blackman',
+}
+MATH_FFT_FACTOR_NAMES = {0: 'x1', 1: 'x2', 2: 'x5', 3: 'x10'}  # FFT (horizontal) zoom
+MATH_FFT_DB_NAMES = {0: '1dB', 1: '2dB', 2: '5dB', 3: '10dB', 4: '20dB'}  # FFT vertical dB/div
+# Selecting FFT (MATH-MODE=6) sets DISPLAY-FORMAT=2. In FFT the frequency axis
+# tracks the timebase/sample rate (slowest 5 S/s -> 250 mHz resolution).
+
 # Display menu enums (DISPLAY-* fields).
 DISPLAY_MODE_NAMES = {0: 'Vectors', 1: 'Dots'}           # DISPLAY-MODE (draw type)
-DISPLAY_FORMAT_NAMES = {0: 'XT', 1: 'XY'}                # DISPLAY-FORMAT
+DISPLAY_FORMAT_NAMES = {0: 'XT', 1: 'XY', 2: 'FFT'}      # DISPLAY-FORMAT (2=FFT set by MATH FFT)
 DISPLAY_GRID_NAMES = {0: 'Off', 1: 'Dotted', 2: 'RealLine'}  # DISPLAY-GRID-KIND (order inferred)
 # DISPLAY-PERSIST: gapped codes -> persistence time (label). 0=Auto..19=Infinity.
 DISPLAY_PERSIST_NAMES = {
@@ -326,6 +341,7 @@ MENU_NAMES = {
     32: 'Alter-CH2:Video', 33: 'Alter-CH2:Overtime',
     40: 'Horizontal p2', 61: 'Logic Analyzer',
     4: 'Display (Type/Persist/Contrast)', 36: 'Display (Grid/Format)',
+    15: 'Cursor', 41: 'Math', 16: 'Math:FFT p1', 56: 'Math:FFT p2',
 }
 
 # Horizontal sample density. The vendor spec gives "sample interval = s/div /

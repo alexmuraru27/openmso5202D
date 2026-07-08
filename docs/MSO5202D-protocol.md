@@ -54,7 +54,10 @@ menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), `mso5202d-ch2-men
 `mso5202d-pos-knob-push.pcapng` (position-knob pushes — vertical and
 horizontal position knobs reset their axis to 0/centre, §6), `mso5202d-autoset.pcapng` (AUTOSET button — compound reconfigure; §6 note), and
 `mso5202d-display.pcapng` (Display menu — mapped `DISPLAY-MODE/FORMAT/GRID-KIND/
-GRID-BRIGHT/CONTRAST/PERSIST` + menu ids 4/36, §6).
+GRID-BRIGHT/CONTRAST/PERSIST` + menu ids 4/36, §6), `mso5202d-cursor.pcapng`
+(Cursor menu — cursor state NOT in the blob; got menu id 15, plus `MATH-DISP`
+and Math menu id 41, §6), and `mso5202d-math.pcapng` (Math menu — mapped
+`MATH-MODE` + FFT `SRC/WIN/FACTOR/DB` and menu ids 16/56; DISPLAY-FORMAT=2=FFT, §6).
 
 - Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
   HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
@@ -593,6 +596,34 @@ controls (only `DISPLAY-CONTRAST` moved; "wave intensity" vs "contrast" not
 distinctly separable here). (`DISPLAY_MODE_NAMES` / `DISPLAY_FORMAT_NAMES` /
 `DISPLAY_GRID_NAMES` / `DISPLAY_PERSIST_NAMES` in `mso5202d.py`.)
 
+**Math-menu enums** — mapped by stepping the Math menu (`mso5202d-math.pcapng`;
+menu ids `[CONTROL-MENUID]` **41** = operations, **16** = FFT page 1
+(source/window), **56** = FFT page 2 (factor/scale)):
+- `[MATH-MODE]`: `0`=CH1+CH2, `1`=CH1−CH2, `2`=CH2−CH1, `3`=CH1×CH2,
+  `4`=CH1/CH2, `5`=CH2/CH1, `6`=**FFT**. Selecting FFT sets
+  `[DISPLAY-FORMAT]` = **2** (so FORMAT is 0=XT, 1=XY, **2=FFT**).
+- `[MATH-FFT-SRC]`: `0`=CH1, `1`=CH2.
+- `[MATH-FFT-WIN]`: `0`=Hanning, `1`=Flattop, `2`=Rectangular (verified);
+  `3`=Bartlett, `4`=Blackman (inferred — only 0–2 were swept).
+- `[MATH-FFT-FACTOR]`: FFT (horizontal) zoom `0`=×1, `1`=×2, `2`=×5, `3`=×10.
+- `[MATH-FFT-DB]`: FFT vertical **dB/div** scale: `0`=1dB, `1`=2dB, `2`=5dB,
+  `3`=10dB, `4`=20dB.
+- In FFT mode the **frequency axis tracks the timebase/sample rate** — at the
+  slowest sweep (5.00 S/s) the resolution bottoms out at **250 mHz**.
+
+(`MATH_MODE_NAMES` / `MATH_FFT_SRC_NAMES` / `MATH_FFT_WIN_NAMES` /
+`MATH_FFT_FACTOR_NAMES` in `mso5202d.py`.)
+
+**Cursor menu — NOT in the settings blob** (`mso5202d-cursor.pcapng`): stepping
+cursor Type (Off/Time/Voltage/Track), Source (CH1/CH2/Math/RefA/RefB/LA), the
+S/E select and the cursor positions produced **zero** changes in the 213-byte
+state — consistent with there being no `CURSOR-*` param in `/protocol.inf`.
+Only the cursor menu id is observable: `[CONTROL-MENUID]` = **15**. (Like the
+horizontal marks and Display refresh-rate, cursor state lives outside the polled
+blob and can't be read back over this protocol.) The same capture caught
+`[MATH-DISP]` = **0/1 math on/off** and the Math menu id **41** (Math otherwise
+not yet swept).
+
 **AUTOSET** (front-panel button, `mso5202d-autoset.pcapng`) is a **compound
 reconfigure**, not a single field: it re-scales the timebase
 (`[HORIZ-TB]`/`[HORIZ-WIN-TB]`), can set `[TRIG-EDGE-SLOPE]`, and cycles
@@ -981,16 +1012,16 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 161  1  HORIZ-WIN-STATE            window/zoom state (never changed via Horizontal menu; needs dual-window engaged?)
 162  8  HORIZ-TRIGTIME             SIGNED ps; horizontal position/delay (goes negative = post-trigger)
 --- MATH ---
-170  1  MATH-DISP                  0/1
-171  1  MATH-MODE                  math op enum (unmapped)
-172  1  MATH-FFT-SRC               FFT source
-173  1  MATH-FFT-WIN               FFT window
-174  1  MATH-FFT-FACTOR            (unmapped)
-175  1  MATH-FFT-DB                FFT dB/div (unmapped)
+170  1  MATH-DISP                  0/1 math on/off (Math menu = CONTROL-MENUID 41)
+171  1  MATH-MODE                  0=CH1+CH2 1=CH1-CH2 2=CH2-CH1 3=CH1*CH2 4=CH1/CH2 5=CH2/CH1 6=FFT
+172  1  MATH-FFT-SRC               0=CH1 1=CH2
+173  1  MATH-FFT-WIN               0=Hanning 1=Flattop 2=Rectangular (3=Bartlett 4=Blackman, inferred)
+174  1  MATH-FFT-FACTOR            FFT zoom 0=x1 1=x2 2=x5 3=x10
+175  1  MATH-FFT-DB                FFT vertical dB/div: 0=1dB 1=2dB 2=5dB 3=10dB 4=20dB
 --- DISPLAY ---
 176  1  DISPLAY-MODE               0=Vectors 1=Dots (draw type)
 177  1  DISPLAY-PERSIST            0=Auto 2=0.2s 4=0.4s 8=0.8s 10=1.0s 11=2.0s 13=4.0s 17=8.0s 19=Infinity
-178  1  DISPLAY-FORMAT             0=XT 1=XY
+178  1  DISPLAY-FORMAT             0=XT 1=XY 2=FFT (set when MATH-MODE=FFT)
 179  1  DISPLAY-CONTRAST           waveform/display intensity 0..15
 180  1  DISPLAY-MAXCONTRAST        max contrast (=15)
 181  1  DISPLAY-GRID-KIND          0=Off 1=Dotted 2=RealLine (order inferred)
@@ -1049,8 +1080,13 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 | `ACQURIE-MODE` | 0 Normal · 1 Peak Detect · 2 Average |
 | `ACQURIE-AVG-CNT` | 0=4 · 1=8 · 2=16 · 3=32 · 4=64 · 5=128 (count = 4·2ⁿ) |
 | `ACQURIE-STORE-DEPTH` | 0=4K · 4=40K · 6=512K · 7=1M (1M single-ch; gaps 1/2/3/5 = greyed depths) |
+| `MATH-MODE` | 0 CH1+CH2 · 1 CH1−CH2 · 2 CH2−CH1 · 3 CH1×CH2 · 4 CH1/CH2 · 5 CH2/CH1 · 6 FFT |
+| `MATH-FFT-SRC` | 0 CH1 · 1 CH2 |
+| `MATH-FFT-WIN` | 0 Hanning · 1 Flattop · 2 Rectangular · 3 Bartlett · 4 Blackman (3/4 inferred) |
+| `MATH-FFT-FACTOR` | 0 ×1 · 1 ×2 · 2 ×5 · 3 ×10 (FFT zoom) |
+| `MATH-FFT-DB` | FFT dB/div: 0 1dB · 1 2dB · 2 5dB · 3 10dB · 4 20dB |
 | `DISPLAY-MODE` | 0 Vectors · 1 Dots |
-| `DISPLAY-FORMAT` | 0 XT · 1 XY |
+| `DISPLAY-FORMAT` | 0 XT · 1 XY · 2 FFT |
 | `DISPLAY-GRID-KIND` | 0 Off · 1 Dotted · 2 RealLine |
 | `DISPLAY-PERSIST` | 0 Auto · 2 0.2s · 4 0.4s · 8 0.8s · 10 1.0s · 11 2.0s · 13 4.0s · 17 8.0s · 19 Infinity |
 | `DISPLAY-CONTRAST` / `-GRID-BRIGHT` | 0…15 intensity (max = the `-MAX*` fields = 15) |
@@ -1075,6 +1111,8 @@ volts.
 | 8 | Trigger → Video submenu |
 | 10 | default / no active menu (vendor-app baseline) |
 | 11 | Trigger menu (level/base, Edge default) |
+| 15 | Cursor menu (cursor state is **not** in the settings blob) |
+| 16 | Math → FFT submenu, **page 1** (source / window) |
 | 17 | **Acquire** menu |
 | 22 | Trigger → Slope submenu, **page 1** |
 | 23 | Trigger → Slope submenu, **page 2** (V1/V2 / When / Time) |
@@ -1085,6 +1123,8 @@ volts.
 | 39 | Trigger → Overtime submenu, **page 2** (Coupling) |
 | 36 | Display menu (Grid / Format page) |
 | 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
+| 41 | Math menu (operations; `[MATH-DISP]` = math on/off) |
+| 56 | Math → FFT submenu, **page 2** (zoom factor / vertical scale) |
 | 61 | Logic Analyzer menu (`[LA-SWI]` = LA on/off) |
 
 Note some menus set `[CONTROL-MENUID]` but keep it constant while open (so it
