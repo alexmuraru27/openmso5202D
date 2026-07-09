@@ -148,6 +148,12 @@ class Scope:
         can pass a short timeout + retries=0 to fail fast and skip the frame when
         the scope is busy (e.g. a knob being turned), instead of hanging on
         seconds of nested retries."""
+        # The acquire (0x02) reply can legitimately take a while, but once it has
+        # answered, the data frames arrive within ~20 ms or not at all (the scope
+        # dropped them — typically because a knob is being turned and it is
+        # reconfiguring). So wait generously for the acquire, but fail the data
+        # frames fast so a disrupted read costs ~150 ms, not the full timeout.
+        data_to = min(timeout, 150)
         for _ in range(retries + 1):
             try:
                 self.transact(bytes([0x12, 0x01, 0x00]), timeout=timeout, retries=0)
@@ -157,7 +163,7 @@ class Scope:
                     st = frame[1] if len(frame) > 1 else 0xFF
                     if st == 0x01: data = frame[3:]
                     elif st == 0x02: break
-                    frame = self._recv(timeout)
+                    frame = self._recv(data_to)
                 if data:
                     return data
             except Exception:

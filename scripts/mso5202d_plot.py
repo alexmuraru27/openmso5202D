@@ -289,6 +289,7 @@ class Reader(threading.Thread):
         self._halt = threading.Event()
         self.s = None
         self.waves = {}
+        self.reconnecting = False
 
     def snapshot(self):
         with self._lock:
@@ -297,18 +298,47 @@ class Reader(threading.Thread):
     def stop(self):
         self._halt.set()
 
+    @staticmethod
+    def _dead(e):
+        """A dead handle (scope unplugged/rebooted → re-enumerated) vs a mere
+        busy-timeout: timeouts are recoverable, any other USBError means the
+        device we had is gone and we must reconnect."""
+        import usb.core
+        return isinstance(e, usb.core.USBError) and not isinstance(e, usb.core.USBTimeoutError)
+
+    def _reconnect(self):
+        """Scope disappeared — drop the old handle and keep trying to open the
+        re-enumerated device (new USB address) until it's back or we're stopped."""
+        from mso5202d import Scope
+        self.reconnecting = True
+        try: self.sc.close()
+        except Exception: pass
+        while not self._halt.is_set():
+            try:
+                self.sc = Scope()                          # re-find + reset + claim
+                self.reconnecting = False
+                return
+            except Exception:
+                self._halt.wait(1.0)                        # scope not back yet
+
     def run(self):
         rot = 0
         last_settings = 0.0
+        empties = 0
         while not self._halt.is_set():
             now = _time.time()
-            if self.s is None or now - last_settings > self.SETTINGS_TTL:
+            # Poll settings on the TTL, or sooner if waveform reads keep coming back
+            # empty (which may mean the handle died) — a dead-handle error here
+            # triggers a reconnect; a plain timeout is just the scope being busy.
+            if self.s is None or now - last_settings > self.SETTINGS_TTL or empties >= 8:
                 try:
                     s = read_settings(self.sc, timeout=LIVE_TIMEOUT_MS, retries=LIVE_RETRIES)
                     with self._lock:
                         self.s = s
-                except Exception:
-                    pass
+                    empties = 0
+                except Exception as e:
+                    if self._dead(e):
+                        self._reconnect(); last_settings = _time.time(); empties = 0; continue
                 last_settings = now
             s = self.s
             if s is None:
@@ -329,6 +359,9 @@ class Reader(threading.Thread):
             if len(y):
                 with self._lock:
                     self.waves[ch] = y
+                empties = 0
+            else:
+                empties += 1
             self._halt.wait(POLL_INTERVAL_MS / 1000.0)    # gentle pacing between acquires
 
 
@@ -357,6 +390,10 @@ def run_live(max_frames, capture=True):
         # GUI-thread only: snapshot the latest data from the reader and redraw.
         # No USB here, so this never blocks — the window stays smooth regardless of
         # how slow the scope is.
+        if reader.reconnecting:                           # scope rebooted — waiting for it
+            ax.set_title("scope disconnected — reconnecting…",
+                         color='#e6b400', fontsize=11, pad=10)
+            return lines
         s, waves = reader.snapshot()
         if s is None:
             return lines                                  # reader hasn't produced yet
@@ -385,7 +422,8 @@ def run_live(max_frames, capture=True):
         del anim
         reader.stop(); reader.join(timeout=2)
         if cap: cap.stop()
-        sc.close()
+        try: reader.sc.close()                            # current handle (may be a reconnect)
+        except Exception: pass
 
 def main():
     ap = argparse.ArgumentParser()

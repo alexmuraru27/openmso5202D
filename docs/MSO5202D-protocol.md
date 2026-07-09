@@ -226,9 +226,18 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
                                                       -> IN 53 04 00 82 02 00        (subtype 02 = end-marker)
 ```
 
-- **Samples: 8-bit unsigned, 1 byte each**, 3840 per block (block size depends on
-  store-depth). The waveform frame payload is `82 01 00 <3840 bytes>`; the 3840
-  data bytes follow the 3-byte `82 01 00` header.
+- **Samples: 8-bit unsigned, 1 byte each**, **always 3840 per block = the on-screen
+  display window** (19.2 div). The waveform frame payload is `82 01 00 <3840 bytes>`;
+  the 3840 data bytes follow the 3-byte `82 01 00` header.
+- **The `0x02` acquire reads only the screen buffer, NOT deep memory —
+  CONFIRMED (2026-07-09).** With `ACQURIE-STORE-DEPTH` at the default it returns
+  the 3840-sample screen; set to **40K it stops responding entirely** (`0x02`
+  gets no reply — read returns 0 bytes, every retry times out). So the deep
+  record (40K/512K/1M) is **not reachable through this command**; pulling it
+  would need a different, still-undiscovered read (likely the *Save-waveform*
+  export path — Utility menu). Keep store depth at the screen size for live
+  readout. **Open item:** find the deep-memory read command (capture the vendor
+  *Save waveform* action) → unlocks single-shot deep capture on the PC.
 - **Sample polarity (screen layout): smaller count = HIGHER on screen.**
   Matching the scope's static layout needs an *inverted* Y axis: with CH2 at the
   top of the scope reading bytes ~17–85 and CH1 at the bottom reading ~161–189,
