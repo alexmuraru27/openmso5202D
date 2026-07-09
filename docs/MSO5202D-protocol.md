@@ -1199,3 +1199,79 @@ poll-able state**. Base menu = **47**; its sub-types are **19** (REF), **18**
 (SETUP), **48** (CSV). **FileList reuses 48** — it is the CSV/USB file-browser
 page, not a distinct type — so CSV and FileList are indistinguishable over the
 poll.
+
+---
+
+## Appendix E — setting ranges, steps & units
+
+Consolidated limits/divisions/units for every setting decoded so far. "Field" is
+the `/protocol.inf` param (Appendix D gives its offset/enum); "raw" is the stored
+value. Sequences and endpoints are hardware-verified unless marked *inferred*.
+Units for the MSO5202D (200 MHz); the 60/100 MHz base models stop at 4 ns/div.
+
+### Vertical (per channel)
+
+| Setting | Field | Range | Step / sequence | Unit / notes |
+|---|---|---|---|---|
+| Volts/div | `VERT-CHx-VB` | 2 mV … 5 V/div | **1-2-5**, 11 steps (idx 0–10 = 2/5/10/20/50/100/200/500 mV, 1/2/5 V) | V/div; **×probe** scales the displayed value. 10 V/div reads back `VB=0` (quirk) |
+| Vertical position | `VERT-CHx-POS` | **±8 div** (raw ±200) | 1 raw = **1/25 div** | signed; 25 counts/div. Knob-push → 0 (centre) |
+| Probe ratio | `VERT-CHx-PROBE` | 1× / 10× / 100× / 1000× | 4 discrete | attenuation multiplier |
+| Fine / coarse | `VERT-CHx-FINE` | Coarse / Fine | 2 | Fine = continuous V/div between the 1-2-5 steps |
+
+### Horizontal / timebase
+
+| Setting | Field | Range | Step / sequence | Unit / notes |
+|---|---|---|---|---|
+| Time/div (displayed) | `HORIZ-WIN-TB` | **2 ns … 40 s/div** | **2-4-8**, 32 steps (idx 0–31) | s/div (`TB_TO_NS`) |
+| Time/div (acquisition) | `HORIZ-TB` | 2 ns … 200 ns, then **clamps** | same seq, clamps at idx 6 | s/div; ≥200 ns the acquisition TB stays at 200 ns while the display zooms |
+| Horizontal delay | `HORIZ-TRIGTIME` | wide | 1 ps | **signed int64 ps**; negative = post-trigger. Knob-push → 0 |
+| Sample rate | *derived* | ties to time/div | — | **200 Sa/div** → `Sa/s = 200 / (s/div)`; interval `= (s/div)/200` |
+| Acquisition span | *derived* | — | — | 3840-sample block = **19.2 div** |
+
+### Trigger
+
+| Setting | Field | Range | Step | Unit / notes |
+|---|---|---|---|---|
+| Trigger level | `TRIG-VPOS` | **±8 div** (raw ±200) | 1/25 div | volts = `(VPOS − POS_src) × vdiv / 25` |
+| Slope V1 / V2 | `TRIG-SLOPE-V1/V2` | ±8 div | 1/25 div | same volts calibration as level |
+| Holdoff | `TRIG-HOLDTIME` | **100 ns … 10 s** | ps | int64 ps (`-MIN`=100 000, `-MAX`=10¹³) |
+| Pulse / Slope / Overtime time | `TRIG-{PULSE,SLOPE,OVERTIME}-TIME` | **20 ns … 10 s** | ps | int64 ps |
+| Video line # | `TRIG-VIDEO-LINE` | 1…525 (NTSC) / 1…625 (PAL) | 1 | line number |
+
+### Acquire
+
+| Setting | Field | Range | Step | Unit / notes |
+|---|---|---|---|---|
+| Average count | `ACQURIE-AVG-CNT` | 4 … 128 | **×2**, 6 steps (idx 0–5 = 4/8/16/32/64/128) | averages |
+| Memory depth | `ACQURIE-STORE-DEPTH` | 4K / 40K / 512K / 1M | gapped codes (0/4/6/7) | samples; 1M = single-channel only |
+
+### Display
+
+| Setting | Field | Range | Step | Unit |
+|---|---|---|---|---|
+| Contrast | `DISPLAY-CONTRAST` | 0 … 15 | 1 | level (max = `-MAXCONTRAST`=15) |
+| Grid brightness | `DISPLAY-GRID-BRIGHT` | 0 … 15 | 1 | level (max = `-MAXGRID-BRIGHT`=15) |
+| Persistence | `DISPLAY-PERSIST` | Auto … Infinity | 9 discrete (0.2/0.4/0.8/1/2/4/8 s) | s |
+
+### Math / FFT
+
+| Setting | Field | Range | Step | Unit |
+|---|---|---|---|---|
+| FFT horizontal zoom | `MATH-FFT-FACTOR` | ×1 / ×2 / ×5 / ×10 | 4 discrete | zoom |
+| FFT vertical scale | `MATH-FFT-DB` | 1 / 2 / 5 / 10 / 20 | 5 discrete | dB/div |
+
+### Measure
+
+| Setting | Field | Range | Step | Unit |
+|---|---|---|---|---|
+| Simultaneous items | `MEASURE-ITEM1…8` | up to **8** | — | slots |
+| Measurement type | `MEASURE-ITEMn` | 0 … 31 (32 types) | 1 | enum (Appendix D) |
+| Source | `MEASURE-ITEMn-SRC` | CH1 / CH2 / LA | — | 0/1/3 (2 unused) |
+
+### Logic analyzer
+
+| Setting | Field | Range | Step | Unit / notes |
+|---|---|---|---|---|
+| Channels | `LA-CHANNEL-STATE` | D0 … D15 | per-bit | bitmask, bit N = D(N) |
+| Selected channel | `LA-CURRENT-CHANNEL` | 0 … 15 | 1 | = D0…D15 |
+| User threshold (per group) | `LA-*-USER-THRESHOLD-VOLT` | **±8 V** | ≈**3.9 mV** (16 raw = `code<<4`, 12-bit DAC) | volts = raw/4096 |
