@@ -1114,6 +1114,8 @@ volts.
 | 15 | Cursor menu (cursor state is **not** in the settings blob) |
 | 16 | Math → FFT submenu, **page 1** (source / window) |
 | 17 | **Acquire** menu |
+| 18 | **Save/Recall** → SETUP page |
+| 19 | **Save/Recall** → REF (reference-waveform) page |
 | 22 | Trigger → Slope submenu, **page 1** |
 | 23 | Trigger → Slope submenu, **page 2** (V1/V2 / When / Time) |
 | 24 | Trigger → Alter submenu (base) |
@@ -1124,6 +1126,8 @@ volts.
 | 36 | Display menu (Grid / Format page) |
 | 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
 | 41 | Math menu (operations; `[MATH-DISP]` = math on/off) |
+| 47 | **Save/Recall** base (type selector) |
+| 48 | **Save/Recall** → CSV **and** FileList (shared file-browser page) |
 | 56 | Math → FFT submenu, **page 2** (zoom factor / vertical scale) |
 | 61 | Logic Analyzer menu (`[LA-SWI]` = LA on/off) |
 
@@ -1134,5 +1138,16 @@ throughout their captures; only `[CONTROL-DISP-MENU]` toggled 0↔1.
 Multi-page trigger submenus use **consecutive ids** for page 1 / page 2
 (Pulse 6/7, Slope 22/23, Overtime 38/39). `CONTROL-DISP-MENU` = 1 while a menu is shown, 0 when
 closed. `CONTROL-TYPE` stayed 0 in every capture. (`MENU_NAMES` in
-`mso5202d.py`.) More menu ids (Acquire, Display, Measure, Math, Utility,
-Save/Recall, LA…) remain to be mapped by opening each menu.
+`mso5202d.py`.) More menu ids (Measure, Utility…) remain to be mapped by
+opening each menu.
+
+**Save/Recall (Storage) is view-only** — mapped 2026-07-09 by two ordered-open
+`CONTROL-MENUID` polls (base → REF → SETUP → CSV → FileList). Like Cursor and the
+Horizontal window/marks, it puts **no parameters in the settings blob**: through
+both captures the only field changes were an incidental vertical-knob touch;
+`/protocol.inf` has no REF/SETUP/CSV/FILE params (only `[ACQURIE-STORE-DEPTH]`).
+So setups (1–10 slots), Ref-A/B waveform save, and CSV export are **actions, not
+poll-able state**. Base menu = **47**; its sub-types are **19** (REF), **18**
+(SETUP), **48** (CSV). **FileList reuses 48** — it is the CSV/USB file-browser
+page, not a distinct type — so CSV and FileList are indistinguishable over the
+poll.

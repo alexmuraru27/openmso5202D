@@ -342,6 +342,11 @@ MENU_NAMES = {
     40: 'Horizontal p2', 61: 'Logic Analyzer',
     4: 'Display (Type/Persist/Contrast)', 36: 'Display (Grid/Format)',
     15: 'Cursor', 41: 'Math', 16: 'Math:FFT p1', 56: 'Math:FFT p2',
+    # Save/Recall (Storage) — action/UI menu, NO settings-blob params (like
+    # Cursor). 47 = base type-selector; 48 is shared by CSV and its FileList
+    # file-browser. Mapped 2026-07-09 by ordered-open poll of CONTROL-MENUID.
+    47: 'Save/Recall', 19: 'Save/Recall:REF', 18: 'Save/Recall:SETUP',
+    48: 'Save/Recall:CSV/FileList',
 }
 
 # Horizontal sample density. The vendor spec gives "sample interval = s/div /

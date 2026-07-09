@@ -157,8 +157,6 @@ Method: `pkexec tshark` on `usbmon` + the settings poller
 changed `[…]` fields + record the `[CONTROL-MENUID]`. Fold every new field/enum
 into `protocol.md` (Appendix D) and the enum maps in `mso5202d.py`.
 
-- [ ] **Save/Recall menu** — setups (1–10), waveform save (Ref A/B), CSV/image
-  export? Map its fields (if any land in the blob) and menu id.
 - [ ] **Utility menu** — self-cal, language, sound/beep, interface, system info,
   pass/fail?, date/time. Likely several sub-pages; map fields + menu ids.
 - [ ] **Measure menu** — the 8 `[MEASURE-ITEM*-SRC]` / `[MEASURE-ITEM*]` slots
