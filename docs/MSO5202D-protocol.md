@@ -1,11 +1,12 @@
 # Hantek MSO5202D — USB protocol reference
 
-**Status: transport, framing and the core handshakes are reverse-engineered and
-verified against real hardware (Linux/pyusb).** A working driver (`mso5202d.py`)
-connects, reads the scope's self-description, decodes live settings, and captures
-waveforms (a 1 kHz cal square wave was confirmed). This document is intended to be
-**self-contained** — if all other context is lost, everything needed to re-derive
-and re-implement the driver is here.
+**Status: transport, framing, the core handshakes and host-side control are
+reverse-engineered and verified against real hardware (Linux/pyusb).** A working
+driver (`mso5202d.py`) connects, reads the scope's self-description, decodes live
+settings, and captures waveforms (a 1 kHz cal square wave was confirmed). The
+PC→scope control path (write settings / key events / screen grab) is decoded in
+**Appendix F**. This document is intended to be **self-contained** — if all other
+context is lost, everything needed to re-derive and re-implement the driver is here.
 
 Everything below was decoded from two Wireshark/USBPcap captures of the vendor
 Windows app ("Scope 2.0.0.6") driving the scope, plus live experiments on the
@@ -165,9 +166,13 @@ byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
 | `0x10` | `00` + ASCII path | **read file** (§4). `53 10 00 10 00 "/protocol.inf" <ck>` |
 | `0x12` | `01` `<v>` | **SET param 0x12** = v (0/1). Used in the acquire loop; see §5. `53 04 00 12 01 00 <ck>` |
 | `0x02` | `01` `00` | **SET param 0x02** = 0 → latch/trigger an acquisition (§5). `53 04 00 02 01 00 5a` |
+| `0x11` | 213-byte block | **WRITE settings** — push the whole `/protocol.inf` block; sets any field (host-side control, **Appendix F.1**). |
+| `0x13` | `<keyid>` `<state>` | **key event** — press a front-panel key (`keyid` = `/keyprotocol.inf` index; **Appendix F.2**). |
+| `0x20` | (none) | **screen grab** — scope streams its RGB565 framebuffer (**Appendix F.3**). |
 
 SET form is `selector | vlen | value…` (the selector doubles as the param id).
-Read-file form is `0x10 | 0x00 | <path>`.
+Read-file form is `0x10 | 0x00 | <path>`. **Host-side control** (`0x11`/`0x13`/`0x20`)
+is decoded in full in **Appendix F**.
 
 ### Payload — IN (scope → host)
 `payload = selectorEcho(1) | data…`, where **`selectorEcho` = request selector
@@ -193,16 +198,17 @@ IN   53 <len> 90 01 <file bytes...> <ck>     ; content   (selectorEcho 0x90, sub
 IN   53 04 00 90 02 <b> <ck>                 ; end-marker (subtype 0x02) — MUST read this
 ```
 
-Two files are known; there are almost certainly more (calibration, system — see
-§8). Full contents are in the appendices.
+Two files are known; there are almost certainly more (calibration, system — the
+counts→volts calibration table likely lives in one of these; still unmapped).
+Full contents are in the appendices.
 
 - **`/protocol.inf`** (≈3.6 KB) — an ordered list of **every setting parameter**
   the scope exposes, each with its **byte width** in the settings blob. First line
   `[TOTAL] 213` = total parameter bytes. See **Appendix A** for the complete list.
 - **`/keyprotocol.inf`** (≈0.9 KB) — the list of **front-panel keys**
   (`[VT-CH1-VBSUB-KEY]`, `[HZ-TBADD-KEY]`, `[CT-AUTOSET-KEY]`, …). See
-  **Appendix B**. These strongly suggest host-side control is done by **sending
-  key-press events** (hypothesis — not yet captured; see §8).
+  **Appendix B**. These are exactly the keys the host presses via the **`0x13`
+  key-event command** — **confirmed** from the vendor app (**Appendix F.2**).
 
 ---
 
@@ -281,7 +287,7 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
   channels). Vendor-manual context: 8-bit ADC per channel, DC gain ±3%,
   graticule 8 div tall. Resolve with a controlled sweep that logs amplitude &
   baseline vs `VERT-POS` (one channel, fixed signal) to pin the amplitude =
-  f(distance-from-centre) law, then a V/div sweep at fixed centre position (§8).
+  f(distance-from-centre) law, then a V/div sweep at fixed centre position.
 - **OPEN — inter-channel PHASE is not preserved.** CH1 and CH2 are fetched as
   two separate acquires (~100 ms apart) with no shared trigger lock, so their
   returned phase is uncorrelated: the CH1→CH2 first-rising-edge offset jittered
@@ -326,7 +332,7 @@ Additional confirmations from the same frames: `[VERT-CH2-DISP]`@14 = 0 (CH2 was
 off), `[TRIG-SRC]`@26 = 0 (CH1), `[TRIG-FREQUENCY]`@31–38 (LE64) = 1,000,000 =
 the 1 kHz cal signal **in mHz** (this had been mislabeled "timebase"), and
 `[HORIZ-TB]`@159 / `[HORIZ-WIN-TB]`@160 are the real timebase indices (mislabeled
-"vdiv" before; their index→time/div table is still unmapped, see §8).
+"vdiv" before; index→time/div table = `TB_TO_NS`, see Appendix E).
 
 **`[VERT-CHx-VB]` → V/div** (verified over the full range on hardware):
 
@@ -673,7 +679,7 @@ that ends in a normal settings state.
   block = 19.2 div — matches the vendor manual and our cal-signal cycle counts
   to the digit (§5). X axis can now be plotted in real seconds.
 
-**Inferred / open (see §8):**
+**Inferred / open:**
 - Enum-coded field values (coupling, trigger modes, `[TRIG-STATE]` beyond
   {3 run, 4 scan, 6 re-arm}, …).
 - Meaning of param `0x12` (vendor toggles it 1→0 per refresh; run/hold?).
@@ -683,45 +689,7 @@ that ends in a normal settings state.
 
 ---
 
-## 8. Next reverse-engineering steps
-
-1. ~~**Resolve the settings-blob alignment.**~~ **DONE (2026-07-08)** — exactly by
-   the method described here: a single-knob CH1 V/div sweep capture
-   (`captures/mso5202d-ch1-vdiv.pcapng`) moved only `[VERT-CH1-VB]`,
-   `[TRIG-STATE]` and `[TRIG-VPOS]` at their computed offsets → params start at
-   raw offset 4, no prefix (§6). The *timebase* sweep followed the same day
-   (`captures/mso5202d-timediv.pcapng`) and mapped `[HORIZ-TB]`/`[HORIZ-WIN-TB]`
-   → time/div (§6); a CH2 sweep confirmed channel symmetry, and a combined
-   both-channels/all-knobs capture resolved position + trigger-level units
-   (1/25 div, scope-calibrated) and the ps time fields (§6). **Remaining follow-up of the same
-   shape:** toggle coupling / trigger-mode / acquire menus to enumerate the
-   enum-coded fields.
-2. **Dump more scope files** via selector `0x10`: try `/system.inf`, `/cal.inf`,
-   `/calibration.inf`, `/factory.inf`, a directory listing, etc. One of these
-   should hold the **counts→volts / index→"1 V/div" / timebase→seconds** tables.
-   (We can now do this directly with `mso5202d.py`.)
-3. ~~**Crack 2-channel readout**~~ **DONE (2026-07-08)** — the acquire value
-   byte is the channel: `02 01 00` = CH1, `02 01 01` = CH2 (§5). Also
-   established: off-screen positioning clips samples to the rails / returns
-   rail-to-rail blocks (§5, `mso5202d-ch1-vpos.pcapng`). **Still open — vertical
-   amplitude** depends on the trace's distance from screen centre (full-swing
-   near the 0 axis, compressed far from it — §5); model it with a POS sweep
-   logging amplitude+baseline, then a V/div sweep at fixed centre position.
-   **Also open — inter-channel phase** is lost (sequential acquires, no shared
-   trigger — §5); look for a single-acquire both-channels command. And: what
-   param `0x12` does.
-4. **Host-side control:** find the command that presses a `/keyprotocol.inf` key
-   (likely another selector with a key id), enabling PC control of V/div, timebase,
-   trigger, autoset, single-seq, etc. A fresh capture of the app *changing settings
-   from the PC* (if it supports it) would reveal this directly.
-5. ~~**Sample rate**~~ **DONE (2026-07-08)** — **200 samples/div** exactly
-   (sample interval = `TDIV/200`), so the 3840-sample block spans 19.2 div.
-   Confirmed against the vendor manual's "sample interval = s/div ÷ 200" and
-   our cal-cycle counts to the digit; X axis now plots in real seconds (§5).
-
----
-
-## 9. Implementation notes for reuse
+## 8. Implementation notes for reuse
 
 - Driver library: `../scripts/mso5202d.py` (`Scope` class + `build`/`verify`
   framing + `decode_settings`). `python3 scripts/mso5202d.py` runs a self-test.
@@ -1275,3 +1243,92 @@ Units for the MSO5202D (200 MHz); the 60/100 MHz base models stop at 4 ns/div.
 | Channels | `LA-CHANNEL-STATE` | D0 … D15 | per-bit | bitmask, bit N = D(N) |
 | Selected channel | `LA-CURRENT-CHANNEL` | 0 … 15 | 1 | = D0…D15 |
 | User threshold (per group) | `LA-*-USER-THRESHOLD-VOLT` | **±8 V** | ≈**3.9 mV** (16 raw = `code<<4`, 12-bit DAC) | volts = raw/4096 |
+
+---
+
+## Appendix F — Host-side control (PC → scope) — CONFIRMED
+
+The PC can fully drive the scope over the same bulk protocol. Decoded 2026-07-09
+from USBPcap captures of the vendor **"Scope 2.0.0.6"** app (`captures/control/`,
+scope-only), cross-referenced against our own field decode. **Three OUT command
+paths**, all leader `0x53` with the standard framing + checksum (§3); each gets
+an IN acknowledgement (`selector | 0x80`). This resolves the long-standing
+**host-side control** question — how the PC drives the scope.
+
+### F.1 Write settings — selector `0x11`
+
+```
+OUT  53 | D7 00 | 11 | <213-byte settings block> | ck        ; len 0x00D7 = 215
+IN   53 | 03 00 | 91 | 00 | ck                               ; write ack (echo 0x91, status 0)
+```
+
+The 213 bytes are the **exact `/protocol.inf` parameter block** — identical
+layout to the `0x01` poll *response* (Appendix A/D), just without the `0x81`
+echo. So PC control of settings is **read-modify-write**: poll `0x01`, change the
+field(s), write the whole block back with `0x11`.
+
+Verified by decoding captured writes with `decode_settings()` (feed `0x81` + the
+213 bytes): in `vertical_ch1_ch2` CH1 V/div stepped 5 V→500 mV→2 V→200 mV and
+both `VERT-CHx-DISP` toggled; in `LA` the `LA-CHANNEL-STATE` mask walked D0…D3
+off — matching our field semantics exactly. **This sets any settings-blob field**
+(V/div, position, timebase, trigger, acquire, display, math, measure, LA, …).
+
+### F.2 Front-panel key events — selector `0x13`
+
+```
+OUT  53 | 04 00 | 13 | <keyid> | <state> | ck                ; state 01 = press
+IN   53 | .. | 93 | ...                                       ; key ack (echo 0x93)
+```
+
+`keyid` is the **0-indexed position in `/keyprotocol.inf`** (Appendix B). This
+presses a physical key — the way to invoke **actions** that aren't settings
+(autoset, run/stop, force, default-setup, single) and the ±/menu keys. The app's
+on-screen "virtual panel" buttons all emit these. Verified in `systemfunctions`:
+autoset→17, Default-Setup→21, Run/Stop→19, Trig-50%→46, Force→47.
+
+Full key id map (index → `/keyprotocol.inf` name):
+
+| id | key | id | key | id | key |
+|---|---|---|---|---|---|
+| 0–7 | `FN-0`…`FN-7` (softkeys F1–F8) | 24 | `VT-CH1-MENU` | 36 | `HZ-MENU` |
+| 8 | `FN-MLEFT` (multi-knob ←) | 25 | `VT-CH1-PSUB` (pos −) | 37 | `HZ-PSUB` (delay −) |
+| 9 | `FN-MRIGHT` (multi-knob →) | 26 | `VT-CH1-PADD` (pos +) | 38 | `HZ-PADD` (delay +) |
+| 10 | `FN-MZERO` (multi-knob push) | 27 | `VT-CH1-PZERO` (pos 0) | 39 | `HZ-PZERO` (delay 0) |
+| 11 | `MENU-SR` (Save/Recall) | 28 | `VT-CH1-VBSUB` (V/div −) | 40 | `HZ-TBSUB` (timebase −) |
+| 12 | `MENU-MEASURE` | 29 | `VT-CH1-VBADD` (V/div +) | 41 | `HZ-TBADD` (timebase +) |
+| 13 | `MENU-ACQUIRE` | 30 | `VT-CH2-MENU` | 42 | `TG-MENU` |
+| 14 | `MENU-UTILITY` | 31 | `VT-CH2-PSUB` | 43 | `TG-PSUB` (level −) |
+| 15 | `MENU-CURSOR` | 32 | `VT-CH2-PADD` | 44 | `TG-PADD` (level +) |
+| 16 | `MENU-DISPLAY` | 33 | `VT-CH2-PZERO` | 45 | `TG-PZERO` (level 0) |
+| 17 | `CT-AUTOSET` | 34 | `VT-CH2-VBSUB` | 46 | `TG-PHALF` (level 50%) |
+| 18 | `CT-SINGLESEQ` | 35 | `VT-CH2-VBADD` | 47 | `TG-FORCE` (force trig) |
+| 19 | `CT-RS` (Run/Stop) | 23 | `VT-MATH-MENU` | 48 | `TG-PROBECHECK` |
+| 20 | `CT-HELP` | 21 | `CT-DS` (Default Setup) | 22 | `CT-STU` |
+
+### F.3 Screen framebuffer (screenshot) — selector `0x20`
+
+```
+OUT  53 | 02 00 | 20 | ck                                    ; bare, no args
+IN   53 | <len> | a0 | 01 | <RGB565 pixels…> | ck   (×N)      ; data chunks (~10 KB each)
+IN   53 | 04 00 | a0 | 02 | <b> | ck                         ; end-marker
+```
+
+The scope streams its **raw LCD framebuffer** — echo `0xa0`, using the same
+multi-frame subtype pattern as file-read/waveform (`00` size / `01` data / `02`
+end). Pixels are **RGB565**, ≈**770 KB per screen** (consistent with 800×480).
+The app polls `0x20` continuously to mirror the display — it is a genuine
+**screenshot stream, not a local re-render** from parameters (`virtual_panel_play`:
+9337 `0xa0` frames, ~93 MB of pixels; the uniform `0x3193` value is the graticule
+background).
+
+### IN acknowledgement echoes (all commands)
+
+| OUT selector | IN echo | payload |
+|---|---|---|
+| `0x01` poll | `0x81` | 213-byte settings block |
+| `0x02` acquire | `0x82` | waveform (subtyped) |
+| `0x10` file read | `0x90` | file bytes (subtyped) |
+| `0x11` **write settings** | `0x91` | status byte (00 = ok) |
+| `0x12` param write | `0x92` | ack |
+| `0x13` **key event** | `0x93` | ack |
+| `0x20` **screen grab** | `0xa0` | RGB565 framebuffer (subtyped) |
