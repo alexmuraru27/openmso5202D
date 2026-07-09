@@ -115,6 +115,10 @@ V_DIVS          = 8              # graticule is 8 divisions tall (-4 … +4)
 CH_COLORS = ('#e6b400', '#0a84ff')          # CH1 yellow, CH2 blue (like the scope)
 GRID, GRID_MINOR, AXIS = '#274427', '#182a19', '#3f6b3f'
 BG, FG = '#080a08', '#9fb0a0'
+# Delay between waveform polls. Each poll blocks the GUI thread while it reads
+# USB, so this gap is when the window stays responsive (drag/resize/close). Bigger
+# = smoother GUI + slower trace refresh; smaller = faster trace + laggier window.
+POLL_INTERVAL_MS = 100
 
 def to_divs(y_bytes, pos):
     """Waveform byte + the channel's VERT-POS → vertical divisions (up = positive).
@@ -164,6 +168,20 @@ def fmt_tdiv(ns):
             return f"{ns/scale:g} {unit}/div"
     return f"{ns:g} ns/div"
 
+def fmt_time(ns):
+    """Plain duration (no /div), e.g. total time across the screen."""
+    if ns is None: return '?'
+    for unit, scale in (('s', 1e9), ('ms', 1e6), ('µs', 1e3), ('ns', 1)):
+        if ns >= scale:
+            return f"{ns/scale:.3g} {unit}"
+    return f"{ns:g} ns"
+
+def fmt_span(s, n):
+    """Total time drawn on screen = samples × sample-interval (the full block spans
+    n/200 divisions)."""
+    dt = s.get('SAMPLE-INTERVAL-ns')
+    return fmt_time(dt * n) if (dt and n) else '?'
+
 def fmt_level(mv):
     if mv is None: return '?'
     return f"{mv/1000:g} V" if abs(mv) >= 1000 else f"{mv:g} mV"
@@ -175,7 +193,7 @@ def fmt_rate(hz):
             return f"{hz/scale:g} {unit}"
     return f"{hz:g} Sa/s"
 
-def label(s):
+def label(s, n=None):
     from mso5202d import (TRIG_STATE_NAMES, TRIG_TYPE_NAMES, TRIG_SRC_NAMES,
                           TRIG_MODE_NAMES)
     st = TRIG_STATE_NAMES.get(s.get('TRIG-STATE'), f"?{s.get('TRIG-STATE')}")
@@ -185,31 +203,46 @@ def label(s):
     slope = {0: '↑', 1: '↓'}.get(s.get('TRIG-EDGE-SLOPE'), '')
     return (f"MSO5202D  |  CH1 {fmt_vdiv(s.get('CH1-VDIV-mV'), s.get('VERT-CH1-VB'))}  "
             f"CH2 {fmt_vdiv(s.get('CH2-VDIV-mV'), s.get('VERT-CH2-VB'))}  "
-            f"|  {fmt_tdiv(s.get('TDIV-ns'))} ({fmt_rate(s.get('SAMPLERATE-HZ'))})  |  "
+            f"|  {fmt_tdiv(s.get('TDIV-ns'))} ({fmt_rate(s.get('SAMPLERATE-HZ'))})  "
+            f"| screen {fmt_span(s, n)}  |  "
             f"trig {st} {ty}{slope} {src} {mode} "
             f"level={fmt_level(s.get('TRIG-LEVEL-mV'))} f={s.get('TRIG-FREQUENCY', 0)/1000:g} Hz")
 
-def clip_note(waves, s):
+def clip_note(s):
     """Flag any displayed channel whose position parks it off the 8-div screen."""
-    flags = [f"CH{ch+1} off-screen"
-             for ch in sorted(waves) if off_screen(s.get(f'VERT-CH{ch+1}-POS', 0))]
+    flags = [f"CH{ch+1} off-screen" for ch in (0, 1)
+             if s.get(f'VERT-CH{ch+1}-DISP') and off_screen(s.get(f'VERT-CH{ch+1}-POS', 0))]
     return ("  |  ⚠ " + ", ".join(flags)) if flags else ""
 
 # --- acquisition -----------------------------------------------------------------
-def grab(scope):
-    """Read settings + one waveform block per displayed channel.
-    Returns ({ch: samples}, settings)."""
+# Live reads fail fast: if the scope misses a response (it does so occasionally,
+# and while a front-panel knob is being turned), we skip that frame and keep the
+# last trace instead of blocking the GUI on seconds of nested timeouts/retries.
+LIVE_TIMEOUT_MS = 400
+LIVE_RETRIES = 0
+
+def read_settings(scope, timeout=3000, retries=2):
     from mso5202d import decode_settings
-    s = decode_settings(scope.read_settings())
+    return decode_settings(scope.read_settings(timeout, retries))
+
+def read_waves(scope, s, timeout=2000, retries=2):
+    """One waveform block per displayed channel, using the (cached) settings to
+    know which channels are on."""
     waves = {}
     for ch, disp in ((0, s['VERT-CH1-DISP']), (1, s['VERT-CH2-DISP'])):
         if disp:
-            waves[ch] = np.frombuffer(scope.read_waveform(ch), dtype=np.uint8)
-    return waves, s
+            waves[ch] = np.frombuffer(
+                scope.read_waveform(ch, retries=retries, timeout=timeout), dtype=np.uint8)
+    return waves
+
+def grab(scope):
+    """Settings + waveforms (used by the one-shot PNG path — generous timeouts)."""
+    s = read_settings(scope)
+    return read_waves(scope, s), s
 
 
-def _title(ax, s, waves):
-    ax.set_title(label(s) + clip_note(waves, s), fontsize=8, color=FG)
+def _title(ax, s, n=None):
+    ax.set_title(label(s, n) + clip_note(s), fontsize=8, color=FG)
 
 # --- outputs ---------------------------------------------------------------------
 def run_png(path, frames, capture=True):
@@ -228,7 +261,7 @@ def run_png(path, frames, capture=True):
         for ch, y in waves.items():
             ax.plot(x_divs(len(y)), to_divs(y, s[f'VERT-CH{ch+1}-POS']), lw=1.0,
                     color=CH_COLORS[ch], label=f"CH{ch+1}", solid_capstyle='round')
-        _title(ax, s, waves)
+        _title(ax, s, n)
         leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
         for t in leg.get_texts(): t.set_color(FG)
         fig.tight_layout(); fig.savefig(path, dpi=110, facecolor=BG)
@@ -238,6 +271,66 @@ def run_png(path, frames, capture=True):
     finally:
         if cap: cap.stop()
         sc.close()
+
+import threading, time as _time
+
+class Reader(threading.Thread):
+    """Owns all scope I/O on its own thread so the GUI never blocks on USB.
+    Continuously reads settings (throttled) and one displayed channel per cycle
+    (round-robin), publishing the latest (settings, {ch: bytes}) under a lock. The
+    GUI just snapshots this — a ~100 ms acquire or a missed frame stalls only this
+    thread, never the window."""
+    SETTINGS_TTL = 2.0
+
+    def __init__(self, scope):
+        super().__init__(daemon=True)
+        self.sc = scope
+        self._lock = threading.Lock()
+        self._halt = threading.Event()
+        self.s = None
+        self.waves = {}
+
+    def snapshot(self):
+        with self._lock:
+            return self.s, dict(self.waves)
+
+    def stop(self):
+        self._halt.set()
+
+    def run(self):
+        rot = 0
+        last_settings = 0.0
+        while not self._halt.is_set():
+            now = _time.time()
+            if self.s is None or now - last_settings > self.SETTINGS_TTL:
+                try:
+                    s = read_settings(self.sc, timeout=LIVE_TIMEOUT_MS, retries=LIVE_RETRIES)
+                    with self._lock:
+                        self.s = s
+                except Exception:
+                    pass
+                last_settings = now
+            s = self.s
+            if s is None:
+                self._halt.wait(0.1); continue
+            disp = [ch for ch in (0, 1) if s[f'VERT-CH{ch+1}-DISP']]
+            with self._lock:                              # forget channels turned off
+                for c in list(self.waves):
+                    if c not in disp:
+                        self.waves.pop(c, None)
+            if not disp:
+                self._halt.wait(0.1); continue
+            ch = disp[rot % len(disp)]; rot += 1
+            try:
+                raw = self.sc.read_waveform(ch, retries=LIVE_RETRIES, timeout=LIVE_TIMEOUT_MS)
+            except Exception:
+                raw = b''
+            y = np.frombuffer(raw, dtype=np.uint8)
+            if len(y):
+                with self._lock:
+                    self.waves[ch] = y
+            self._halt.wait(POLL_INTERVAL_MS / 1000.0)    # gentle pacing between acquires
+
 
 def run_live(max_frames, capture=True):
     for be in ('TkAgg', 'QtAgg', 'GTK3Agg'):
@@ -251,40 +344,46 @@ def run_live(max_frames, capture=True):
     from mso5202d import Scope
     sc = Scope()
     cap = ScopeCapture().start() if capture else None
+    reader = Reader(sc); reader.start()
     fig, ax = plt.subplots(figsize=(11, 5)); fig.patch.set_facecolor(BG)
     style_scope(ax, SAMPLES_PER_DIV and 3840 / SAMPLES_PER_DIV or 10)
     lines = [ax.plot([], [], lw=1.0, color=CH_COLORS[ch], label=f"CH{ch+1}",
                      solid_capstyle='round')[0] for ch in (0, 1)]
     leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
     for t in leg.get_texts(): t.set_color(FG)
-    state = {'n': 0}
+    st = {'n': 0}
 
     def update(_):
-        try:
-            waves, s = grab(sc)
-        except Exception as e:
-            ax.set_title(f"read error: {e}", fontsize=9, color=FG); return lines
+        # GUI-thread only: snapshot the latest data from the reader and redraw.
+        # No USB here, so this never blocks — the window stays smooth regardless of
+        # how slow the scope is.
+        s, waves = reader.snapshot()
+        if s is None:
+            return lines                                  # reader hasn't produced yet
         nmax = 0
         for ch, line in enumerate(lines):
             y = waves.get(ch)
-            if y is None or len(y) == 0:     # off / empty read — keep last trace
+            if y is None or not len(y):
+                if not s.get(f'VERT-CH{ch+1}-DISP'):
+                    line.set_data([], [])                 # channel off — clear it
                 continue
             line.set_data(x_divs(len(y)), to_divs(y, s[f'VERT-CH{ch+1}-POS']))
             nmax = max(nmax, len(y))
         if nmax:
             ax.set_xlim(0, nmax / SAMPLES_PER_DIV)
-        _title(ax, s, waves)
-        state['n'] += 1
-        if max_frames and state['n'] >= max_frames:
+        _title(ax, s, nmax or None)
+        st['n'] += 1
+        if max_frames and st['n'] >= max_frames:
             plt.close(fig)
         return lines
 
-    # Keep a reference — a discarded FuncAnimation gets GC'd and never renders.
-    anim = FuncAnimation(fig, update, interval=50, blit=False, cache_frame_data=False)
+    # The GUI can refresh fast now (33 ms ≈ 30 fps) since update() does no I/O.
+    anim = FuncAnimation(fig, update, interval=33, blit=False, cache_frame_data=False)
     try:
         plt.show()
     finally:
         del anim
+        reader.stop(); reader.join(timeout=2)
         if cap: cap.stop()
         sc.close()
 

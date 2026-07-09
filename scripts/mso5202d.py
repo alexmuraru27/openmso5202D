@@ -16,6 +16,14 @@ import usb.core, usb.util
 
 VID, PID = 0x049F, 0x505A
 EP_OUT, EP_IN = 0x02, 0x81
+# Transport: the device only replies if a bulk-IN read is already posted when the
+# OUT is written. We start a reader thread, wait until it signals it is about to
+# read (Event), then leave TRANSACT_POST_S for the IN URB to actually reach the
+# kernel before writing. Below ~12 ms the write races the read and the device
+# stops replying (transactions time out / retry). 15 ms is measured reliable with
+# headroom, and latency is USB-round-trip-limited from there down, so lower is no
+# faster. Re-tune with scripts/tune_transact.py if you change hosts.
+TRANSACT_POST_S = 0.015
 
 def build(payload: bytes) -> bytes:
     hdr = b'\x53' + struct.pack('<H', len(payload) + 1) + payload
@@ -85,11 +93,14 @@ class Scope:
 
     def _transact_once(self, payload: bytes, timeout) -> bytes:
         out = {}
+        posted = threading.Event()
         def reader():
+            posted.set()                                  # about to post the bulk-IN read
             try: out['f'] = self._recv(timeout)
             except Exception as e: out['e'] = e
         t = threading.Thread(target=reader, daemon=True); t.start()
-        time.sleep(0.03)                                  # let the IN read get posted
+        posted.wait(0.5)                                  # reader is up and about to read
+        time.sleep(TRANSACT_POST_S)                       # margin for the IN URB to post
         try:
             self.dev.write(EP_OUT, build(payload), timeout=2000)
         except usb.core.USBError as e:
@@ -117,32 +128,36 @@ class Scope:
         except Exception: pass
         return data
 
-    def read_settings(self) -> bytes:
+    def read_settings(self, timeout=3000, retries=2) -> bytes:
         """Poll selector 0x01 -> settings payload: selectorEcho 0x81 followed
         directly by the 213 /protocol.inf parameter bytes (no subtype byte —
         resolved 2026-07-08, see MSO5202D-protocol.md §6). Feed to
-        decode_settings()."""
-        return self.transact(b'\x01')
+        decode_settings(). A live viewer can pass a short timeout + retries=0 to
+        fail fast when the scope is busy."""
+        return self.transact(b'\x01', timeout=timeout, retries=retries)
 
-    def read_waveform(self, ch=0, retries=2) -> bytes:
+    def read_waveform(self, ch=0, retries=2, timeout=2000) -> bytes:
         """Acquire one 3840-sample block. ch: 0 = CH1, 1 = CH2 — the channel is
         selected by the ACQUIRE value byte (02 01 <ch>), NOT by param 0x12
         (which the vendor app toggles 1->0 around each refresh; run/hold?).
         Verified on hardware 2026-07-08: with CH2's probe disconnected,
-        02 01 00 returns CH1's square wave and 02 01 01 returns CH2's flat line."""
-        # The acquire is a multi-frame sequence; retry the whole thing (with a
-        # resync) if it times out or returns no data frame, so transient USB
-        # timeouts self-heal instead of surfacing to the caller.
+        02 01 00 returns CH1's square wave and 02 01 01 returns CH2's flat line.
+
+        `timeout` (ms) and `retries` bound how long a read can block. The inner
+        transactions use retries=0 so retrying is governed here — a live viewer
+        can pass a short timeout + retries=0 to fail fast and skip the frame when
+        the scope is busy (e.g. a knob being turned), instead of hanging on
+        seconds of nested retries."""
         for _ in range(retries + 1):
             try:
-                self.transact(bytes([0x12, 0x01, 0x00]))          # 12=0 (vendor: run/live?)
-                frame = self.transact(bytes([0x02, 0x01, ch]))    # acquire ch -> size(00)
+                self.transact(bytes([0x12, 0x01, 0x00]), timeout=timeout, retries=0)
+                frame = self.transact(bytes([0x02, 0x01, ch]), timeout=timeout, retries=0)
                 data = b''
                 for _ in range(5):
                     st = frame[1] if len(frame) > 1 else 0xFF
                     if st == 0x01: data = frame[3:]
                     elif st == 0x02: break
-                    frame = self._recv(2000)
+                    frame = self._recv(timeout)
                 if data:
                     return data
             except Exception:
