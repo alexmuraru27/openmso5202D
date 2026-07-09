@@ -270,24 +270,38 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
   Values `12 01 02`/`03` make the next acquire return nothing. Note the vendor
   captures (`session1/2`) were taken with **CH2 display off**, which is why
   they never showed a CH2 fetch.
-- **OPEN — vertical amplitude depends on the trace's DISTANCE FROM SCREEN
-  CENTRE (the "0 axis").** The returned amplitude is **full-swing (~200+ counts
-  p-p) when the trace baseline sits near the centre/0 line, and compressed
-  (~25 counts) when it is parked well away from centre.** User-observed live
-  ("when it crosses the 0 axis the app goes full-screen") and confirmed by
-  measurement (2026-07-08): with both channels on the same 5 V/1 kHz cal,
-  CH1 @ 5 V/div at `POS=-78` (far below centre) → **25 counts**, while
-  CH2 @ 2 V/div at `POS=-16` (near centre) → **217 counts**. Read repeatedly the
-  values are stable per position. So the byte encoding appears to be referenced
-  to screen centre at a high fixed gain, not to the channel's positioned
-  baseline — moving the trace off-centre shrinks/rescales the returned swing
-  (and also drives the "raise → app-trace-descends" polarity anomaly). This is a
-  *characterisation, not a model.* Ruled out: `VERT-CHx-FINE=0`,
-  `VERT-CHx-PROBE=0`, `TRIG-STATE=3`, acquire mode/type (all identical across
-  channels). Vendor-manual context: 8-bit ADC per channel, DC gain ±3%,
-  graticule 8 div tall. Resolve with a controlled sweep that logs amplitude &
-  baseline vs `VERT-POS` (one channel, fixed signal) to pin the amplitude =
-  f(distance-from-centre) law, then a V/div sweep at fixed centre position.
+- **Vertical byte encoding — SOLVED (2026-07-09).** A controlled single-channel
+  `VERT-CH1-POS` sweep (one channel, one V/div, one 1 kHz/5 V cal, moving the
+  trace bottom-off-screen → top-off-screen) with **POS read from the same frames**
+  pins the encoding exactly. Each sample byte is:
+
+  **`byte = (VERT-CHx-POS + 16 + signal) mod 256`**
+
+  where `VERT-CHx-POS` is the channel's position (1/25-div units) and `signal` is
+  the AC waveform in counts (**25 counts/division**, so ≈28 counts p-p for a 1-div
+  cal). Consequences — and the two bugs they cause a naïve decoder:
+  - **Baseline** `= (POS + 16) mod 256`, slope **exactly 1 byte per POS unit**
+    (verified: POS 18→byte 34, 50→66, 95→111; −57→213, −90→179 …).
+  - **Reversed sense:** the byte *rises* as the trace moves **up** (POS up). A
+    decoder that does `128 − byte` moves the trace the wrong way ("raise → app
+    descends").
+  - **8-bit wrap:** as the trace nears screen centre the baseline nears the byte
+    boundary (0/256), so the AC signal wraps around it → a **rail-to-rail "hash"**
+    block (~500-sample runs pinned to `≈0x08`/`≈0xF2` alternating with mid). This
+    is *not* a bad frame — it is the real signal, folded across the 8-bit edge.
+  - **Off-screen / parked:** far past ±4 div the block **flat-lines near mid-code
+    (~129)** — no data.
+
+  **Correct decode** (undoes both the reverse and the wrap; recovers a clean trace
+  at every position, centre included):
+  ```
+  base   = (POS + 16) & 0xFF
+  signal = ((byte − base + 128) mod 256) − 128      # AC counts, unwrapped
+  y_div  = (POS + signal) / 25                       # divisions, up = positive
+  ```
+  This is what `mso5202d_plot.py` / `MSO5202D-rendering.md` implement. (Absolute
+  `counts→volts` is still uncalibrated — 25 counts/div is scale; the viewer shows
+  divisions, each = that channel's V/div.)
 - **OPEN — inter-channel PHASE is not preserved.** CH1 and CH2 are fetched as
   two separate acquires (~100 ms apart) with no shared trigger lock, so their
   returned phase is uncorrelated: the CH1→CH2 first-rising-edge offset jittered
@@ -296,6 +310,47 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
   in-phase; our plotter shows them phase-shifted. A single-acquire "both
   channels" command (if one exists) would fix it; otherwise the readout can't
   reproduce cross-channel timing.
+
+### Reference rendering model (how to draw the trace like the scope)
+
+A faithful trace is drawn from a **point list** `(x, y)` (x = sample index,
+y = sample value) using **fixed scale factors** — never a per-frame auto-fit;
+that fixed scale is what keeps the trace anchored like a real scope:
+
+```
+x_px = left_margin − ftol(x · HzRatio)                 ; HzRatio from time/div
+y_px = pivot + ftol(y · VtRatio) + displacement        ; VtRatio from V/div
+```
+
+- **`VtRatio`** (vertical) and **`HzRatio`** (horizontal) are floats derived from
+  the channel's V/div and the timebase; both are set once per acquisition and
+  applied uniformly. `ftol` = truncate-to-int.
+- **`pivot`** = the graticule centre (window dimension ÷ 2). The grid is **8×10
+  divisions**; horizontal density is **200 points/division**.
+- **`displacement`** = the channel's vertical placement — for analog this is
+  `VERT-CHx-POS` (1/25-div units → divisions); for LA it is the per-channel row
+  baseline.
+- Consecutive mapped points are joined by **line segments** (Vectors mode;
+  `DISPLAY-MODE`=1 draws Dots instead) with a per-channel colour.
+
+**Special sample values (sentinels — must be handled, not plotted as data):**
+- `y == 0xFFFF_F9F2` (−1550) → **pen-up / gap**: the trace breaks here (do not
+  connect across it). Corresponds to the off-screen/rail-pinned samples in §5.
+- `y == 0xFFFF_FB30` (−1232) → **trigger-column marker**, drawn at the trigger
+  sample index.
+
+**Analog:** one polyline per channel; `VtRatio` from V/div, `pivot` = centre,
+`displacement` = `VERT-CHx-POS`.
+
+**LA:** the *same* point→pixel mapping, but the 16 digital channels are each
+drawn in their **own row** (per-channel `displacement`); every Dn is a 0/1
+square wave scaled by `VtRatio` to a small row height, with the D0–D15 labels
+and the enabled/selected-channel row highlight drawn alongside.
+
+The practical fix for a naïve plotter: stop auto-scaling to the data's min/max;
+instead scale vertically by a **fixed** counts-per-division, place each channel
+by its `VERT-CHx-POS`, frame it on an 8×10 grid, and break the line at the gap
+sentinel.
 
 ---
 
@@ -1036,9 +1091,9 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 
 | field | value → meaning |
 |---|---|
-| `TRIG-STATE` | 0 STOP · 1 WAIT (Normal, no trig) · 2 AUTO (no trig) · 3 TRIG'D · 4 SCAN/roll · 5 SINGLE (armed) · 6 ARMING flicker |
+| `TRIG-STATE` | 0 STOP · 1 WAIT (Normal, no trig) · 2 AUTO (no trig) · 3 TRIG'D · 4 SCAN/roll · 5 SINGLE (armed) · 6 ARMING flicker. Official on-screen labels: `STOP` / `Ready` / `AUTO` / `Trig'd` / `Scan` / `Astop` / `Armed` (0–6). |
 | `TRIG-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Slope · 4 Overtime · 5 Alter (swap; alternates `TRIG-SRC` CH1↔CH2) |
-| `TRIG-SRC` | 0 CH1 · 1 CH2 · 2 EXT · 3 EXT/5 · 4 AC line |
+| `TRIG-SRC` | 0 CH1 · 1 CH2 · 2 EXT · 3 EXT/5 · 4 AC line. **Selectable set is restricted per trigger type:** Edge = all 5; Video / Pulse / Slope = CH1/CH2/EXT/EXT-5 (no AC line); Overtime = **CH1/CH2 only**. |
 | `TRIG-MODE` | 0 Auto · 1 Normal (mirrors into `TRIG-SWAP-CHx-MODE`) |
 | `TRIG-EDGE-SLOPE` | 0 Rising · 1 Falling |
 | `TRIG-COUP` | 0 DC · 1 AC · 2 Noise Reject · 3 HF Reject · 4 LF Reject |

@@ -241,11 +241,14 @@ TB_TO_NS = {
 # Trigger enums -> labels (mapped by stepping each menu on hardware, see
 # MSO5202D-protocol.md §6). All verified twice.
 TRIG_STATE_NAMES = {   # 1 = WAIT resolved via Normal-mode-no-trigger
+    # official on-screen labels: STOP/Ready/AUTO/Trig'd/Scan/Astop/Armed (0..6)
     0: 'STOP', 1: 'WAIT', 2: 'AUTO', 3: "TRIG'D", 4: 'SCAN', 5: 'SINGLE', 6: 'ARMING',
 }
 TRIG_TYPE_NAMES = {
     0: 'Edge', 1: 'Video', 2: 'Pulse', 3: 'Slope', 4: 'Overtime', 5: 'Alter',
 }
+# Source list is restricted per trigger type: Edge = all 5; Video/Pulse/Slope =
+# CH1/CH2/EXT/EXT-5 (no AC line); Overtime = CH1/CH2 only.
 TRIG_SRC_NAMES = {0: 'CH1', 1: 'CH2', 2: 'EXT', 3: 'EXT/5', 4: 'AC line'}
 TRIG_MODE_NAMES = {0: 'Auto', 1: 'Normal'}
 TRIG_SLOPE_NAMES = {0: 'Rising', 1: 'Falling'}
