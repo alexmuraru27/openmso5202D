@@ -171,6 +171,45 @@ class Scope:
             self._resync()
         return b''
 
+    # Acquire channel-code map (the value byte of `02 01 <code>`), decoded from
+    # the vendor app: 0=CH1, 1=CH2, 2=Math (1 byte/sample each), 5=LA. Codes 3/4
+    # are not usable channels (3 replies empty, 4 is a dual-analog block); 6+ are
+    # invalid and desync the link. See MSO5202D-protocol.md §5.
+    LA_CHANNEL_CODE = 0x05
+
+    def read_la(self, retries=2, timeout=2000) -> bytes:
+        """Acquire one Logic-Analyzer block: `02 01 05` -> 3840 samples, **2 bytes
+        per sample** (little-endian 16-bit word; bit N = channel D(N)), i.e. 7680
+        bytes. Unlike the analog channels (1 byte/sample) LA packs all 16 digital
+        channels into each word. Returns the raw 7680-byte payload (decode with
+        decode_la); b'' if the read fails or LA is off.
+
+        ⚠ UNSAFE / UNRELIABLE — DO NOT USE in normal operation. Channel-code 5 is
+        a half-wired firmware path: it returns coherent data only at slow
+        timebases, mostly a 2-state pattern otherwise, AND it **corrupts the
+        scope's own on-screen LA display** while reading. The frame *format* above
+        is correct, but the firmware doesn't serve real LA samples over USB. For a
+        live LA view use the 0x20 framebuffer (the scope's rendered screen)
+        instead. Kept only for RE experiments."""
+        data_to = min(timeout, 200)
+        for _ in range(retries + 1):
+            try:
+                self.transact(bytes([0x12, 0x01, 0x00]), timeout=timeout, retries=0)
+                frame = self.transact(bytes([0x02, 0x01, self.LA_CHANNEL_CODE]),
+                                      timeout=timeout, retries=0)
+                data = b''
+                for _ in range(6):
+                    st = frame[1] if len(frame) > 1 else 0xFF
+                    if st == 0x01: data = frame[3:]
+                    elif st == 0x02: break
+                    frame = self._recv(data_to)
+                if data:
+                    return data
+            except Exception:
+                pass
+            self._resync()
+        return b''
+
 
 # /protocol.inf parameter list (name, byte width) in wire order. The settings
 # payload is exactly: selectorEcho 0x81 | these 213 bytes — no subtype, no
@@ -408,6 +447,15 @@ MENU_NAMES = {
 # cal signal (500 samples/period at 400 us/div, 1 kHz). A waveform block is
 # 3840 samples = 19.2 divisions.
 SAMPLES_PER_DIV = 200
+
+
+def decode_la(raw: bytes) -> list:
+    """Decode a raw LA block from read_la() into a list of 16-bit sample words
+    (little-endian). Each word packs all 16 digital channels: **bit N = D(N)**
+    (D0 = LSB … D15 = MSB), matching LA-CHANNEL-STATE. Returns [] if empty.
+    To get one channel's 0/1 trace: `[(w >> n) & 1 for w in decode_la(raw)]`."""
+    n = len(raw) // 2
+    return list(struct.unpack(f'<{n}H', raw[:2 * n])) if n else []
 
 
 def decode_settings(payload: bytes) -> dict:

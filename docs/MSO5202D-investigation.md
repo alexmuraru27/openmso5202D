@@ -30,8 +30,7 @@ Investigated 2026-07-07.
   derivative) claims it as `\\.\Ezusb-0`, and the GUI app "Scope 2.0.0.6" drives
   it with standard EZ-USB IOCTLs (bulk read/write + vendor requests).
 - The command/sample protocol is a custom `'S'`-framed protocol (fully documented
-  in `MSO5202D-protocol.md`), recovered from USB captures of the vendor app — it
-  is not present as strings in the vendor binaries.
+  in `MSO5202D-protocol.md`), recovered from USB captures of the vendor app.
 
 ---
 
@@ -73,9 +72,7 @@ oscilloscope family (Samsung S3C + embedded Linux), extensively discussed on the
 
 ## 3. How the protocol was recovered
 
-The scope command bytes are built in the vendor app's compiled code and are **not**
-present as strings in the binaries, so static analysis alone could not recover
-them. They were obtained by capturing the vendor Windows app ("Scope 2.0.0.6")
+The protocol was obtained by capturing the vendor Windows app ("Scope 2.0.0.6")
 talking to the scope over USB (Wireshark/USBPcap), then decoding the bulk-OUT
 command frames and bulk-IN data frames. The two captures live in `../captures/`
 (stripped to MSO-only traffic); the vendor software is archived at

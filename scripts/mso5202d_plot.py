@@ -27,6 +27,7 @@ from shutil import which
 import numpy as np
 import matplotlib
 from mso5202d import SAMPLES_PER_DIV, DIV_UNIT
+from mso5202d import decode_la as _decode_la
 
 
 class ScopeCapture:
@@ -137,6 +138,67 @@ def x_divs(n):
     """Sample index → horizontal divisions (200 samples/div), block start = 0."""
     return np.arange(n) / SAMPLES_PER_DIV
 
+# --- logic analyzer (D0..D15) ----------------------------------------------------
+# LA acquires as 3840 16-bit words (02 01 05, 2 bytes/sample); bit N = channel
+# D(N). When LA is on the enabled channels are stacked as evenly spaced digital
+# rows across the graticule (lowest Dn at the bottom), overlaid on any analog.
+#
+# DISABLED BY DEFAULT: the raw `02 01 05` LA read is a half-wired firmware path.
+# It returns unreliable data (2-state garbage at most timebases; only partially
+# coherent at slow ones) AND — critically — corrupts the scope's own on-screen LA
+# display while reading. Until a safe LA readout is found (likely the 0x20
+# framebuffer, which is how the vendor's virtual panel shows LA), we do NOT poll
+# it. Flip LA_READ_ENABLED to True only for controlled RE experiments.
+LA_READ_ENABLED = False
+LA_COLOR = '#2ec27e'
+
+def la_enabled(state):
+    """Enabled digital channels from LA-CHANNEL-STATE (bit N = D(N))."""
+    return [n for n in range(16) if (int(state) >> n) & 1]
+
+def la_geometry(enabled):
+    """Place the enabled D-channels as evenly spaced rows in the graticule,
+    lowest Dn at the bottom. Returns {n: (row_center_div, amplitude_div)}."""
+    k = len(enabled)
+    if not k:
+        return {}
+    top, bot = V_DIVS / 2 - 0.25, -V_DIVS / 2 + 0.25
+    gap = (top - bot) / k
+    amp = min(gap * 0.55, 0.45)
+    return {n: (bot + (i + 0.5) * gap, amp) for i, n in enumerate(enabled)}
+
+def la_trace_y(words, n, yc, amp):
+    """0/1 trace for Dn in its row: bit N of each 16-bit word → low/high level."""
+    return yc - amp / 2 + ((words >> n) & 1) * amp
+
+def draw_la(la_lines, la_labels, s, words):
+    """Update the 16 pre-created LA row artists (line + label per Dn) from the
+    latest sample words. Enabled channels get a stacked digital trace; the rest
+    are cleared. Returns the sample count drawn (0 if LA off / no data)."""
+    if not (s.get('LA-SWI') and words):
+        for ln in la_lines: ln.set_data([], [])
+        for tx in la_labels: tx.set_text('')
+        return 0
+    w = np.asarray(words, dtype=np.uint16)
+    x = x_divs(len(w))
+    geom = la_geometry(la_enabled(s.get('LA-CHANNEL-STATE', 0)))
+    for n in range(16):
+        if n in geom:
+            yc, amp = geom[n]
+            la_lines[n].set_data(x, la_trace_y(w, n, yc, amp))
+            la_labels[n].set_position((0.1, yc)); la_labels[n].set_text(f"D{n}")
+        else:
+            la_lines[n].set_data([], []); la_labels[n].set_text('')
+    return len(w)
+
+def make_la_artists(ax):
+    """Pre-create the 16 LA line + label artists (empty)."""
+    la_lines = [ax.plot([], [], lw=1.0, color=LA_COLOR, solid_capstyle='round')[0]
+                for _ in range(16)]
+    la_labels = [ax.text(0.1, 0, '', color=LA_COLOR, fontsize=6, va='center',
+                         ha='left', clip_on=True) for _ in range(16)]
+    return la_lines, la_labels
+
 def style_scope(ax, n_div_h):
     """Draw the scope-style graticule: 8 tall × n_div_h wide divisions, with 5
     minor subdivisions per division, a bold centre line, on a dark face."""
@@ -236,9 +298,10 @@ def read_waves(scope, s, timeout=2000, retries=2):
     return waves
 
 def grab(scope):
-    """Settings + waveforms (used by the one-shot PNG path — generous timeouts)."""
+    """Settings + waveforms + LA block (one-shot PNG path — generous timeouts)."""
     s = read_settings(scope)
-    return read_waves(scope, s), s
+    la = _decode_la(scope.read_la()) if (s.get('LA-SWI') and LA_READ_ENABLED) else []
+    return read_waves(scope, s), s, la
 
 
 def _title(ax, s, n=None):
@@ -252,21 +315,27 @@ def run_png(path, frames, capture=True):
     sc = Scope()
     cap = ScopeCapture().start() if capture else None
     try:
-        waves, s = grab(sc)
+        waves, s, la = grab(sc)
         for _ in range(max(0, frames - 1)):        # warm up / latest frame
-            waves, s = grab(sc)
-        n = max((len(y) for y in waves.values()), default=SAMPLES_PER_DIV)
+            waves, s, la = grab(sc)
+        n = max([len(y) for y in waves.values()] + [len(la)], default=SAMPLES_PER_DIV)
+        n = n or SAMPLES_PER_DIV
         fig, ax = plt.subplots(figsize=(11, 5)); fig.patch.set_facecolor(BG)
         style_scope(ax, n / SAMPLES_PER_DIV)
         for ch, y in waves.items():
             ax.plot(x_divs(len(y)), to_divs(y, s[f'VERT-CH{ch+1}-POS']), lw=1.0,
                     color=CH_COLORS[ch], label=f"CH{ch+1}", solid_capstyle='round')
+        la_lines, la_labels = make_la_artists(ax)
+        draw_la(la_lines, la_labels, s, la)
         _title(ax, s, n)
-        leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
-        for t in leg.get_texts(): t.set_color(FG)
+        if waves:                                     # only legend labelled analog traces
+            leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
+            for t in leg.get_texts(): t.set_color(FG)
         fig.tight_layout(); fig.savefig(path, dpi=110, facecolor=BG)
         for ch, y in waves.items():
             print(f"[+] CH{ch+1}: {len(y)} samples, min={int(y.min())} max={int(y.max())}")
+        if s.get('LA-SWI') and la:
+            print(f"[+] LA: {len(la)} samples, {len(la_enabled(s.get('LA-CHANNEL-STATE',0)))} channels on")
         print(f"[+] saved {path}")
     finally:
         if cap: cap.stop()
@@ -289,11 +358,12 @@ class Reader(threading.Thread):
         self._halt = threading.Event()
         self.s = None
         self.waves = {}
+        self.la = []                                       # latest LA sample words
         self.reconnecting = False
 
     def snapshot(self):
         with self._lock:
-            return self.s, dict(self.waves)
+            return self.s, dict(self.waves), list(self.la)
 
     def stop(self):
         self._halt.set()
@@ -344,24 +414,44 @@ class Reader(threading.Thread):
             if s is None:
                 self._halt.wait(0.1); continue
             disp = [ch for ch in (0, 1) if s[f'VERT-CH{ch+1}-DISP']]
+            la_on = bool(s.get('LA-SWI')) and LA_READ_ENABLED   # raw LA read disabled (corrupts scope)
             with self._lock:                              # forget channels turned off
                 for c in list(self.waves):
                     if c not in disp:
                         self.waves.pop(c, None)
-            if not disp:
+                if not la_on:
+                    self.la = []
+            # Round-robin the enabled analog channels and (if on) the LA block, so
+            # each cycle costs one acquire and the refresh rate degrades gracefully.
+            items = list(disp) + (['LA'] if la_on else [])
+            if not items:
                 self._halt.wait(0.1); continue
-            ch = disp[rot % len(disp)]; rot += 1
-            try:
-                raw = self.sc.read_waveform(ch, retries=LIVE_RETRIES, timeout=LIVE_TIMEOUT_MS)
-            except Exception:
-                raw = b''
-            y = np.frombuffer(raw, dtype=np.uint8)
-            if len(y):
-                with self._lock:
-                    self.waves[ch] = y
-                empties = 0
+            item = items[rot % len(items)]; rot += 1
+            if item == 'LA':
+                try:
+                    words = _decode_la(self.sc.read_la(retries=LIVE_RETRIES,
+                                                        timeout=LIVE_TIMEOUT_MS))
+                except Exception:
+                    words = []
+                if words:
+                    with self._lock:
+                        self.la = words
+                    empties = 0
+                else:
+                    empties += 1
             else:
-                empties += 1
+                try:
+                    raw = self.sc.read_waveform(item, retries=LIVE_RETRIES,
+                                                timeout=LIVE_TIMEOUT_MS)
+                except Exception:
+                    raw = b''
+                y = np.frombuffer(raw, dtype=np.uint8)
+                if len(y):
+                    with self._lock:
+                        self.waves[item] = y
+                    empties = 0
+                else:
+                    empties += 1
             self._halt.wait(POLL_INTERVAL_MS / 1000.0)    # gentle pacing between acquires
 
 
@@ -382,6 +472,7 @@ def run_live(max_frames, capture=True):
     style_scope(ax, SAMPLES_PER_DIV and 3840 / SAMPLES_PER_DIV or 10)
     lines = [ax.plot([], [], lw=1.0, color=CH_COLORS[ch], label=f"CH{ch+1}",
                      solid_capstyle='round')[0] for ch in (0, 1)]
+    la_lines, la_labels = make_la_artists(ax)
     leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
     for t in leg.get_texts(): t.set_color(FG)
     st = {'n': 0}
@@ -394,7 +485,7 @@ def run_live(max_frames, capture=True):
             ax.set_title("scope disconnected — reconnecting…",
                          color='#e6b400', fontsize=11, pad=10)
             return lines
-        s, waves = reader.snapshot()
+        s, waves, la = reader.snapshot()
         if s is None:
             return lines                                  # reader hasn't produced yet
         nmax = 0
@@ -406,13 +497,14 @@ def run_live(max_frames, capture=True):
                 continue
             line.set_data(x_divs(len(y)), to_divs(y, s[f'VERT-CH{ch+1}-POS']))
             nmax = max(nmax, len(y))
+        nmax = max(nmax, draw_la(la_lines, la_labels, s, la))  # LA rows (if on)
         if nmax:
             ax.set_xlim(0, nmax / SAMPLES_PER_DIV)
         _title(ax, s, nmax or None)
         st['n'] += 1
         if max_frames and st['n'] >= max_frames:
             plt.close(fig)
-        return lines
+        return lines + la_lines
 
     # The GUI can refresh fast now (33 ms ≈ 30 fps) since update() does no I/O.
     anim = FuncAnimation(fig, update, interval=33, blit=False, cache_frame_data=False)

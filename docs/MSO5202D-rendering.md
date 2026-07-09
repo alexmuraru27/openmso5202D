@@ -99,10 +99,19 @@ The coordinate mapping (§2–§4) is shared. The difference is layout:
 - **Logic analyzer (D0–D15)** — the *same* index→x mapping, but each digital
   channel is drawn in **its own horizontal row**: a 0/1 value scaled to a small
   fixed row height and offset to that channel's baseline, with the channel label
-  (D0…D15) beside it and the selected/enabled row highlighted. (Reading the LA
-  sample stream over USB is not yet implemented in the driver, so the viewer
-  currently draws the analog channels only; this row model is recorded here for
-  when it is.)
+  (D0…D15) beside it. The row-rendering code exists (`draw_la` in
+  `mso5202d_plot.py`: enabled channels from `LA-CHANNEL-STATE` stacked lowest-Dn-
+  at-bottom, green, `y = row_center − amp/2 + bit·amp`), but it is **disabled by
+  default** (`LA_READ_ENABLED = False`).
+  - **Why disabled:** the only raw LA read (`02 01 05`) is a non-functional
+    firmware path — it returns unreliable 2-state data and **corrupts the scope's
+    own LA display** while reading (see MSO5202D-protocol.md §5). So there is no
+    safe raw LA sample source to render.
+  - **The right way to show LA** is the scope's **`0x20` framebuffer** — its
+    rendered screen already contains the firmware-drawn D0–D15 rows (this is how
+    the vendor's virtual panel does it). A framebuffer/screen-mirror view is the
+    intended path for LA in the viewer; the vector row-renderer above is kept for
+    if/when a safe raw LA readout is ever found.
 
 ## 7. What our viewer implements (`scripts/mso5202d_plot.py`)
 

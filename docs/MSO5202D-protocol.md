@@ -165,7 +165,7 @@ byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
 | `0x01` | (none), or `00` | **keep-alive / poll.** Response is the settings-state blob (§6). `53 02 00 01 56`. A `00` variant (`53 02 00 00 55`) also seen (start/stop). |
 | `0x10` | `00` + ASCII path | **read file** (§4). `53 10 00 10 00 "/protocol.inf" <ck>` |
 | `0x12` | `01` `<v>` | **SET param 0x12** = v (0/1). Used in the acquire loop; see §5. `53 04 00 12 01 00 <ck>` |
-| `0x02` | `01` `00` | **SET param 0x02** = 0 → latch/trigger an acquisition (§5). `53 04 00 02 01 00 5a` |
+| `0x02` | `01` `<ch>` | **acquire channel** `<ch>` → waveform (§5). `00`=CH1 `01`=CH2 `02`=Math `05`=LA. `53 04 00 02 01 00 5a` |
 | `0x11` | 213-byte block | **WRITE settings** — push the whole `/protocol.inf` block; sets any field (host-side control, **Appendix F.1**). |
 | `0x13` | `<keyid>` `<state>` | **key event** — press a front-panel key (`keyid` = `/keyprotocol.inf` index; **Appendix F.2**). |
 | `0x20` | (none) | **screen grab** — scope streams its RGB565 framebuffer (**Appendix F.3**). |
@@ -220,24 +220,65 @@ square wave):
 ```
 OUT  53 04 00 12 01 00        ; param 0x12 = 0 (NOT channel select; see below)
                                                       -> IN 53 04 00 92 01 00        (ack, subtype 01)
-OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
+OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch> — see channel-code map below
                                                       -> IN 53 07 00 82 00 00 00 0f 00  (subtype 00 = size; 0x0F00 = 3840)
-                                                      -> IN 53 04 0f 82 01 00 <3840 samples>  (subtype 01 = data)
-                                                      -> IN 53 04 00 82 02 00        (subtype 02 = end-marker)
+                                                      -> IN 53 04 0f 82 01 <ch> <samples>  (subtype 01 = data)
+                                                      -> IN 53 04 00 82 02 <ch>      (subtype 02 = end-marker)
 ```
 
-- **Samples: 8-bit unsigned, 1 byte each**, **always 3840 per block = the on-screen
-  display window** (19.2 div). The waveform frame payload is `82 01 00 <3840 bytes>`;
-  the 3840 data bytes follow the 3-byte `82 01 00` header.
+- **Acquire channel-code map (`<ch>` = value byte of `02 01 <ch>`) — SOLVED
+  (2026-07-09):** `00` = **CH1**, `01` = **CH2**, `02` = **Math**, `05` = **Logic
+  Analyzer**. Codes `03`/`04` are not usable channels (`03` replies empty; `04`
+  returns a dual-analog block) and `06`+ are invalid — they get no reply and
+  **desync the link** (avoid probing them). The data frame echoes the code in its
+  3rd byte (`82 01 <ch>`), so the response is self-identifying.
+- **Samples: analog channels (CH1/CH2/Math) are 8-bit unsigned, 1 byte each**,
+  **always 3840 per block = the on-screen display window** (19.2 div). The waveform
+  frame payload is `82 01 <ch> <3840 bytes>`.
+- **Logic Analyzer (`02 01 05`) — SOLVED (2026-07-09):** returns the same 3840
+  samples but **2 bytes per sample** (little-endian **16-bit word**, 7680 bytes
+  total), because it packs all 16 digital channels into each sample: **bit N =
+  channel D(N)** (D0 = LSB … D15 = MSB, same convention as `LA-CHANNEL-STATE`).
+  So `word = raw[2i] | (raw[2i+1] << 8)` and `Dn(i) = (word >> n) & 1`. The size
+  frame still reports `0x0F00` = 3840 *samples* (not bytes). LA must be on
+  (`LA-SWI` = 1) or the read returns just an end-marker. Decoded by `read_la()` /
+  `decode_la()` in `mso5202d.py`.
+- **⚠ …but `02 01 05` is NOT a usable read — it is a half-wired firmware path
+  (2026-07-09).** The *frame format* above is correct, but the firmware does not
+  actually serve live LA samples over USB:
+  - The returned payload is **2-state garbage** at most timebases (only the words
+    `0x007f`/`0xff81` toggling at one ~62.5 Hz rate — no per-channel frequency
+    gradient), and its value is even influenced by the `0x12` command. It becomes
+    *partially* coherent only at slow timebases (e.g. 40 ms/div: 15 distinct
+    words), but never matches the scope's own display.
+  - **Reading it corrupts the scope's on-screen LA display** — the instrument's
+    own D0–D15 traces get overwritten with the 2-state pattern while we read.
+  - No observed vendor-app USB traffic ever issues `02 01 05`; the vendor's
+    virtual panel instead displays LA via the **`0x20` framebuffer** (the scope's
+    rendered screen, which already contains the firmware-drawn LA rows) — the
+    safe, correct way to view LA over USB. `read_la()` is retained for RE only;
+    the live viewer keeps it disabled
+    (`LA_READ_ENABLED = False`). See MSO5202D-rendering.md §6.
 - **The `0x02` acquire reads only the screen buffer, NOT deep memory —
   CONFIRMED (2026-07-09).** With `ACQURIE-STORE-DEPTH` at the default it returns
   the 3840-sample screen; set to **40K it stops responding entirely** (`0x02`
   gets no reply — read returns 0 bytes, every retry times out). So the deep
-  record (40K/512K/1M) is **not reachable through this command**; pulling it
-  would need a different, still-undiscovered read (likely the *Save-waveform*
-  export path — Utility menu). Keep store depth at the screen size for live
-  readout. **Open item:** find the deep-memory read command (capture the vendor
-  *Save waveform* action) → unlocks single-shot deep capture on the PC.
+  record (40K/512K/1M) is **not reachable through this command**.
+- **The vendor app has no deep read either — VERIFIED against its own USB
+  traffic (2026-07-09).** A capture of the vendor Windows application performing
+  a live acquisition shows its refresh loop is byte-for-byte our own: per frame
+  it polls settings (`01`→`81`, 218 B), toggles the `0x12` param (`12 01 00`↔
+  `12 01 01`→`92`), then issues the same `02 01 <ch>` acquire and gets back the
+  identical **3-frame** reply — size (`82 00`, reports `0x00000f00` = 3840), data
+  (`82 01 <ch>` + **3840** sample bytes = a 3847-byte frame), end-marker
+  (`82 02`). **The largest single transfer the app ever makes is 3847 bytes
+  (= the 3840-sample screen block); it never reads more.** It does not use any
+  larger or alternate read command, so the deep record is simply **not exposed
+  over the USB host link at all** — consistent with the panel refusing to serve
+  40K/512K over USB even from its own vendor app. Deep single-shot capture, if it
+  exists, lives only in the on-instrument *Save waveform → USB stick* path (file
+  export), not as a host-issued read. Keep store depth at the screen size for
+  live readout; there is no deep-read command left to find over USB.
 - **Sample polarity (screen layout): smaller count = HIGHER on screen.**
   Matching the scope's static layout needs an *inverted* Y axis: with CH2 at the
   top of the scope reading bytes ~17–85 and CH1 at the bottom reading ~161–189,
@@ -269,12 +310,15 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch>: 00 = CH1, 01 = CH2
   samples at `0x0A` + 1921 at `0xF2`. **Display/decoding code must treat
   rail-pinned samples (≈0/≈255) as clipped, not real** and can flag "off
   screen" (the plotter does).
-- **2-channel readout — SOLVED (2026-07-08):** the channel is selected by the
-  **acquire value byte**: `02 01 00` = CH1, `02 01 01` = CH2. Verified on
-  hardware with CH2's probe disconnected (CH1 returned the square wave, CH2 its
-  flat line); `../captures/mso5202d-2ch-readout.pcapng` records 6 alternating
-  CH1/CH2 acquire pairs with their distinct 3840-sample responses. The `0x12` param is **not** a channel select — early tests
-  varying it returned identical data because it does something else entirely
+- **Multi-channel readout — SOLVED (2026-07-08, extended 2026-07-09):** the
+  channel is selected by the **acquire value byte** `02 01 <ch>`: `00` = CH1,
+  `01` = CH2, `02` = Math, `05` = **LA** (16-bit words, 2 B/sample — see the
+  acquire-code map above). Verified on hardware with CH2's probe disconnected
+  (CH1 returned the square wave, CH2 its flat line);
+  `../captures/mso5202d-2ch-readout.pcapng` records 6 alternating CH1/CH2 acquire
+  pairs with their distinct 3840-sample responses. The `0x12` param is **not** a
+  channel select — early tests varying it returned identical data because it does
+  something else entirely
   (the vendor app toggles it `1` → `0` around every refresh; run/hold?).
   Values `12 01 02`/`03` make the next acquire return nothing. Note the vendor
   captures (`session1/2`) were taken with **CH2 display off**, which is why
