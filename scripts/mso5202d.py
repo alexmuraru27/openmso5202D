@@ -325,6 +325,27 @@ DISPLAY_PERSIST_NAMES = {
 # DISPLAY-CONTRAST and DISPLAY-GRID-BRIGHT are 0..15 intensity (max = the
 # DISPLAY-MAXCONTRAST / DISPLAY-MAXGRID-BRIGHT fields, both 15).
 
+# MEASURE-ITEM1..8 = the 8 measurement slots; each has a -SRC (source) and a
+# type id. Mapped 2026-07-09 (captures/mso5202d-measure.pcapng) by sweeping
+# MEASURE-ITEM8 through the on-screen list; scope-labelled. 0 = Off = empty slot.
+MEASURE_SRC_NAMES = {0: 'CH1', 1: 'CH2', 3: 'LA'}  # only CH1/CH2/LA; id 2 is skipped/unused (no Math source)
+MEASURE_TYPE_NAMES = {
+    0: 'Off', 1: 'Frequency', 2: 'Period', 3: 'Mean', 4: 'Pk-Pk',
+    5: 'Cyc RMS', 6: 'Minimum', 7: 'Maximum', 8: 'Rise Time', 9: 'Fall Time',
+    10: 'Pos Width', 11: 'Neg Width', 12: 'Delay1-2 Rise', 13: 'Delay1-2 Fall',
+    14: '+Duty', 15: '-Duty', 16: 'Vbase', 17: 'Vtop', 18: 'Vmid', 19: 'Vamp',
+    20: 'Overshoot', 21: 'Preshoot', 22: 'Period Mean', 23: 'Period RMS',
+    24: 'FOvershoot', 25: 'RPreshoot', 26: 'Burst Width', 27: 'FRF', 28: 'FFR',
+    29: 'LRR', 30: 'LRF', 31: 'LFR',
+}
+
+# Logic analyzer. LA-CHANNEL-STATE = D0..D15 enable bitmask, bit N = D(N)
+# (D0 = LSB, all-on = 0xFFFF; low byte = D0-D7 group, high byte = D8-D15).
+# LA-CURRENT-CHANNEL = selected channel 0..15. Threshold is per 8-ch group.
+# Mapped 2026-07-09 (captures/mso5202d-la-{d7-d0,d15-d8,threshold}.pcapng).
+LA_THRESHOLD_TYPE_NAMES = {0: 'TTL', 1: 'CMOS', 2: 'ECL', 3: 'User'}  # LA-Dxx-THRESHOLD-TYPE
+LA_THRESHOLD_DAC = 4096.0   # LA user threshold: volts = raw / 4096 (±8 V, 12-bit DAC = code<<4)
+
 # CONTROL-MENUID -> which on-screen menu is shown (mapped by context across
 # captures; see MSO5202D-protocol.md §6). Partial — more menus to identify.
 # Trigger sub-menus that span two pages have consecutive ids (page1, page2).
@@ -339,7 +360,8 @@ MENU_NAMES = {
     26: 'Alter-CH1:Edge', 27: 'Alter-CH1:Pulse', 28: 'Alter-CH1:Video',
     29: 'Alter-CH1:Overtime', 30: 'Alter-CH2:Edge', 31: 'Alter-CH2:Pulse',
     32: 'Alter-CH2:Video', 33: 'Alter-CH2:Overtime',
-    40: 'Horizontal p2', 61: 'Logic Analyzer',
+    40: 'Horizontal p2',
+    61: 'Logic Analyzer', 62: 'LA config (D7-D0 group)', 63: 'LA config (D15-D8 group)',
     4: 'Display (Type/Persist/Contrast)', 36: 'Display (Grid/Format)',
     15: 'Cursor', 41: 'Math', 16: 'Math:FFT p1', 56: 'Math:FFT p2',
     # Save/Recall (Storage) — action/UI menu, NO settings-blob params (like
@@ -347,6 +369,14 @@ MENU_NAMES = {
     # file-browser. Mapped 2026-07-09 by ordered-open poll of CONTROL-MENUID.
     47: 'Save/Recall', 19: 'Save/Recall:REF', 18: 'Save/Recall:SETUP',
     48: 'Save/Recall:CSV/FileList',
+    # Utility — view-only, NO settings-blob params. 3 pages cycle
+    # 42(p1: sys-status/update-fw/save-wave/self-cal) -> 43(p2) -> 10(p3);
+    # page 3 reuses the generic id 10 (='default/none'). Mapped 2026-07-09.
+    42: 'Utility p1', 43: 'Utility p2',   # Utility p3 shares id 10
+    # Measure — DOES populate the blob (MEASURE-ITEM1..8 + -SRC). Mapped
+    # 2026-07-09. 20 = base; 21 = item add/config submenu (toggles 20<->21).
+    20: 'Measure', 21: 'Measure:config',
+    25: 'Default Setup',   # factory reset — resets all params (verified 2026-07-09)
 }
 
 # Horizontal sample density. The vendor spec gives "sample interval = s/div /
@@ -389,6 +419,12 @@ def decode_settings(payload: bytes) -> dict:
         d['TRIG-SLOPE-V2-mV'] = volt(d['TRIG-SLOPE-V2'])
     else:
         d['TRIG-LEVEL-mV'] = d['TRIG-SLOPE-V1-mV'] = d['TRIG-SLOPE-V2-mV'] = None
+    # LA user threshold volts: signed int16, 12-bit DAC stored as code<<4 (all
+    # values %16==0); volts = raw / 4096, ±8 V full-scale (step ≈ 3.9 mV).
+    # Verified 2026-07-09 (captures/mso5202d-la-threshold.pcapng). Only
+    # meaningful when the group's THRESHOLD-TYPE = 3 (User).
+    d['LA-D7-D0-THRESHOLD-V'] = d['LA-D7-D0-USER-THRESHOLD-VOLT'] / LA_THRESHOLD_DAC
+    d['LA-D15-D8-THRESHOLD-V'] = d['LA-D15-D8-USER-THRESHOLD-VOLT'] / LA_THRESHOLD_DAC
     return d
 
 

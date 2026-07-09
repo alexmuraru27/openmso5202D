@@ -1032,22 +1032,35 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 185  1  ACQURIE-AVG-CNT            avg index: 0=4 1=8 2=16 3=32 4=64 5=128 (count=4*2^n)
 186  1  ACQURIE-TYPE               0=Realtime 1=Equivalent-time
 187  1  ACQURIE-STORE-DEPTH        record length: 0=4K 4=40K 6=512K 7=1M (1M single-ch only; gaps=greyed depths)
---- MEASURE (8 slots, each: SRC then item id) ---
-188  1  MEASURE-ITEM1-SRC          measurement source (0=CH1,1=CH2 seen)
-189  1  MEASURE-ITEM1              measurement id (unmapped)
-190..203                          ITEM2..ITEM8 (SRC,id) pairs, same layout
+--- MEASURE (8 slots, each: SRC byte then type byte; up to 8 simultaneous) ---
+188  1  MEASURE-ITEM1-SRC          source: 0=CH1 1=CH2 3=LA (id 2 skipped; no Math source)
+189  1  MEASURE-ITEM1              type: 0=Off(empty slot) 1=Frequency 2=Period 3=Mean 4=Pk-Pk 5=Cyc RMS 6=Minimum 7=Maximum 8=Rise Time 9=Fall Time 10=+Width 11=-Width 12=Delay1-2 Rise 13=Delay1-2 Fall 14=+Duty 15=-Duty 16=Vbase 17=Vtop 18=Vmid 19=Vamp 20=Overshoot 21=Preshoot 22=Period Mean 23=Period RMS 24=FOvershoot 25=RPreshoot 26=Burst Width 27=FRF 28=FFR 29=LRR 30=LRF 31=LFR
+190  1  MEASURE-ITEM2-SRC          source  (same enum as ITEM1-SRC)
+191  1  MEASURE-ITEM2              type    (same enum as ITEM1)
+192  1  MEASURE-ITEM3-SRC          source  (same enum)
+193  1  MEASURE-ITEM3              type    (same enum)
+194  1  MEASURE-ITEM4-SRC          source  (same enum)
+195  1  MEASURE-ITEM4              type    (same enum)
+196  1  MEASURE-ITEM5-SRC          source  (same enum)
+197  1  MEASURE-ITEM5              type    (same enum)
+198  1  MEASURE-ITEM6-SRC          source  (same enum)
+199  1  MEASURE-ITEM6              type    (same enum)
+200  1  MEASURE-ITEM7-SRC          source  (same enum)
+201  1  MEASURE-ITEM7              type    (same enum)
+202  1  MEASURE-ITEM8-SRC          source  (same enum)
+203  1  MEASURE-ITEM8              type    (same enum)
 --- CONTROL (menu/UI state) ---
 204  1  CONTROL-TYPE               always 0 observed
 205  1  CONTROL-MENUID             current menu id (see table below)
 206  1  CONTROL-DISP-MENU          0/1 menu displayed on screen
---- LOGIC ANALYZER ---
-207  1  LA-SWI                     0/1 logic-analyzer on/off (LA menu = CONTROL-MENUID 61)
-208  2  LA-CHANNEL-STATE           per-bit D0..D15 enable mask (=255 seen)
-210  1  LA-CURRENT-CHANNEL         (unmapped)
-211  1  LA-D7-D0-THRESHOLD-TYPE
-212  1  LA-D15-D8-THRESHOLD-TYPE
-213  2  LA-D7-D0-USER-THRESHOLD-VOLT   signed
-215  2  LA-D15-D8-USER-THRESHOLD-VOLT  signed
+--- LOGIC ANALYZER (menu 61 base; 62 = D7-D0 config page, 63 = D15-D8 page) ---
+207  1  LA-SWI                     0/1 logic-analyzer on/off
+208  2  LA-CHANNEL-STATE           D0..D15 enable bitmask, bit N = D(N) (D0=LSB; all-on=0xFFFF; low byte=D0-D7, high byte=D8-D15)
+210  1  LA-CURRENT-CHANNEL         selected channel 0..15 (= D0..D15)
+211  1  LA-D7-D0-THRESHOLD-TYPE    0=TTL 1=CMOS 2=ECL 3=User (threshold is per 8-ch group)
+212  1  LA-D15-D8-THRESHOLD-TYPE   0=TTL 1=CMOS 2=ECL 3=User
+213  2  LA-D7-D0-USER-THRESHOLD-VOLT   signed; volts = raw/4096 (±8V, 12-bit DAC = code<<4). Active when TYPE=User
+215  2  LA-D15-D8-USER-THRESHOLD-VOLT  signed; same encoding (volts = raw/4096)
 (217 = checksum)
 ```
 
@@ -1090,12 +1103,30 @@ off  w  field                       decoded meaning / enum (blank = raw value, m
 | `DISPLAY-GRID-KIND` | 0 Off · 1 Dotted · 2 RealLine |
 | `DISPLAY-PERSIST` | 0 Auto · 2 0.2s · 4 0.4s · 8 0.8s · 10 1.0s · 11 2.0s · 13 4.0s · 17 8.0s · 19 Infinity |
 | `DISPLAY-CONTRAST` / `-GRID-BRIGHT` | 0…15 intensity (max = the `-MAX*` fields = 15) |
+| `MEASURE-ITEMn-SRC` (n=1…8) | 0 CH1 · 1 CH2 · 3 LA (id 2 skipped/unused — **no Math source** in measurements) |
+| `MEASURE-ITEMn` (n=1…8) | measurement type / `0` = **Off** (empty slot): 0 Off · 1 Frequency · 2 Period · 3 Mean · 4 Pk-Pk · 5 Cyc RMS · 6 Minimum · 7 Maximum · 8 Rise Time · 9 Fall Time · 10 +Width · 11 −Width · 12 Delay1-2 Rise · 13 Delay1-2 Fall · 14 +Duty · 15 −Duty · 16 Vbase · 17 Vtop · 18 Vmid · 19 Vamp · 20 Overshoot · 21 Preshoot · 22 Period Mean · 23 Period RMS · 24 FOvershoot · 25 RPreshoot · 26 Burst Width · 27 FRF · 28 FFR · 29 LRR · 30 LRF · 31 LFR |
+| `LA-CHANNEL-STATE` | D0…D15 enable bitmask, **bit N = D(N)** (D0 = LSB, all-on = `0xFFFF`; D0–D7 = low byte, D8–D15 = high byte) |
+| `LA-CURRENT-CHANNEL` | selected channel 0…15 (= D0…D15) |
+| `LA-D7-D0-THRESHOLD-TYPE` / `LA-D15-D8-THRESHOLD-TYPE` | 0 TTL · 1 CMOS · 2 ECL · 3 User (threshold is **per 8-ch group**) |
+| `LA-*-USER-THRESHOLD-VOLT` | signed; **volts = raw/4096** (±8 V, 12-bit DAC stored as `code<<4`); active when that group's TYPE = User |
 | `VERT-CHx-VB` | V/div: 0=2mV 1=5mV 2=10 3=20 4=50 5=100 6=200 7=500mV 8=1V 9=2V 10=5V (10V/div → 0) |
 | `HORIZ-*TB` | time/div index, 2-4-8 sequence 2 ns…40 s (`TB_TO_NS`); WIN-TB = knob 0..31, HORIZ-TB clamps at 6 (200 ns) |
 
-Still-unmapped enums (need targeted captures): `MATH-*`, `DISPLAY-*`, the
-`MEASURE-ITEM*` ids, `LA-*` thresholds, and the EXT-source trigger level in
-volts.
+**Measure** puts real state in the blob — 8 slots `MEASURE-ITEM1…8`, each a
+(`-SRC`, type) pair — up to **8 simultaneous measurements** (confirmed on the
+scope). Mapped 2026-07-09 by sweeping `MEASURE-ITEM8` through the on-screen list
+(`captures/mso5202d-measure.pcapng`); enum above. Menu ids: **20** = base, **21**
+= the item add/config submenu (the poll toggles `20↔21` as you set each item).
+
+**Logic analyzer** is fully mapped (2026-07-09, `captures/mso5202d-la-*.pcapng`),
+using the ESP32 16-channel test generator (`scripts/esp_toggler/`) as known
+inputs: `LA-CHANNEL-STATE` bit N = D(N) (verified toggling each D0–D15
+individually), `LA-CURRENT-CHANNEL` = selected 0–15, per-group threshold
+type (TTL/CMOS/ECL/User) and user volts (raw/4096, ±8 V 12-bit DAC). Menu ids
+61 base / 62 (D7-D0 page) / 63 (D15-D8 page).
+
+Still-unmapped: the EXT-source trigger level in volts; FFT window codes 3/4
+(Bartlett/Blackman, inferred).
 
 ### `CONTROL-MENUID` — on-screen menu id (partial, mapped by context)
 
@@ -1109,16 +1140,19 @@ volts.
 | 6 | Trigger → Pulse submenu, **page 1** |
 | 7 | Trigger → Pulse submenu, **page 2** (When / Time) |
 | 8 | Trigger → Video submenu |
-| 10 | default / no active menu (vendor-app baseline) |
+| 10 | default / no active menu (vendor-app baseline); **also Utility page 3** (reused generic id) |
 | 11 | Trigger menu (level/base, Edge default) |
 | 15 | Cursor menu (cursor state is **not** in the settings blob) |
 | 16 | Math → FFT submenu, **page 1** (source / window) |
 | 17 | **Acquire** menu |
 | 18 | **Save/Recall** → SETUP page |
 | 19 | **Save/Recall** → REF (reference-waveform) page |
+| 20 | **Measure** base menu |
+| 21 | **Measure** → item add/config submenu (`MEASURE-ITEM*`) |
 | 22 | Trigger → Slope submenu, **page 1** |
 | 23 | Trigger → Slope submenu, **page 2** (V1/V2 / When / Time) |
 | 24 | Trigger → Alter submenu (base) |
+| 25 | **Default Setup** (factory reset — resets all settings-blob params to defaults) |
 | 26 / 27 / 28 / 29 | Alter → **CH1** Edge / Pulse / Video / Overtime |
 | 30 / 31 / 32 / 33 | Alter → **CH2** Edge / Pulse / Video / Overtime |
 | 38 | Trigger → Overtime submenu, **page 1** |
@@ -1126,10 +1160,14 @@ volts.
 | 36 | Display menu (Grid / Format page) |
 | 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
 | 41 | Math menu (operations; `[MATH-DISP]` = math on/off) |
+| 42 | **Utility** page 1 (system status / update fw / save wave / self-cal) |
+| 43 | **Utility** page 2 |
 | 47 | **Save/Recall** base (type selector) |
 | 48 | **Save/Recall** → CSV **and** FileList (shared file-browser page) |
 | 56 | Math → FFT submenu, **page 2** (zoom factor / vertical scale) |
-| 61 | Logic Analyzer menu (`[LA-SWI]` = LA on/off) |
+| 61 | Logic Analyzer base menu (`[LA-SWI]` = LA on/off) |
+| 62 | LA channel-config submenu — **D7-D0 group** (enables + threshold) |
+| 63 | LA channel-config submenu — **D15-D8 group** |
 
 Note some menus set `[CONTROL-MENUID]` but keep it constant while open (so it
 shows in the value, not as a change) — e.g. CH1=1, CH2=2, Acquire=17 stayed put
@@ -1138,8 +1176,18 @@ throughout their captures; only `[CONTROL-DISP-MENU]` toggled 0↔1.
 Multi-page trigger submenus use **consecutive ids** for page 1 / page 2
 (Pulse 6/7, Slope 22/23, Overtime 38/39). `CONTROL-DISP-MENU` = 1 while a menu is shown, 0 when
 closed. `CONTROL-TYPE` stayed 0 in every capture. (`MENU_NAMES` in
-`mso5202d.py`.) More menu ids (Measure, Utility…) remain to be mapped by
-opening each menu.
+`mso5202d.py`.) Remaining menu ids (LA sub-pages, Measure statistics…) to be
+mapped by opening each menu.
+
+**Utility is view-only** — mapped 2026-07-09 by a page-cycle `CONTROL-MENUID`
+poll (`captures/mso5202d-utility.pcapng`). Like Save/Recall it puts **no
+parameters in the settings blob** (system
+status, firmware update, save-waveform, self-cal are actions; `/protocol.inf`
+has no Utility/sound/language/cal fields — only the front-panel `[MENU-UTILITY-KEY]`).
+Its **3 pages cycle `42 → 43 → 10`** (menu visible throughout): page 1 = **42**
+(system status / update fw / save wave / self-cal), page 2 = **43**, page 3 =
+**10** — page 3 gets **no dedicated id, reusing the generic `10`** (same value as
+the no-menu baseline, but here with `CONTROL-DISP-MENU`=1).
 
 **Save/Recall (Storage) is view-only** — mapped 2026-07-09 by two ordered-open
 `CONTROL-MENUID` polls (base → REF → SETUP → CSV → FileList). Like Cursor and the
