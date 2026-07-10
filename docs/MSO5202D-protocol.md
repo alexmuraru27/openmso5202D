@@ -164,7 +164,7 @@ byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
 |---|---|---|
 | `0x01` | (none), or `00` | **keep-alive / poll.** Response is the settings-state blob (§6). `53 02 00 01 56`. A `00` variant (`53 02 00 00 55`) also seen (start/stop). |
 | `0x10` | `00` + ASCII path | **read file** (§4). `53 10 00 10 00 "/protocol.inf" <ck>` |
-| `0x12` | `01` `<v>` | **SET param 0x12** = v (0/1). Used in the acquire loop; see §5. `53 04 00 12 01 00 <ck>` |
+| `0x12` | `<sub>` `<bool>` | **`sub`=0x00 → STOP acquisition** (bool), **`sub`=0x01 → PANEL LOCK** (bool). The acquire-loop `53 04 00 12 01 00 <ck>` is thus *panel-lock OFF*, not a channel select. (Semantics from onnokort/dsoc; `12 01 xx` verified benign in our loop, `12 00 xx` not yet swept.) |
 | `0x02` | `01` `<ch>` | **acquire channel** `<ch>` → waveform (§5). `00`=CH1 `01`=CH2 `02`=Math `05`=LA. `53 04 00 02 01 00 5a` |
 | `0x11` | 213-byte block | **WRITE settings** — push the whole `/protocol.inf` block; sets any field (host-side control, **Appendix F.1**). |
 | `0x13` | `<keyid>` `<state>` | **key event** — press a front-panel key (`keyid` = `/keyprotocol.inf` index; **Appendix F.2**). |
@@ -173,6 +173,12 @@ byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
 SET form is `selector | vlen | value…` (the selector doubles as the param id).
 Read-file form is `0x10 | 0x00 | <path>`. **Host-side control** (`0x11`/`0x13`/`0x20`)
 is decoded in full in **Appendix F**.
+
+**A SECOND leader byte `0x43` ('C') exists** — an instrument-command / shell
+channel, distinct from the `0x53` data channel. Same framing (§3), different
+opcodes; most importantly `0x43 | 0x11 | <cmd>` runs an **arbitrary shell command
+on the scope's embedded Linux** and returns its stdout. Confirmed on hardware
+2026-07-10 — see **Appendix F.4**.
 
 ### Payload — IN (scope → host)
 `payload = selectorEcho(1) | data…`, where **`selectorEcho` = request selector
@@ -355,14 +361,20 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch> — see channel-code map be
   This is what `mso5202d_plot.py` / `MSO5202D-rendering.md` implement. (Absolute
   `counts→volts` is still uncalibrated — 25 counts/div is scale; the viewer shows
   divisions, each = that channel's V/div.)
-- **OPEN — inter-channel PHASE is not preserved.** CH1 and CH2 are fetched as
-  two separate acquires (~100 ms apart) with no shared trigger lock, so their
-  returned phase is uncorrelated: the CH1→CH2 first-rising-edge offset jittered
-  66/89/30/94 samples across reads (one 1 kHz period = 500 samples at
-  400 µs/div). On the scope the two channels are sampled simultaneously and look
-  in-phase; our plotter shows them phase-shifted. A single-acquire "both
-  channels" command (if one exists) would fix it; otherwise the readout can't
-  reproduce cross-channel timing.
+- **Inter-channel PHASE — uncorrelated while RUNNING, aligned when STOPPED
+  (SOLVED 2026-07-10).** While the scope is running, each `02 01 <ch>` re-triggers
+  its own acquisition, so CH1 and CH2 come from different acquisitions ~100 ms
+  apart and their phase is uncorrelated (the CH1→CH2 first-edge offset jittered
+  66/89/30/94 samples across reads). **But STOP freezes ONE simultaneous
+  two-channel acquisition**, and both `02 01 00` and `02 01 01` then read out of
+  that same frozen buffer — phase-aligned. Verified: with the scope STOPped, three
+  back-to-back `02 01 00` reads are byte-identical (buffer frozen, not
+  re-captured), and an SPI clock+data pair captured this way decodes to a clean
+  consecutive-byte ramp. To get a *fresh* aligned pair you must RUN then STOP (a
+  scope left stopped holds a stale buffer): press Run/Stop (key 19) to run, let it
+  acquire, then press again to STOP. This is what `mso5202d_decode.py capture`
+  does, and it's what makes 2-wire serial decoding (SPI/I²C) possible — see
+  **§9. Serial-protocol decoding**.
 
 ### Reference rendering model (how to draw the trace like the scope)
 
@@ -808,6 +820,48 @@ that ends in a normal settings state.
   poll / acquire handshakes, a settings-blob parser, and an 8-bit waveform
   assembler — over libusb bulk on IN `0x81` / OUT `0x02`, with the Linux
   `cdc_subset` detach + `reset()` connection recipe (§2).
+
+---
+
+## 9. Serial-protocol decoding (UART / SPI / I²C) — CONFIRMED on hardware
+
+The scope has no on-board serial bus decoder, but the host can reconstruct
+UART / SPI / I²C from captured analog waveforms. Implemented in
+`../scripts/serial_decode.py` (pure decode logic) + `../scripts/mso5202d_decode.py`
+(capture/decode/view CLI); test signals from `../scripts/esp_{uart,spi,i2c}_gen/`
+(ESP32, streaming the `0x00..0xFF` ramp). Verified end-to-end 2026-07-10.
+
+**Method.**
+1. **Synchronized capture** — RUN then STOP so both channels come from one
+   frozen simultaneous acquisition (see §5 "inter-channel phase"), then read
+   `02 01 00` (CH1) and `02 01 01` (CH2). Required for the 2-wire protocols so
+   clock and data edges line up.
+2. **Threshold** each analog trace to logic levels — unwrap bytes → divisions
+   (§5 rendering model), Schmitt-trigger at the midpoint of the detected
+   low/high rails.
+3. **Decode** — UART (idle-high, 1 start / 8 data LSB-first / stop; baud
+   auto-detected from the shortest pulse or given), SPI (sample data on the
+   clock edge selected by CPOL/CPHA — rising iff CPOL==CPHA; re-frame bytes on
+   an idle-clock gap since there's no CS channel), I²C (START/STOP = SDA edge
+   while SCL high; sample SDA on SCL rising; 8 data + ACK per byte, MSB-first).
+
+**Constraints** (from the transport, not the decoders):
+- **2 signals per capture** — only CH1/CH2 are usable (LA-over-USB is dead, §5).
+  So UART = 1 line; SPI = SCLK + one data line (MOSI *or* MISO, not both — no
+  full-duplex); I²C = SDA + SCL.
+- **3840-sample record** — no deep memory (§5), so only short messages fit one
+  screen. Set the timebase for the bit rate (≈15–25 samples/bit); the host can
+  do this via the `0x11` timebase write (Appendix F.1).
+- **Capture quality varies** — some frozen acquisitions come back glitched
+  (more so at slow timebases); re-capture. The decoders are deterministic.
+
+**Verified bit-rate ranges** (ESP32 generators, ramp decoded byte-for-byte):
+
+| Protocol | Range verified | Note |
+|---|---|---|
+| UART 8N1 | **9600 – 115200 baud** | hardware UART source |
+| SPI mode 0, MSB | **10 kHz – 2 MHz SCLK** | hardware SPI source |
+| I²C (self-ACK) | **~17 – 167 kHz SCL** | bit-bang source ceiling; decoder itself is edge-driven, no inherent limit |
 
 ---
 
@@ -1381,6 +1435,14 @@ both `VERT-CHx-DISP` toggled; in `LA` the `LA-CHANNEL-STATE` mask walked D0…D3
 off — matching our field semantics exactly. **This sets any settings-blob field**
 (V/div, position, timebase, trigger, acquire, display, math, measure, LA, …).
 
+**Verified host write — setting the timebase (2026-07-10):** writing
+`HORIZ-WIN-TB = idx` and `HORIZ-TB = max(idx, 6)` (the acquisition TB clamps at
+index 6 = 200 ns/div; see §6) changes the sample rate — e.g. idx 16→15 took
+`TDIV-ns` 400 000→200 000, confirmed by a poll read-back. `mso5202d_decode.py
+set_timebase()` uses exactly this to pick a timebase per serial bit rate.
+Caveat: the `0x91` write-ack can transiently leak into the *next* poll read, so
+retry `read_settings()` until it returns a valid 214-byte `0x81` payload.
+
 ### F.2 Front-panel key events — selector `0x13`
 
 ```
@@ -1440,3 +1502,63 @@ background).
 | `0x12` param write | `0x92` | ack |
 | `0x13` **key event** | `0x93` | ack |
 | `0x20` **screen grab** | `0xa0` | RGB565 framebuffer (subtyped) |
+| `0x43 0x11` **shell exec** | `0x43`/`0x91` | command stdout (leader `0x43`; F.4) |
+
+### F.4 Command / shell channel — leader `0x43` ('C')
+
+A **second leader byte** beside `0x53` — the instrument-command channel. Same
+framing as §3 (`head | len_LE16(=payload+1) | payload | checksum`), just with
+`head = 0x43`. Discovered via the sibling open-source project
+[onnokort/dsoc](https://github.com/onnokort/dsoc) (same Tekway/Hantek DSO5x02
+family) and **confirmed on our MSO5202D 2026-07-10**.
+
+```
+OUT  43 | <len> | 11 | "<shell command>" | ck        ; run command on embedded Linux
+IN   43 | <len> | 91 | "<stdout bytes...>" | ck       ; reply: 0x11|0x80 = 0x91 ack, then stdout
+```
+
+Opcodes on the `0x43` channel (from dsoc; `0x11` verified here):
+- **`0x11` + ASCII command → SHELL EXEC.** Runs an arbitrary command on the
+  scope's embedded Linux (as **root**) and returns its stdout. **VERIFIED** —
+  `ls /`, `uname -a`, `ls -la /dev`, `df -h`, `cat /proc/version` all executed
+  and returned real output. ⚠ **Extremely dangerous: unrestricted root, no
+  filtering — a bad command (`rm`, `dd`, `mv`, a write to flash) can brick the
+  scope. Use READ-ONLY commands only.**
+- `0x44` + `<ms/100>` → **buzzer beep** (dsoc; not swept here).
+- `0x7f` → **reset to factory defaults** (dsoc; not swept here).
+
+The reply reassembles like a file read when output is large (multi-frame,
+`0x91` echo per frame); short output arrives in one frame. A stray reply can
+leak into the next `0x53` transaction, so `_resync()` after shell use.
+
+⚠ **Watchdog/guard reboot (observed 2026-07-10).** The scope runs a watchdog
+(`wdg`, `/dev/watchdog`) and a `guard_process_accepter`. A shell command that
+**stalls the live acquisition app or desyncs the USB link reboots the scope**
+(recoverable — it re-enumerates in ~15 s and resets to *factory defaults*, so
+the user's setup is lost; NOT a brick). It fired after `cat /proc/419/maps` on
+the live `/dso_bin` process. Rules learned: keep commands **short and fast**;
+**do not** read the acquisition process's `/proc/<pid>/*` or block the link;
+prefer small static files. The internal exec mechanism is `sh -c "<cmd> > msg"`
+then return `/msg`, so each call briefly writes `/msg` (benign).
+
+**System facts (from the shell, verified 2026-07-10):**
+- **Linux 3.2.35** `#62 PREEMPT` (2013), **armv5tejl**, hostname `Hantek`,
+  gcc 4.3.3 CodeSourcery — the Samsung S3C embedded stack (matches the
+  investigation doc).
+- Root FS `ubi0:rootfs` (UBI/NAND), 105 MB, ~28 MB used.
+- Relevant `/dev` nodes (potential paths **past** the 3840-sample USB screen
+  buffer — see §5 record-length limit): **`dso-fpga`** (char 10,61) and
+  **`dso-fpga-la`** (char 10,60) = the acquisition FPGA + its logic-analyzer
+  interface; **`dso-iobank`** (10,62); **`dso-i2c`**→`i2c-0`; `spidev0.0`;
+  **`/dev/mem`** (1,1, physical memory); `fb0` (LCD); `mtd0..4`/`mtdblock*`
+  (firmware flash — DO NOT WRITE).
+- Root `/` also holds `usbsavefile.tmp` (likely the deep Save-waveform staging
+  file), `cur_acq.type`, `chk_base_volt` (candidate counts→volts calibration),
+  `fpgabank.conf`, and the app binaries `dso`/`dso_bin`/`dst1202b`.
+
+**Why this matters:** the shell is the first route past the USB screen-buffer cap
+(§5). Reading the FPGA sample memory directly (`dso-fpga` / `/dev/mem` at the
+region in `/proc/iomem`) or a deep Save-waveform file could yield **contiguous
+captures far larger than 3840 samples**, and `dso-fpga-la` may be the real
+logic-analyzer source (the `02 01 05` USB path is a dead end, §5). All UNPROVEN
+and to be explored **read-only**.
