@@ -156,7 +156,7 @@ Vertical/Horizontal/Trigger/Acquire/Display/Math/Cursor menus done earlier). See
 Method (now checked in): `scripts/mso5202d_capture.py <sec> <out.pcapng>` for a
 scope-only pcap, run alongside a settings poller that decodes each blob and logs
 the changed `[…]` fields + `[CONTROL-MENUID]`; step the menu on the front panel.
-For the **LA** capture the `scripts/esp_toggler/` ESP32 sketch drove all 16
+For the **LA** capture an ESP32 (`scripts/esp_combo_gen/`) drove all 16
 channels with per-channel distinct frequencies as known inputs. Every new
 field/enum is folded into `protocol.md` (Appendix D) and the enum maps in
 `mso5202d.py`.

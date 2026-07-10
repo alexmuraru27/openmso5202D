@@ -884,7 +884,7 @@ that ends in a normal settings state.
 The scope has no on-board serial bus decoder, but the host can reconstruct
 UART / SPI / I²C from captured analog waveforms. Implemented in
 `../scripts/serial_decode.py` (pure decode logic) + `../scripts/mso5202d_decode.py`
-(capture/decode/view CLI); test signals from `../scripts/esp_{uart,spi,i2c}_gen/`
+(capture/decode/view CLI); test signals from `../scripts/esp_combo_gen/`
 (ESP32, streaming the `0x00..0xFF` ramp). Verified end-to-end 2026-07-10.
 
 **Method.**
@@ -1305,7 +1305,7 @@ scope). Mapped 2026-07-09 by sweeping `MEASURE-ITEM8` through the on-screen list
 = the item add/config submenu (the poll toggles `20↔21` as you set each item).
 
 **Logic analyzer** is fully mapped (2026-07-09, `captures/mso5202d-la-*.pcapng`),
-using the ESP32 16-channel test generator (`scripts/esp_toggler/`) as known
+using the ESP32 16-channel test generator (`scripts/esp_combo_gen/`) as known
 inputs: `LA-CHANNEL-STATE` bit N = D(N) (verified toggling each D0–D15
 individually), `LA-CURRENT-CHANNEL` = selected 0–15, per-group threshold
 type (TTL/CMOS/ECL/User) and user volts (raw/4096, ±8 V 12-bit DAC). Menu ids
