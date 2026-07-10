@@ -121,12 +121,29 @@ class Scope:
         raise last
 
     # --- high-level ops ----------------------------------------------------
-    def read_file(self, path: str) -> bytes:
-        frame = self.transact(b'\x10\x00' + path.encode())
-        data = frame[2:] if len(frame) > 1 and frame[1] == 0x01 else b''
-        try: self._recv(1000)          # discard end-marker (subtype 0x02)
-        except Exception: pass
-        return data
+    def read_file(self, path: str, timeout=4000) -> bytes:
+        """Read a file from the scope's embedded Linux over USB (selector 0x10).
+
+        The reply is multi-frame: any number of **content** frames (echo 0x90,
+        subtype 0x01) terminated by an **end-marker** frame (subtype 0x02). A
+        single 'S' frame caps at 64 KB (16-bit length), so large files span many
+        content frames — loop until the end-marker. Verified byte-perfect and fast
+        on hardware (911 KB `/help.db` in ~1.1 s ≈ 800 KB/s), so this is a viable
+        way to pull large files — e.g. a deep Save-CSV `WaveData*.csv` off an
+        inserted card without removing it (see MSO5202D-protocol.md §5)."""
+        frame = self.transact(b'\x10\x00' + path.encode(), timeout=timeout)
+        data = bytearray()
+        for _ in range(1_000_000):          # bounded loop over content frames
+            st = frame[1] if len(frame) > 1 else 0xFF
+            if st == 0x01:
+                data += frame[2:]
+            elif st == 0x02:                # end-marker — done
+                break
+            try:
+                frame = self._recv(timeout)
+            except Exception:
+                break
+        return bytes(data)
 
     def read_settings(self, timeout=3000, retries=2) -> bytes:
         """Poll selector 0x01 -> settings payload: selectorEcho 0x81 followed

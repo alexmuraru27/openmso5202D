@@ -203,18 +203,33 @@ Resolved 2026-07-08, see §6).
 
 ## 4. Handshake: read file (selector 0x10) — the scope self-describes
 
-The scope's embedded Linux serves files over USB. The app reads two at startup.
-**A file read returns TWO frames** and both must be consumed:
+The scope's embedded Linux serves **any file** over USB (path is arbitrary, not
+just the two `.inf` the app reads at startup). A read returns one or more
+**content** frames then an **end-marker**; all must be consumed:
 
 ```
 OUT  53 10 00 10 00 "/protocol.inf" <ck>
-IN   53 <len> 90 01 <file bytes...> <ck>     ; content   (selectorEcho 0x90, subtype 0x01)
+IN   53 <len> 90 01 <file bytes...> <ck>     ; content   (selectorEcho 0x90, subtype 0x01)   ×N
 IN   53 04 00 90 02 <b> <ck>                 ; end-marker (subtype 0x02) — MUST read this
 ```
 
-Two files are known; there are almost certainly more (calibration, system — the
-counts→volts calibration table likely lives in one of these; still unmapped).
-Full contents are in the appendices.
+**Large files are MULTI-frame — loop the content frames.** A single 'S' frame
+caps at 64 KB (the 16-bit length), so a big file arrives as **many** `90 01`
+content frames before the `90 02` end-marker; a reader that stops after one frame
+(as the original `read_file` did) truncates at ~64 KB. Looping until the
+end-marker is **fast and byte-exact — VERIFIED 2026-07-10 pulling the 911 KB
+`/help.db` in ~1.1 s (≈ 800 KB/s), md5-identical to the on-card copy.**
+
+**Why this matters — deep capture over USB.** At ~800 KB/s a **512K Save-CSV
+(`WaveDataXXXX.csv`, ~7.7 MB) reads back over USB in ~10 s.** So the deep record
+that has no sample-stream command (§5) is still retrievable over USB: leave a card
+in the scope, run a deep **Save/Recall → CSV** save (front-panel, or triggered via
+`0x13` key-events), then `read_file("/mnt/udisk/WaveDataXXXX.csv")` — no card
+shuffling. `scripts/mso5202d.py:read_file()` implements the multi-frame loop.
+(The save writes `/dsocsv.tmp` internally, then `mv`s it onto the card.)
+
+Two `.inf` files are read at startup; the filesystem holds many more (config, cal,
+logs — see the `0x43` shell, Appendix F.4). Full `.inf` contents are in the appendices.
 
 - **`/protocol.inf`** (≈3.6 KB) — an ordered list of **every setting parameter**
   the scope exposes, each with its **byte width** in the settings blob. First line
@@ -321,6 +336,11 @@ record to the card. Confirmed with a USB stick and read back on a PC — depths
   captures**; our decoders can run on these CSVs (threshold the volts column).
   Screenshot save is separate: **`pic_<t>_<n>.bmp`** = 800×480×24 BMP (the LCD),
   no samples.
+- **The saved CSV can be read straight back over USB** (no card removal): the
+  file-read handshake is fast and multi-frame (§4), so a 512K `WaveData*.csv`
+  (~7.7 MB) comes back in ~10 s via `read_file("/mnt/udisk/WaveDataXXXX.csv")`.
+  Combined with a `0x11` depth-set and a `0x13` Save-CSV key-trigger, this makes
+  **deep capture fully retrievable over USB** — the card just stays in the slot.
 - **Sample polarity (screen layout): smaller count = HIGHER on screen.**
   Matching the scope's static layout needs an *inverted* Y axis: with CH2 at the
   top of the scope reading bytes ~17–85 and CH1 at the bottom reading ~161–189,
@@ -1558,24 +1578,29 @@ IN   43 | <len> | 91 | "<stdout bytes...>" | ck       ; reply: 0x11|0x80 = 0x91 
 The `0x43` leader is much richer than just the shell — it has its own selector
 map. Selectors **verified on hardware 2026-07-10** (echo = selector | 0x80):
 
-| sel | reply echo | verified behavior |
-|---|---|---|
-| `0x00` + 3 args | `0x80` | 4-byte register read — **value changes between reads** (a live counter/register), e.g. `80 ac a8 00 47` → `80 ad b0 00 47`. |
-| `0x01` | `0x81` | block of 16-bit words (~`0x59ac` repeating, 70 B seen) — looks like live sample/register data. |
-| `0x02` | `0x82` | **5072-byte data block** (FPGA/register region 1; mostly zeros with sparse marks). Args ignored — returns the fixed region. |
-| `0x03` | `0x83` | **8664-byte data block** = **byte-identical to the ADC-linearization table** (`/param/sav/chk1kb_091023`) — reads the analog cal/FPGA region 2. |
-| `0x10` `00` + path | `0x90` | **read file** — same handler as `0x53`/`0x10` (returned `/protocol.inf` + end-marker). |
-| `0x11` + ASCII cmd | `0x91` (leader `0x43`) | **SHELL EXEC** — arbitrary command as **root**, returns stdout (see below). |
-| `0x42` | `0xc2` | empty ACK (no data bare; likely needs args). |
-| `0x50`, `0x60` | — | **no reply when sent bare** (require args). |
-| `0x40` / `0x41` | — | **FPGA-region WRITE** (region 1 / 2) — NOT swept (write path, left alone). |
-| `0x44` + `<ms/100>` | — | **buzzer beep**. |
-| `0x7f` | — | **reset to factory defaults / reboot**. |
+| sel | args | reply echo | verified behavior |
+|---|---|---|---|
+| `0x00` | `mode` `b` `c` | `0x80` | **read FPGA config register file.** mode `1` → returns registers `[b .. b+c−1]` (each a 4-byte word, 16-bit value), bound `b+c ≤ 0x6f`; mode `0` → single indirect read of reg `b`. The register file is **static config** (trigger/gain/position codes) — **0 of regs 0..0x6e changed between RUN and STOP**, so it is NOT live sample data or a FIFO pointer. |
+| `0x01` | `len_LE16` | `0x81` | 16-bit sample block — but **routes through the same screen-acquire engine as `0x53 0x02`** (`n = LE16(args)>>2` samples); a live *rolling* tap, not a frozen buffer, and nothing beyond the 3840 screen record. |
+| `0x02` | (none) | `0x82` | fixed **5072-byte** config/coefficient region dump (static). |
+| `0x03` | (none) | `0x83` | fixed **8664-byte** dump = the ADC **linearization cal RAM** (byte-identical to `/param/sav/chk1kb_091023`; static). |
+| `0x10` `00`+path | | `0x90` | **read file** — same handler as `0x53`/`0x10`. |
+| `0x11` + ASCII cmd | | `0x91` | **SHELL EXEC** as **root** (see below). |
+| `0x42` | | `0xc2` | empty ACK (needs args). `0x50`/`0x60` give no bare reply. |
+| `0x40` / `0x41` | region bytes | — | **FPGA-region WRITE** (region 1 / 2) — destructive, NOT swept. |
+| `0x44` `<ms/100>` / `0x7f` | | — | beep / reset-reboot. |
 
-The `0x02`/`0x03` reads are notable: `0x03` returns the exact linearization-table
-bytes, confirming these selectors read the analog/LA FPGA + cal region over USB
-(a data path beyond the `0x02 01 <ch>` screen acquire). Not yet decoded as live
-deep samples — the returned blocks are fixed-size register/cal regions.
+**Deep capture over USB stays CLOSED (now firmly, not just observed).** The FPGA's
+deep record is drained on-device by reading a **single data register repeatedly**
+(the FPGA auto-advances an internal pointer per read). Over USB, `0x43` has **no
+single-register write** to arm it, and `0x00` *increments* the address (so it
+can't re-read one FIFO register); there is no bulk-DMA selector. So these `0x43`
+commands are genuine **read-only FPGA introspection** (config registers + static
+cal-region dumps) but expose **no new sample path** — the `0x53 0x02` screen
+buffer remains the only viable capture over USB; deep memory is the on-instrument
+**CSV-to-USB** export (§5). Likewise there is **no live-LA read selector** here
+(`0x02`/`0x03` are the analog config/cal regions), so LA over USB stays limited to
+the `0x20` framebuffer.
 
 **`0x11` shell exec** ⚠ — arbitrary command as **root**, unfiltered: a bad command
 (`rm`, `dd`, `mv`, a write to flash) can brick the scope. **Use READ-ONLY.**
