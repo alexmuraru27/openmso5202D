@@ -281,10 +281,38 @@ OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch> — see channel-code map be
   (= the 3840-sample screen block); it never reads more.** It does not use any
   larger or alternate read command, so the deep record is simply **not exposed
   over the USB host link at all** — consistent with the panel refusing to serve
-  40K/512K over USB even from its own vendor app. Deep single-shot capture, if it
-  exists, lives only in the on-instrument *Save waveform → USB stick* path (file
-  export), not as a host-issued read. Keep store depth at the screen size for
-  live readout; there is no deep-read command left to find over USB.
+  40K/512K over USB even from its own vendor app. Keep store depth at the screen
+  size for live readout; there is no deep-read command left to find over USB.
+  **Deep capture DOES exist — via the front-panel file export, VERIFIED
+  2026-07-10** (see "Deep capture via CSV-to-USB" below).
+
+### Deep capture via CSV-to-USB (VERIFIED 2026-07-10)
+
+The deep acquisition memory that the USB link won't serve **is** exportable as a
+file: **Save/Recall → Type = CSV → Save to USB flash** writes the full stored
+record to the card. Confirmed with a USB stick and read back on a PC — depths
+4K/40K/512K produced `WaveData14xx.csv` of **4064 / 40064 / 400064 samples**
+(the 512K file is 7.7 MB, one contiguous record). Format:
+
+```
+#timebase=<ns>(ns)
+,#voltbase=<n>(mv/100)
+#size=<N samples>
+<time_s>,<volts>      ; N rows, one per sample
+...
+```
+
+- **One channel per file** (`time, volts`); for a 2-wire decode (SPI/I²C) save
+  CH1 then CH2 from the *same stopped acquisition* → two index-aligned CSVs.
+- **Calibrated:** the value column is **volts directly** (scope-computed), so this
+  side-steps the open counts→volts calibration entirely for exported captures.
+- **Deeper = faster:** at 512K the sample step was **5 ns (200 MSa/s)** over a
+  2 ms span, vs 20 ns (50 MSa/s) at 4K — deep memory keeps the full sample rate
+  rather than decimating to the screen.
+- This is the route past the 3840-sample USB cap for **long contiguous
+  captures**; our decoders can run on these CSVs (threshold the volts column).
+  Screenshot save is separate: **`pic_<t>_<n>.bmp`** = 800×480×24 BMP (the LCD),
+  no samples.
 - **Sample polarity (screen layout): smaller count = HIGHER on screen.**
   Matching the scope's static layout needs an *inverted* Y axis: with CH2 at the
   top of the scope reading bytes ~17–85 and CH1 at the bottom reading ~161–189,
@@ -1539,7 +1567,21 @@ the user's setup is lost; NOT a brick). It fired after `cat /proc/419/maps` on
 the live `/dso_bin` process. Rules learned: keep commands **short and fast**;
 **do not** read the acquisition process's `/proc/<pid>/*` or block the link;
 prefer small static files. The internal exec mechanism is `sh -c "<cmd> > msg"`
-then return `/msg`, so each call briefly writes `/msg` (benign).
+then return that captured file — with two consequences a client must handle:
+- **The `> msg` redirect is appended to the whole string and is *relative*** to
+  the cwd. So `a; b` captures only `b`'s output — **wrap multi-command input in a
+  brace group** `{ a; b; }` so the redirect captures everything. And each call
+  writes a small `msg` file in the current directory (benign; fails on a
+  read-only dir).
+- **The reply can race one command behind** (it returns the *current* `msg`
+  before the new command finishes writing it). Guard with a **unique end-marker**
+  echoed inside the group and **re-issue until the reply contains it** (safe
+  because only read-only/idempotent commands are allowed).
+
+**Tool: `scripts/mso5202d_shell.py`** — an interactive SSH-like REPL implementing
+all of the above (brace-wrap, marker-retry, stale-frame flush, local `cd`
+tracking) plus a **destructive-command block** (`rm`/`mv`/`dd`/`mkfs`/`reboot`/…).
+Run `python3 mso5202d_shell.py` and type commands. Read-only use only.
 
 **System facts (from the shell, verified 2026-07-10):**
 - **Linux 3.2.35** `#62 PREEMPT` (2013), **armv5tejl**, hostname `Hantek`,
