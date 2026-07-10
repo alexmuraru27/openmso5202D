@@ -1,927 +1,2313 @@
 # Hantek MSO5202D — USB protocol reference
 
-**Status: transport, framing, the core handshakes and host-side control are
-reverse-engineered and verified against real hardware (Linux/pyusb).** A working
-driver (`mso5202d.py`) connects, reads the scope's self-description, decodes live
-settings, and captures waveforms (a 1 kHz cal square wave was confirmed). The
-PC→scope control path (write settings / key events / screen grab) is decoded in
-**Appendix F**. This document is intended to be **self-contained** — if all other
-context is lost, everything needed to re-derive and re-implement the driver is here.
+Complete, byte-level reference for the Hantek MSO5202D oscilloscope (USB `049f:505a`),
+reverse-engineered from USB captures of the vendor application and confirmed by live
+hardware testing. It reads top-down and lets a driver be rebuilt from scratch: every
+command, every reply byte, and every settings field is documented, each tagged
+**[verified]** (seen on the wire / confirmed on hardware), **[inferred]** (cross-referenced
+from captures or the vendor manual), or **[gap]** (still unknown).
 
-Everything below was decoded from two Wireshark/USBPcap captures of the vendor
-Windows app ("Scope 2.0.0.6") driving the scope, plus live experiments on the
-hardware. Captures live in `../captures/` (stripped to MSO-only traffic):
-`mso5202d-session1/2.pcapng` (vendor app, Windows),
-`mso5202d-ch1-vdiv.pcapng` (Linux usbmon, 2026-07-08: our driver polling
-settings during a full CH1 V/div knob sweep 2 mV→10 V→2 mV — the capture that
-resolved the settings-blob alignment, §6), `mso5202d-timediv.pcapng`
-(same setup, full time/div knob sweep over both end stops — mapped the
-timebase indices, §6), `mso5202d-ch2-vdiv.pcapng` (clean CH2 V/div-only
-sweep — confirmed CH2 symmetry and that TRIG-VPOS is trigger-source-bound, §6),
-`mso5202d-combined.pcapng` (both channels, all four knob groups — resolved
-position/trigger-level units and the ps time fields, §6), and
-`mso5202d-2ch-readout.pcapng` (our driver alternating CH1/CH2 acquires — the
-dual-channel readout demonstration, §5), `mso5202d-ch1-vpos.pcapng` (fixed
-5 V/1 kHz trace moved on- and off-screen — established the screen-rendered
-readout scale and off-screen rail-clipping, §5), `mso5202d-trig-level.pcapng`
-(full trigger-level sweep — scope-calibrated the 1/25-div level unit, §6), `mso5202d-trig-buttons.pcapng` (Set-50 % / Force-Trig / Run-Stop — `TRIG-STATE`
-0/1 values and the Set-50 % behaviour, §6), `mso5202d-trig-runstop.pcapng`
-(a known stop/run/single/force sequence — mapped `TRIG-STATE` 0=STOP, 5=SINGLE,
-§6), `mso5202d-trig-type.pcapng` (stepping the trigger-type menu — mapped
-`TRIG-TYPE` Edge/Video/Pulse/Slope/Overtime/Alter, §6), and
-`mso5202d-trig-edge.pcapng` (Edge-trigger source/slope/mode/coupling sweep —
-mapped `TRIG-SRC`, `TRIG-EDGE-SLOPE`, `TRIG-MODE`, `TRIG-COUP`, and resolved
-`TRIG-STATE`=1=WAIT, §6), `mso5202d-trig-video.pcapng` (Video-trigger
-source/polarity/standard/sync sweep — mapped the `TRIG-VIDEO-*` fields, §6), and
-`mso5202d-trig-slope.pcapng` (Slope-trigger set/window/V1/V2/when/time sweep —
-mapped the `TRIG-SLOPE-*` fields, §6), `mso5202d-trig-pulse.pcapng`
-(Pulse-trigger polarity/when/width sweep — mapped the `TRIG-PULSE-*` fields, §6),
-`mso5202d-trig-overtime.pcapng` (Overtime-trigger polarity/time/coupling
-sweep — mapped the `TRIG-OVERTIME-*` fields and menu id 39, §6), and
-`mso5202d-trig-alter-ch1.pcapng` (Alter/Swap CH1 per-type config — mapped
-`TRIG-SWAP-CHx-TYPE` and the per-channel sub-params + menu ids 26–29, §6), and
-`mso5202d-trig-alter-ch2.pcapng` (Alter/Swap CH2 — confirmed CH2 symmetry, menu
-ids 30–33, §6), `mso5202d-trig-holdoff.pcapng` (holdoff-knob sweep —
-confirmed `TRIG-HOLDTIME` tracks the knob, §6), `mso5202d-trig-knob.pcapng`
-(trigger-level knob push — isolated it as "level to 0 V / channel ground",
-distinct from Set-50 %, §6), and `mso5202d-horiz-menu.pcapng` (Horizontal menu —
-mapped menu ids 3/40 and the LA menu 61; window/mark controls don't touch the
-settings blob, §6), `mso5202d-horiz-position.pcapng` (horizontal-position
-knob sweep — showed `HORIZ-TRIGTIME` is SIGNED, −4 ms…+29 ms, §6),
-`mso5202d-acquire.pcapng` (Acquire menu — mapped `ACQURIE-TYPE/MODE/AVG-CNT/
-STORE-DEPTH`, §6), `mso5202d-acquire-1m.pcapng` (single-channel — captured
-the 1M store-depth code 7, §6), `mso5202d-ch1-menu.pcapng` (CH1 vertical
-menu — mapped `VERT-CHx-COUP/20MHZ/FINE/PROBE/RPHASE`, §6), `mso5202d-ch2-menu.pcapng` (CH2 vertical menu — confirmed channel symmetry, §6),
-`mso5202d-pos-knob-push.pcapng` (position-knob pushes — vertical and
-horizontal position knobs reset their axis to 0/centre, §6), `mso5202d-autoset.pcapng` (AUTOSET button — compound reconfigure; §6 note), and
-`mso5202d-display.pcapng` (Display menu — mapped `DISPLAY-MODE/FORMAT/GRID-KIND/
-GRID-BRIGHT/CONTRAST/PERSIST` + menu ids 4/36, §6), `mso5202d-cursor.pcapng`
-(Cursor menu — cursor state NOT in the blob; got menu id 15, plus `MATH-DISP`
-and Math menu id 41, §6), and `mso5202d-math.pcapng` (Math menu — mapped
-`MATH-MODE` + FFT `SRC/WIN/FACTOR/DB` and menu ids 16/56; DISPLAY-FORMAT=2=FFT, §6).
+## 0. Overview & document status
 
-- Device: **Hantek MSO5202D**, 2ch 200 MHz MSO. Unit tested: SW `3.2.35(180502.0)`,
-  HW `1020x55778344`. Part of the Hantek/Tekway/Voltcraft "DSO hack" family
-  (Samsung S3C ARM + embedded Linux 3.2.35).
-- This protocol is unrelated to the Hantek DSO-2xxx/52xx bulk protocol used by the
-  cheap FX2-based scope adapters. It is a custom, self-describing, `'S'`-framed
-  protocol carrying ASCII INI files, a binary settings blob, and 8-bit waveforms.
+This is a complete, byte-level reference for the USB protocol of the **Hantek
+MSO5202D** oscilloscope (USB ID `049f:505a`). It is written so that a reader
+with no prior context can re-implement a full host-side driver from scratch and
+account for **every byte** on the wire.
+
+### What the device is
+
+- **Hantek MSO5202D** — a 2-channel, **200 MHz** benchtop mixed-signal
+  oscilloscope (2 analog channels + 16 logic-analyzer channels). Unit tested
+  here reports software `3.2.35(180502.0)` and identifies itself internally as
+  model `dst1202b` with a `[bw]200` (200 MHz) bandwidth tag. [verified]
+- Internally it is a small **embedded Linux** computer on a **Samsung S3C-family
+  ARM** SoC (part of the widely-cloned Hantek/Tekway/Voltcraft "DSO" hardware
+  family). The scope's own firmware renders the screen, runs the acquisition
+  engine, and serves this USB protocol; the host is a thin client. [verified]
+- The USB protocol is **self-describing**: the scope serves ASCII `.inf` files
+  over the same link that enumerate every setting parameter and every
+  front-panel key by name (see §4 in the selector reference and the appendices).
+  Because of this, a driver never has to hard-code the settings layout — it can
+  read it from the instrument.
+- This protocol is **unrelated** to the Hantek DSO-2xxx/52xx FX2-based USB-scope
+  protocol. It is a custom `'S'`-framed protocol carrying INI files, a fixed
+  binary settings blob, and 8-bit waveform records. Do not use FX2/Cypress
+  scope references for it.
+
+### The two command spaces (leaders)
+
+Every frame in either direction begins with a **leader byte** that selects one
+of two independent command spaces (full framing in §3):
+
+| Leader | ASCII | Channel | Role |
+|---|---|---|---|
+| **`0x53`** | `'S'` | **Data channel** | The normal client protocol: connect, poll settings, acquire waveforms, read files, write settings, key events, screenshot. This is what the vendor app and our driver use. [verified] |
+| **`0x43`** | `'C'` | **Command / service channel** | A private service/debug channel: run a shell command on the scope's Linux, read/write raw FPGA regions, beep, commit settings. **The vendor app never uses it** (zero `0x43` frames in any capture); treat it as an advanced/optional surface. [verified] |
+
+The two leaders have **separate selector maps** — the same selector byte means
+different things under `0x53` vs `0x43`. This document specifies the `0x53`
+(data) space as the primary API and the `0x43` (command) space separately.
+
+### Evidence legend
+
+Every non-trivial claim below is tagged:
+
+- **[verified]** — seen directly on the wire in a capture, and/or confirmed by
+  live experiment on the real instrument (hardware sessions **2026-07-08 through
+  2026-07-10**). Example hex frames given for a claim are real bytes.
+- **[inferred]** — not directly exercised, but concluded from cross-referenced
+  captures, the returned self-description files, or the vendor manual (the manual
+  covers the 60/100 MHz MSO5000B base model; our MSO5202D is the 200 MHz variant
+  and extends the fast timebase one detent further, so treat manual-only numbers
+  as inferred).
+- **[gap]** — not yet known; flagged so a re-implementer knows what is unproven.
+
+### Provenance of the evidence
+
+- **`scope_dump/captures_wireshark/*.pcapng`** — Wireshark/USBPcap and Linux `usbmon` captures of USB
+  traffic, filtered to the scope's device only. Two kinds: (a) the **vendor
+  Windows app** ("Scope 2.0.0.6") driving the scope — the ground truth for how a
+  correct client behaves; and (b) our own Linux/pyusb driver driving the scope
+  while a single control (a knob, a menu, a button) was swept, used to map each
+  settings field to a byte offset. File names are cited inline next to the claim
+  they support (e.g. `mso5202d-ch1-vdiv.pcapng` mapped the V/div field).
+- **Live hardware testing (2026-07-08 … 2026-07-10)** — direct experiments with
+  the real scope over pyusb: connecting, polling, acquiring, reading files,
+  sending key events, grabbing the framebuffer, and decoding saved CSVs. Facts
+  established this way are tagged [verified] with the observed bytes.
+
+Where this document states an exact internal buffer size, checksum rule, or
+reply layout, that value was **observed on the wire** and, where noted,
+reproduced live on hardware.
 
 ---
 
 ## 1. USB transport
 
-| | |
-|---|---|
-| VID:PID | **`049f:505a`** (Linux labels it "CDC Subset Device / Itsy"; misleading) |
-| Device class | `255` (Vendor Specific) — **not** actually CDC |
-| Interface | 1 interface, class 255, 2 endpoints |
-| Bulk **OUT** | **`0x02`** — host → scope commands |
-| Bulk **IN** | **`0x81`** — scope → host responses/data |
-| Max packet | 512 bytes (USB high-speed) |
-| Firmware upload | none (the scope runs its own embedded Linux) |
+The scope is a single-configuration, single-interface USB **high-speed bulk**
+device. There is no vendor-request control traffic in normal operation — all
+protocol data flows over one bulk OUT / one bulk IN endpoint.
 
-On **Windows** the vendor driver `dstusb.sys` (a Cypress **EZ-USB** derivative;
-it creates `\Device\Ezusb-0`, opened by the app as `\\.\Ezusb-0`) owns the device
-and drives it with EZ-USB IOCTLs (bulk read/write + vendor requests). On **Linux**
-the generic `cdc_subset` usbnet driver auto-binds it (creating `usb0`) purely
-because `049f:505a` is that driver's built-in default ID — it is not really a
-network device. See `MSO5202D-investigation.md` for the full hardware/software RE.
-
----
-
-## 2. Linux connection recipe (CONFIRMED working) — and WHY each step
-
-The scope was designed for the Windows EZ-USB driver, which owns the endpoints
-from enumeration and keeps an IN transfer permanently posted. Reproducing that on
-Linux via libusb/pyusb requires this exact sequence (implemented in
-`mso5202d.py`):
-
-1. **Detach the `cdc_subset` kernel driver** from interface 0.
-   *Why:* on Linux `cdc_subset` claims interface 0 the moment the scope is
-   plugged in. Until it is detached, `libusb_claim_interface` fails with
-   `LIBUSB_ERROR_BUSY` and no bulk I/O is possible.
-
-2. **`dev.reset()` (`libusb_reset_device`), then re-detach `cdc_subset`** if it
-   re-binds after the reset.
-   *Why (critical):* without the reset, the OUT write succeeds but **every IN
-   read times out**. `cdc_subset` had been running a usbnet session on these
-   endpoints, leaving the device-side gadget in a state where it will not answer
-   the scope protocol. The USB port reset re-initialises the device's gadget to a
-   clean state so it responds. This was determined empirically: identical code
-   fails without `reset()` and succeeds with it. The reset re-enumerates the
-   device, so `cdc_subset` may grab it again — hence the second detach.
-
-3. **Claim interface 0**, then **`clear_halt` on both endpoints** (`0x02`, `0x81`).
-   *Why:* resets the bulk data toggles to DATA0 on host and device so the first
-   transfers aren't dropped due to a toggle mismatch left over from `cdc_subset`.
-
-4. **Post the bulk IN read BEFORE writing the OUT command.**
-   *Why (critical):* the device only delivers its reply when an IN transfer is
-   already pending (mirroring the Windows driver, which always has an IN posted).
-   With naive synchronous *write-then-read*, the reply is missed and the read
-   times out. The driver runs the IN read in a background thread, sleeps ~30 ms so
-   the IN URB is in flight, then does the OUT write.
-
-5. **Use a persistent RX buffer and consume whole frames.**
-   *Why:* responses span multiple 512-byte USB packets and several logical frames
-   arrive back-to-back (e.g. a file read returns a content frame *and* an
-   end-marker frame — see §5). If leftover bytes are discarded instead of kept,
-   the next read starts mid-frame and the stream desyncs (symptoms we hit: an
-   "empty" file read, and a settings blob that decoded as INI text `[`/`]`).
-
-To run **without root**, install a udev rule granting access to `049f:505a`
-(see `../70-mso5202d.rules` at the repo root → copy to `/etc/udev/rules.d/`);
-otherwise run as root.
-Note: running a GUI (matplotlib) under `sudo` breaks X access, so the udev rule
-is the right way for the live viewer.
-
----
-
-## 3. Frame format (both directions)
-
-```
-byte 0      : leader  0x53 ('S', data)  /  0x43 ('C', command/shell — Appendix F.4)
-byte 1..2   : length, little-endian uint16   ==  (total_frame_len - 3)
-byte 3..N-2 : payload    (payload[0] = selector)
-byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
-```
-
-- **Two leader bytes:** `0x53` = the data channel (this section); `0x43` = the
-  command/shell channel (Appendix F.4). Identical framing, separate selector maps.
-- **Checksum** = 8-bit sum of every byte before it. Verified, e.g.
-  `53 04 00 12 01 01 6b` → 0x53+04+00+12+01+01 = 0x6B ✓;  `53 02 00 01 56` → 0x56 ✓.
-  **Quirk (verified 2026-07-10): a checksum byte of `0x66` is a WILDCARD** — the
-  scope accepts the frame without checking (a poll sent as `53 02 00 01 66`
-  returned the settings blob despite the wrong checksum).
-- **Length** = bytes[1..2] LE = `total_len − 3` (i.e. counts payload + checksum).
-  Verified: settings blob 218 B → `d7 00` (0x00D7=215); protocol.inf 3620 B →
-  `21 0e` (0x0E21=3617); waveform 3847 B → `04 0f` (0x0F04=3844).
-
-> **Framing gotcha:** bytes[1..2] are the *length only*. The command **selector**
-> is the first payload byte (byte 3). Do not mistake the length low-byte for an
-> opcode — `53 02 …` / `53 10 …` are lengths 2 / 16, not "cmd 0x02 / 0x10".
-
-### Payload — OUT (host → scope)
-`payload = selector(1) | args…`
-
-| selector | args | meaning |
+| Property | Value | Notes |
 |---|---|---|
-| `0x00` | (none) | **handshake / connect ACK** (verified 2026-07-10) — replies `53 02 00 80 <ck>` (echo `0x80`, empty). |
-| `0x01` | (none), or `00` | **keep-alive / poll.** Response is the settings-state blob (§6). `53 02 00 01 56`. A `00` variant (`53 02 00 00 55`) also seen (start/stop). |
-| `0x10` | `00` + ASCII path | **read file** (§4). `53 10 00 10 00 "/protocol.inf" <ck>` |
-| `0x12` | `<sub>` `<bool>` | **`sub`=0x00 → STOP acquisition** (bool), **`sub`=0x01 → PANEL LOCK** (bool). The acquire-loop `53 04 00 12 01 00 <ck>` is thus *panel-lock OFF*, not a channel select. (Semantics from onnokort/dsoc; `12 01 xx` verified benign in our loop, `12 00 xx` not yet swept.) |
-| `0x02` | `01` `<ch>` | **acquire channel** `<ch>` → waveform (§5). `00`=CH1 `01`=CH2 `02`=Math `05`=LA. `53 04 00 02 01 00 5a` |
-| `0x11` | 213-byte block | **WRITE settings** — push the whole `/protocol.inf` block; sets any field (host-side control, **Appendix F.1**). |
-| `0x13` | `<keyid>` `<state>` | **key event** — press a front-panel key (`keyid` = `/keyprotocol.inf` index; **Appendix F.2**). |
-| `0x14` | length-prefixed block | **block write** (paired with `0x21`; not swept — write path, left alone). |
-| `0x20` | (none) | **screen grab** — scope streams its RGB565 framebuffer (**Appendix F.3**). |
-| `0x21` | (none) | **block-transfer read** (verified 2026-07-10) — replies echo `0xa1` with a short descriptor (`a1 d9 07 01 01 03 01 18` seen); pairs with `0x14`. |
+| **VID:PID** | **`049f:505a`** | Linux mislabels it "CDC Subset Device / Itsy" — misleading (see below). [verified] |
+| Device class | **`255`** (Vendor Specific) | Not actually a CDC/network device despite the label. [verified] |
+| Interfaces | **1** interface, class 255, 2 endpoints | No alternate settings needed. [verified] |
+| Bulk **OUT** | endpoint **`0x02`** | host → scope: every command frame. [verified] |
+| Bulk **IN** | endpoint **`0x81`** | scope → host: every reply/data frame. [verified] |
+| Max packet | **512 bytes** | USB high-speed bulk. Replies larger than one packet span multiple 512-byte packets — see §2 rule 5 and §3. [verified] |
+| Firmware upload | none | The scope boots its own embedded Linux; the host does not upload firmware. [verified] |
 
-SET form is `selector | vlen | value…` (the selector doubles as the param id).
-Read-file form is `0x10 | 0x00 | <path>`. **Host-side control** (`0x11`/`0x13`/`0x20`)
-is decoded in full in **Appendix F**.
+The device presents itself internally as a USB gadget-serial endpoint pair; from
+the host side it is simply "write a framed command to `0x02`, read the framed
+reply from `0x81`."
 
-**A SECOND leader byte `0x43` ('C') exists** — an instrument-command / shell
-channel, distinct from the `0x53` data channel. Same framing (§3), different
-opcodes; most importantly `0x43 | 0x11 | <cmd>` runs an **arbitrary shell command
-on the scope's embedded Linux** and returns its stdout. Confirmed on hardware
-2026-07-10 — see **Appendix F.4**.
+### Windows vs Linux driver binding
 
-### Payload — IN (scope → host)
-`payload = selectorEcho(1) | data…`, where **`selectorEcho` = request selector
-OR'd with `0x80`** (`0x02`→`0x82`, `0x12`→`0x92`, `0x10`→`0x90`, `0x01`→`0x81`).
-
-For **file reads (`0x90`) and waveform acquisition (`0x82`/`0x92`)** the first
-data byte is a `subtype` distinguishing size/ack (`0x00`), content (`0x01`) and
-end-marker (`0x02`) frames. The **settings poll response (`0x81`) has NO subtype
-byte** — the 213 parameter bytes start immediately after the echo (its first
-byte was long misread as "subtype 0x01"; it is actually `[VERT-CH1-DISP] = 1`.
-Resolved 2026-07-08, see §6).
+- **Windows:** the vendor driver `dstusb.sys` (a Cypress **EZ-USB** derivative —
+  it creates a device the app opens as `\\.\Ezusb-0`) owns the interface from
+  enumeration and drives it with EZ-USB bulk read/write IOCTLs. Crucially, that
+  driver keeps an **IN transfer permanently posted**, which is the behavior the
+  scope's gadget expects (see §2 rule 4). [verified]
+- **Linux:** the generic **`cdc_subset`** usbnet driver auto-binds the device
+  (creating a fake `usb0` network interface) purely because `049f:505a` happens
+  to be that driver's built-in default ID. **The device is not a network
+  device** — this binding is an accident of the ID and must be undone before the
+  protocol can be spoken (§2). [verified]
 
 ---
 
-## 4. Handshake: read file (selector 0x10) — the scope self-describes
+## 2. Linux connection recipe
 
-The scope's embedded Linux serves **any file** over USB (path is arbitrary, not
-just the two `.inf` the app reads at startup). A read returns one or more
-**content** frames then an **end-marker**; all must be consumed:
+The scope was designed around the Windows EZ-USB driver, which owns the
+endpoints from enumeration and always has an IN transfer in flight. Reproducing
+that from libusb/pyusb on Linux requires the following **exact** sequence. Each
+step is load-bearing; the two marked *critical* were established empirically
+(identical code fails without them).
 
-```
-OUT  53 10 00 10 00 "/protocol.inf" <ck>
-IN   53 <len> 90 01 <file bytes...> <ck>     ; content   (selectorEcho 0x90, subtype 0x01)   ×N
-IN   53 04 00 90 02 <b> <ck>                 ; end-marker (subtype 0x02) — MUST read this
-```
+1. **Detach the `cdc_subset` kernel driver from interface 0.**
+   On Linux `cdc_subset` claims interface 0 the instant the scope is plugged in.
+   Until it is detached, `claim_interface` fails with `LIBUSB_ERROR_BUSY` and no
+   bulk I/O is possible. [verified]
 
-**Large files are MULTI-frame — loop the content frames.** A single 'S' frame
-caps at 64 KB (the 16-bit length), so a big file arrives as **many** `90 01`
-content frames before the `90 02` end-marker; a reader that stops after one frame
-(as the original `read_file` did) truncates at ~64 KB. Looping until the
-end-marker is **fast and byte-exact — VERIFIED 2026-07-10 pulling the 911 KB
-`/help.db` in ~1.1 s (≈ 800 KB/s), md5-identical to the on-card copy.**
+2. **Reset the device (`libusb_reset_device` / `dev.reset()`), then re-detach
+   `cdc_subset`** if it re-binds after the reset. *(critical)*
+   Without the port reset the OUT write succeeds but **every IN read times out**:
+   `cdc_subset` left the device-side gadget in a usbnet session state in which it
+   will not answer the scope protocol. The reset re-initializes the gadget to a
+   clean state. Because a reset re-enumerates the device, `cdc_subset` may grab
+   it again — hence the second detach. [verified]
 
-**Why this matters — deep capture over USB.** At ~800 KB/s a **512K Save-CSV
-(`WaveDataXXXX.csv`, ~7.7 MB) reads back over USB in ~10 s.** So the deep record
-that has no sample-stream command (§5) is still retrievable over USB: leave a card
-in the scope, run a deep **Save/Recall → CSV** save (front-panel, or triggered via
-`0x13` key-events), then `read_file("/mnt/udisk/WaveDataXXXX.csv")` — no card
-shuffling. `scripts/mso5202d.py:read_file()` implements the multi-frame loop.
-(The save writes `/dsocsv.tmp` internally, then `mv`s it onto the card.)
+3. **Claim interface 0, then `clear_halt` on both endpoints** (`0x02` and
+   `0x81`). This resets the bulk data toggles to DATA0 on both host and device so
+   the first transfers aren't silently dropped by a toggle mismatch left over
+   from `cdc_subset`. [verified]
 
-Two `.inf` files are read at startup; the filesystem holds many more (config, cal,
-logs — see the `0x43` shell, Appendix F.4). Full `.inf` contents are in the appendices.
+4. **Post the bulk IN read BEFORE writing the OUT command.** *(critical — the
+   single most important transport quirk)*
+   The device delivers its reply **only if an IN transfer is already pending**
+   when the command arrives (mirroring the Windows driver, which always has an IN
+   posted). With naive synchronous *write-then-read*, the reply is missed and the
+   read times out. The working pattern: run the IN read on a background thread,
+   sleep ~30 ms so the IN request is actually in flight, then issue the OUT
+   write. [verified]
 
-- **`/protocol.inf`** (≈3.6 KB) — an ordered list of **every setting parameter**
-  the scope exposes, each with its **byte width** in the settings blob. First line
-  `[TOTAL] 213` = total parameter bytes. See **Appendix A** for the complete list.
-- **`/keyprotocol.inf`** (≈0.9 KB) — the list of **front-panel keys**
-  (`[VT-CH1-VBSUB-KEY]`, `[HZ-TBADD-KEY]`, `[CT-AUTOSET-KEY]`, …). See
-  **Appendix B**. These are exactly the keys the host presses via the **`0x13`
-  key-event command** — **confirmed** from the vendor app (**Appendix F.2**).
+5. **Keep a persistent RX buffer and consume whole frames.**
+   Replies span multiple 512-byte USB packets, and several logical frames often
+   arrive back-to-back (e.g. a file read returns one or more *content* frames
+   **and** an *end-marker* frame — see §3 and the selector reference). If
+   leftover bytes are discarded instead of retained, the next read starts
+   mid-frame and the stream **desyncs**. Symptoms seen when this was wrong: an
+   "empty" file read, and a settings blob that decoded as stray INI text. Keep a
+   rolling buffer, pull out complete frames by their length field, and leave the
+   remainder for the next read. Provide a **resync** path (drop bytes until a
+   valid leader + length + checksum is found) to recover after a timeout or a
+   corrupt frame. [verified]
+
+**Running without root:** install a udev rule granting access to `049f:505a`
+(repo file `70-mso5202d.rules` → `/etc/udev/rules.d/`, reload, replug).
+Otherwise run as root. Note a GUI (matplotlib) under `sudo` loses X access, so
+the udev rule is the correct approach for the live viewer. [verified]
+
+### A mid-session USB drop + reconnect is NORMAL
+
+The scope application runs under a **supervisor** on the instrument that watches
+the app over a local heartbeat (~100 ms). If the app restarts (or is restarted
+by the supervisor), the USB gadget briefly disappears and **re-enumerates within
+~100 ms**. A host driver should therefore treat a sudden bulk error / device
+drop as **transient**: tear down, re-run the connection recipe (steps 1–3), and
+resume — do not assume the scope is gone. This respawn-and-reconnect is expected
+behavior, not a fault. [verified]
 
 ---
 
-## 5. Handshake: waveform acquisition
+## 3. Framing & checksum
 
-Per refresh the app runs (verified on hardware; samples confirmed as a 1 kHz cal
-square wave):
-
-```
-OUT  53 04 00 12 01 00        ; param 0x12 = 0 (NOT channel select; see below)
-                                                      -> IN 53 04 00 92 01 00        (ack, subtype 01)
-OUT  53 04 00 02 01 <ch>      ; acquire CHANNEL <ch> — see channel-code map below
-                                                      -> IN 53 07 00 82 00 00 00 0f 00  (subtype 00 = size; 0x0F00 = 3840)
-                                                      -> IN 53 04 0f 82 01 <ch> <samples>  (subtype 01 = data)
-                                                      -> IN 53 04 00 82 02 <ch>      (subtype 02 = end-marker)
-```
-
-- **Acquire channel-code map (`<ch>` = value byte of `02 01 <ch>`) — SOLVED
-  (2026-07-09):** `00` = **CH1**, `01` = **CH2**, `02` = **Math**, `05` = **Logic
-  Analyzer**. Codes `03`/`04` are not usable channels (`03` replies empty; `04`
-  returns a dual-analog block) and `06`+ are invalid — they get no reply and
-  **desync the link** (avoid probing them). The data frame echoes the code in its
-  3rd byte (`82 01 <ch>`), so the response is self-identifying.
-- **Samples: analog channels (CH1/CH2/Math) are 8-bit unsigned, 1 byte each**,
-  **always 3840 per block = the on-screen display window** (19.2 div). The waveform
-  frame payload is `82 01 <ch> <3840 bytes>`.
-- **Logic Analyzer (`02 01 05`) — SOLVED (2026-07-09):** returns the same 3840
-  samples but **2 bytes per sample** (little-endian **16-bit word**, 7680 bytes
-  total), because it packs all 16 digital channels into each sample: **bit N =
-  channel D(N)** (D0 = LSB … D15 = MSB, same convention as `LA-CHANNEL-STATE`).
-  So `word = raw[2i] | (raw[2i+1] << 8)` and `Dn(i) = (word >> n) & 1`. The size
-  frame still reports `0x0F00` = 3840 *samples* (not bytes). LA must be on
-  (`LA-SWI` = 1) or the read returns just an end-marker. Decoded by `read_la()` /
-  `decode_la()` in `mso5202d.py`.
-- **⚠ …but `02 01 05` is NOT a usable read — it is a half-wired firmware path
-  (2026-07-09).** The *frame format* above is correct, but the firmware does not
-  actually serve live LA samples over USB:
-  - The returned payload is **2-state garbage** at most timebases (only the words
-    `0x007f`/`0xff81` toggling at one ~62.5 Hz rate — no per-channel frequency
-    gradient), and its value is even influenced by the `0x12` command. It becomes
-    *partially* coherent only at slow timebases (e.g. 40 ms/div: 15 distinct
-    words), but never matches the scope's own display.
-  - **Reading it corrupts the scope's on-screen LA display** — the instrument's
-    own D0–D15 traces get overwritten with the 2-state pattern while we read.
-  - No observed vendor-app USB traffic ever issues `02 01 05`; the vendor's
-    virtual panel instead displays LA via the **`0x20` framebuffer** (the scope's
-    rendered screen, which already contains the firmware-drawn LA rows) — the
-    safe, correct way to view LA over USB. `read_la()` is retained for RE only;
-    the live viewer keeps it disabled
-    (`LA_READ_ENABLED = False`). See MSO5202D-rendering.md §6.
-- **The `0x02` acquire reads only the screen buffer, NOT deep memory —
-  CONFIRMED (2026-07-09).** With `ACQURIE-STORE-DEPTH` at the default it returns
-  the 3840-sample screen; set to **40K it stops responding entirely** (`0x02`
-  gets no reply — read returns 0 bytes, every retry times out). So the deep
-  record (40K/512K/1M) is **not reachable through this command**.
-- **The vendor app has no deep read either — VERIFIED against its own USB
-  traffic (2026-07-09).** A capture of the vendor Windows application performing
-  a live acquisition shows its refresh loop is byte-for-byte our own: per frame
-  it polls settings (`01`→`81`, 218 B), toggles the `0x12` param (`12 01 00`↔
-  `12 01 01`→`92`), then issues the same `02 01 <ch>` acquire and gets back the
-  identical **3-frame** reply — size (`82 00`, reports `0x00000f00` = 3840), data
-  (`82 01 <ch>` + **3840** sample bytes = a 3847-byte frame), end-marker
-  (`82 02`). **The largest single transfer the app ever makes is 3847 bytes
-  (= the 3840-sample screen block); it never reads more.** It does not use any
-  larger or alternate read command, so the deep record is simply **not exposed
-  over the USB host link at all** — consistent with the panel refusing to serve
-  40K/512K over USB even from its own vendor app. Keep store depth at the screen
-  size for live readout; there is no deep-read command left to find over USB.
-  **Deep capture DOES exist — via the front-panel file export, VERIFIED
-  2026-07-10** (see "Deep capture via CSV-to-USB" below).
-
-### Deep capture via CSV-to-USB (VERIFIED 2026-07-10)
-
-The deep acquisition memory that the USB link won't serve **is** exportable as a
-file: **Save/Recall → Type = CSV → Save to USB flash** writes the full stored
-record to the card. Confirmed with a USB stick and read back on a PC — depths
-4K/40K/512K produced `WaveData14xx.csv` of **4064 / 40064 / 400064 samples**
-(the 512K file is 7.7 MB, one contiguous record). Format:
+Both directions and both leaders use one framing scheme:
 
 ```
-#timebase=<ns>(ns)
+byte 0        : leader   0x53 ('S', data channel)  |  0x43 ('C', command channel)
+byte 1..2     : length   little-endian uint16   ==  (total_frame_len - 3)
+byte 3        : selector (= payload[0])
+byte 3..N-2   : payload  (selector + arguments / data)
+byte N-1      : checksum = (sum of all preceding bytes) & 0xFF
+```
+
+### The length field
+
+`length = bytes[1..2]` little-endian **= total_frame_len − 3** — i.e. it counts
+the payload plus the one checksum byte, but **not** the leader or the two length
+bytes themselves. Equivalently, `total_frame_len = length + 3`. [verified]
+
+Worked examples (all real frames):
+
+| Frame purpose | Length bytes | Decoded length | Total frame |
+|---|---|---|---|
+| Poll settings (OUT) | `02 00` | 2 | 5 bytes |
+| Settings blob (IN, 213 params) | `d7 00` | 0x00D7 = 215 | 218 bytes |
+| `/protocol.inf` file (IN, 3617 payload) | `21 0e` | 0x0E21 = 3617 | 3620 bytes |
+| Waveform data frame (IN, 3840 samples) | `04 0f` | 0x0F04 = 3844 | 3847 bytes |
+
+> **Framing gotcha:** bytes[1..2] are the *length only*. The **selector** is the
+> first payload byte (byte 3). Do not mistake the length low-byte for an opcode
+> — `53 02 …` and `53 10 …` are lengths 2 and 16, not "command 0x02 / 0x10".
+
+**Rule: `length == 0` is invalid.** A frame whose length field decodes to zero
+is rejected by the device's frame validator. Every real frame has at least the
+1-byte selector payload (minimum length 2). [verified]
+
+### The checksum — and the `0x66` wildcard
+
+The trailing byte is `checksum = (sum of every byte before it) & 0xFF`, i.e. the
+8-bit sum of `bytes[0 .. N-2]` (leader, both length bytes, and the whole
+payload). [verified]
+
+Verification examples:
+- `53 04 00 12 01 01 6b` → 0x53+0x04+0x00+0x12+0x01+0x01 = **0x6B** ✓
+- `53 02 00 01 56` → 0x53+0x02+0x00+0x01 = **0x56** ✓
+
+**Wildcard: a checksum byte of `0x66` is accepted on ANY frame, unchecked.**
+The device's validator accepts a frame if the computed checksum matches **OR**
+the checksum byte equals **`0x66`**. So a client may send `0x66` in place of a
+correctly computed checksum on *any* command and it will be honored. [verified]
+
+- Proven live: a settings poll sent as `53 02 00 01 66` (wrong checksum, `0x66`
+  wildcard) returned the full settings blob. [verified]
+- The file-read command in fact **always** uses the `0x66` wildcard in the
+  vendor app's traffic (e.g. `53 10 00 10 00 2f70726f746f636f6c2e696e66 66` =
+  read `/protocol.inf`); every other selector uses a computed checksum. Both
+  forms are accepted for file reads. [verified]
+
+### Selector and the reply echo
+
+- **`selector = payload[0]`** (frame byte 3). It names the command within the
+  leader's command space.
+- **The reply's echo byte is ALWAYS `(selector & 0x7f) | 0x80`.** The device
+  builds every reply by copying the request's leader + length + selector, then
+  forcing the selector's high bit set (and clearing any incoming high bit first).
+  So `0x01`→`0x81`, `0x02`→`0x82`, `0x10`→`0x90`, `0x11`→`0x91`, `0x12`→`0x92`,
+  `0x13`→`0x93`, `0x20`→`0xa0`, `0x21`→`0xa1`; and on the `0x43` leader
+  `0x7f`→`0xff`. This echo rule is uniform — there is no per-command exception.
+  [verified]
+
+The reply's own length and checksum are recomputed by the device for the actual
+reply size, following the same length/checksum rules above.
+
+### Two selector spaces keyed by the leader
+
+The leader byte both frames the packet and selects which of two command maps the
+selector is looked up in:
+
+- **`0x53`** — the data-channel selector map (valid selectors `0x00`–`0x21`;
+  many values in that range are no-ops that produce no reply). Documented as the
+  primary API.
+- **`0x43`** — the command-channel selector map (a larger map up to `0x7f`).
+  Documented separately as the service/advanced surface.
+
+A selector value that is not implemented in the relevant map produces **no
+reply** (the device silently ignores it). A client must therefore only send
+known selectors, and must not block forever waiting on a reply that will never
+come. [verified]
+
+### IN-echo table (reply's echo byte per command)
+
+The following echo bytes were all validated on the wire. "Reply shape" is
+detailed per-selector in the selector-reference sections; it is summarized here
+so the framing is complete.
+
+| Leader | Selector (OUT) | Echo (IN) | Reply shape (summary) |
+|---|---|---|---|
+| `0x53` | `0x00` connect/ping | `0x80` | empty ack |
+| `0x53` | `0x01` poll settings | `0x81` | 213-byte settings blob (no subtype byte) |
+| `0x53` | `0x02` acquire | `0x82` | size(`00`) / data(`01`) / end(`02`) / no-data(`03`) frames |
+| `0x53` | `0x10` read file | `0x90` | content(`01`) frames … + end(`02`, carries an 8-bit file sum) |
+| `0x53` | `0x11` write settings | `0x91` | 1 status byte (`00` ok / `FF` fail) |
+| `0x53` | `0x12` acq/run latch | `0x92` | `92 00` (sub 0) or `92 01 <latch>` (sub 1) |
+| `0x53` | `0x13` key event | `0x93` | 1 status byte (live menu/key status) |
+| `0x53` | `0x14` descriptor write | (none) | no reply (pairs with `0x21`) |
+| `0x53` | `0x20` framebuffer | `0xa0` | content(`01`) frames = 768000 B … + end(`02`, carries an 8-bit image sum); **no size frame** |
+| `0x53` | `0x21` descriptor read | `0xa1` | id16 + a few descriptor bytes |
+| `0x43` | `0x00` FPGA reg read | `0x80` | registers as LE32 words |
+| `0x43` | `0x01` engine sample read | `0x81` | debug sample block |
+| `0x43` | `0x02` region-1 dump | `0x82` | 5072-byte block |
+| `0x43` | `0x03` region-2 dump | `0x83` | 8664-byte block |
+| `0x43` | `0x10` read file | `0x90` | file content/end (same as `0x53`/`0x10`) |
+| `0x43` | `0x11` shell exec | `0x91` | command stdout as content/end frames |
+| `0x43` | `0x40` / `0x41` region write | `0xc0` / `0xc1` | write ack |
+| `0x43` | `0x42`/`0x43`/`0x44`/`0x45` | `0xc2`/`0xc3`/`0xc4`/`0xc5` | empty ack |
+| `0x43` | `0x50` / `0x60` | `0xd0` / `0xe0` | param command [gap] |
+| `0x43` | `0x7f` commit settings | `0xff` | empty ack |
+
+For `0x53`/`0x10` (file), `0x53`/`0x02` (acquire) and `0x53`/`0x20`
+(framebuffer), the byte immediately after the echo is a **subtype** byte
+(`00`=size, `01`=content/data, `02`=end, `03`=no-data) that distinguishes the
+frames of a multi-frame reply. The **settings poll (`0x81`) has no subtype
+byte** — its 213 parameter bytes begin immediately after the echo. These
+per-command details are specified in the selector-reference sections. [verified]
+
+## 4. Command reference — leader `0x53` (data channel)
+
+The `0x53` leader (`'S'`) is the **data channel** — the only channel the vendor
+Windows app uses. Everything a driver needs (settings, waveforms, screenshots,
+key events, file transfer) rides on it. This section is one subsection per
+selector, in ascending order, each with the exact OUT byte layout, the exact
+reply frame(s), a concrete example hex frame, and a verified/inferred/gap tag on
+every non-trivial claim.
+
+**Frame template (recap of §3).** Every OUT frame is
+
+```
+53 | len_LE16 | selector | args… | ck
+```
+
+where `len_LE16 = framelen − 3` (payload + checksum, i.e. every byte after the
+3-byte `53 | len` header), and `ck = (sum of all bytes before it) & 0xFF`. A
+checksum byte of **`0x66` is a wildcard** the device accepts on any frame in
+place of the computed value. Every reply **echoes the selector with bit 7 set**:
+reply byte 3 = `selector | 0x80`. This is uniform — there is no per-command
+echo. [verified]
+
+Throughout, `iN` denotes OUT-frame byte `N` (so `i3` = selector, `i4` = first
+argument).
+
+### Selector map (leader `0x53`)
+
+| Sel | Name | Echo | OUT form | Reply shape |
+|---|---|---|---|---|
+| `0x00` | Ping / Connect | `0x80` | `53 02 00 00` | empty ack |
+| `0x01` | Poll settings | `0x81` | `53 02 00 01` | 213 param bytes (no subtype) |
+| `0x02` | Acquire waveform | `0x82` | `53 04 00 02 01 <ch>` | size(`00`)/data(`01`)/end(`02`), or no-data(`03`) |
+| `0x10` | Read file | `0x90` | `53 <len> 10 00 <path>` | content(`01`)×N + end(`02`, +sum8) |
+| `0x11` | Write settings | `0x91` | `53 D7 00 11 <213 B>` | status `00`=ok / `FF`=fail |
+| `0x12` | Latch (run / acq-mode) | `0x92` | `53 04 00 12 <sub> <val>` | `92 <sub> [val]` |
+| `0x13` | Key event | `0x93` | `53 04 00 13 <keyid> <state>` | status byte |
+| `0x14` | Descriptor write | *(none)* | `53 <len> 14 <id16> <bytes>` | no reply |
+| `0x20` | Screen framebuffer | `0xA0` | `53 02 00 20` | content(`01`)×76 + end(`02`, +sum8) |
+| `0x21` | Descriptor read | `0xA1` | `53 02 00 21` | `id16 + bytes` |
+
+Selectors **`0x03`–`0x0F` and `0x15`–`0x1F`** pass the frame validator but the
+device sends **no reply** — they are reserved/no-op. A read waiting on them will
+simply time out. [verified] (no reply observed for any of them)
+
+---
+
+### `0x00` — Ping / Connect
+
+Empty handshake. Used to confirm the link is alive after the connection recipe;
+carries no arguments and changes no state.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0002` LE | len = framelen − 3 |
+| 3 | 1 | `00` | selector (ping) |
+| 4 | 1 | `55` | checksum |
+
+**Reply** — a single empty ack, echo `0x80`:
+
+```
+53 02 00 80 <ck>
+```
+
+**Echo:** `0x80`.
+
+**Example (verified on the wire):**
+
+```
+OUT  53 02 00 00 55        (0x53+0x02+0x00+0x00 = 0x55)
+IN   53 02 00 80 d5        (0x53+0x02+0x00+0x80 = 0xd5)
+```
+
+[verified] — seen in `scope_dump/captures_wireshark/control/`. Note `53 02 00 00 55` is selector
+`0x00`, a distinct command from `0x01`; it is **not** a "variant of poll". [verified]
+
+---
+
+### `0x01` — Poll settings
+
+Reads the entire device state as one flat **213-byte parameter block** (the
+"settings blob"). This is the workhorse for reading everything the front panel
+shows; the field-by-field decode of the 213 bytes is the datasheet in §8.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0002` LE | len |
+| 3 | 1 | `01` | selector (poll) |
+| 4 | 1 | `56` | checksum |
+
+**Reply** — echo `0x81`, followed immediately by the parameter bytes. **There is
+NO subtype byte** — parameter byte 0 (`VERT-CH1-DISP`) sits right after the echo:
+
+```
+53 <count+2 LE16> 81 <count parameter bytes> <ck>
+```
+
+The length field is `count + 2` (echo byte + checksum). For the current firmware
+`count = 213`, so the length field is `215 = 0x00D7`. Total frame = 218 bytes.
+The `count` value equals `[TOTAL]` from `/protocol.inf` (§Appendix A); a driver
+should trust the frame length rather than hard-code 213, in case a firmware
+revision changes the parameter list.
+
+**Echo:** `0x81`.
+
+**Example (verified):**
+
+```
+OUT  53 02 00 01 56
+IN   53 d7 00 81 01 0a 00 …(213 bytes)… <ck>
+              └ param[0]=VERT-CH1-DISP=0x01, param[1..]=…
+```
+
+[verified] — the 213-byte length and no-subtype layout are seen in every
+`01`→`81` exchange across the capture corpus.
+
+---
+
+### `0x02` — Acquire waveform
+
+Pulls one on-screen acquisition record for a single channel. This is the most
+structured command: a **3-frame reply** (size → data → end), plus a 4th "no
+fresh data" variant. The sample **byte encoding** (signed int8, rails, trigger
+column) is specified in full in §6 — this section covers the request/response
+framing and the channel map.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0004` LE | len |
+| 3 | 1 | `02` | selector (acquire) |
+| 4 | 1 | `<sub>` | **sub-command**: `01` = acquire, `00` = latch |
+| 5 | 1 | `<ch>` | channel code (when `sub=01`) |
+| 6 | 1 | `<ck>` | checksum |
+
+`i4` (the "sub" byte) is a real dispatch byte, **not** a constant subtype:
+
+- **`sub = 01` → acquire channel `i5`.** This is the only data-producing form;
+  the vendor app always sends `02 01 <ch>`.
+- **`sub = 00` → latch** (equivalent to `12 01 01`, see `0x12`); it triggers no
+  waveform reply. Unused by the vendor app. [verified]
+
+**Channel codes (`i5`)**
+
+| Code | Channel | Notes |
+|---|---|---|
+| `00` | CH1 | 1 byte/sample, signed int8 |
+| `01` | CH2 | 1 byte/sample, signed int8 |
+| `02` | Math | 1 byte/sample; needs CH1 or CH2 displayed. **Vendor never issues `02 01 02`** (Math is computed host-side) [verified] |
+| `03` | *(unusable)* | half-wired source; do not use |
+| `04` | *(unusable)* | dual/all-analog; do not use |
+| `05` | Logic Analyzer | **2 bytes/sample** = 16-bit LE word, bit N = D(N) |
+
+Codes **`≥ 06` are invalid** and desync the stream — never send them. [verified]
+Codes `03`/`04` return incoherent data and are likewise avoided. [inferred]
+
+**Precondition — the channel must be displayed.** If the requested channel is
+turned off on the scope, the acquire produces **no frames at all** (not even a
+size frame) and the read times out. This is the mechanism behind "a channel must
+be on-screen to read it". [verified]
+
+**Reply — 3 frames, echo `0x82`.** Subtype is at reply byte 4:
+
+| Frame | Subtype | Layout |
+|---|---|---|
+| SIZE | `00` | `53 07 00 82 00 <src> <c0> <c1> <c2> <ck>` |
+| DATA | `01` | `53 <count+4 LE16> 82 01 <ch> <count data bytes> <ck>` |
+| END | `02` | `53 04 00 82 02 <ch> <ck>` |
+| NO-DATA | `03` | `53 04 00 82 03 <ch> <ck>` — replaces size/data/end when no fresh block is ready |
+
+Details:
+
+- **SIZE frame** carries the record length as a little-endian value in bytes
+  `6..8` — a **24-bit usable count** (the byte at offset 9 is occupied by the
+  checksum, so the count is capped at 24 bits; screen records are far smaller).
+  **`count` is the DATA-payload BYTE count, not always the sample count**:
+  analog is 1 B/sample so `count == samples`; **LA is 2 B/sample so
+  `count == 2 × samples`**. Read the count from this frame — **never hard-code
+  3840**; it changes with the plot width (see below). [verified]
+
+- **The SIZE-frame `<src>` byte is an internal source id, and for LA it differs
+  from the requested code:**
+
+  | Requested `ch` | SIZE `<src>` | DATA/END `<ch>` |
+  |---|---|---|
+  | `00` (CH1) | `00` | `00` |
+  | `01` (CH2) | `01` | `01` |
+  | `05` (LA) | `03` | `05` |
+
+  [verified] — the LA size frame reports `82 00 03 …` while its data/end frames
+  echo the requested `05`.
+
+- **DATA frame** repeats the request's `sub` (`01`) and `ch` bytes, then the
+  sample bytes starting at offset 6. Its length field is `count + 4` (echo `82` +
+  `01` + `ch` + `count` data + `ck` = `count + 4`).
+
+- **END frame** must be **consumed** by the reader or the stream desyncs; a
+  driver's resync routine keys on recovering this marker after a bad/short read. [verified]
+
+- **NO-DATA (subtype `03`)** is emitted instead of the data path when the
+  acquisition engine, after a short internal poll (~10 retries over ~100 ms),
+  finds no fresh block. This — not a hard hang — is the byte-level reason raising
+  the store depth beyond the screen (e.g. 40K) makes `0x02` "return nothing":
+  the screen path has no fresh screen block to serve. Treat subtype `03` like an
+  empty/aborted read. [verified]
+
+- **Internal 10 000-sample chunking.** A record longer than 10 000 samples would
+  fan out into multiple subtype-`01` DATA frames (≤ 10 000 samples each) before
+  the END. At screen depth (≤ 3840) it is always a single DATA frame, which is
+  why every observed capture is exactly size/data/end. Deep records are never
+  served over USB, so this multi-frame path is not exercised in practice. [inferred]
+
+- **Record length is variable.** Observed counts: **3840** (19.2 divisions) when
+  no soft-menu panel is open, **3200** (16 divisions) when a right-hand menu
+  panel is open — the panel shaves 3.2 divisions (640 samples) off the plot
+  width. The timebase does **not** change the count; the plot width does. LA
+  follows in bytes: 7680 (menu closed) / 6400 (menu open). [verified]
+
+- **Sample values** are two's-complement **signed int8** at **25 counts/division**:
+  screen-centre = `0x00`, top rail = `0x7F` (+127), bottom rail = `0x81` (−127),
+  and any sample inside the **trigger column is forced to `0xFF`**. `0x80` (−128)
+  never occurs. counts→volts uses **`Vdiv / 25` volts per count**. Full encoding
+  and decode formula are in §6. [verified] — this session read CH1 in the
+  `+38..+85` range, CH2 in `−41..+5`, **zero `0x80` bytes**, and exactly one
+  `0xFF` trigger-column marker on CH2; counts→volts = `Vdiv/25` matches the
+  exported-CSV ground truth.
+
+**Echo:** `0x82`.
+
+**Example (CH1 acquire, verified):**
+
+```
+OUT   53 04 00 02 01 00 5a          request CH1
+IN    53 07 00 82 00 00 00 0f 00 eb   SIZE  src=0  count=0x000f00=3840
+IN    53 04 0f 82 01 00 <3840 B> <ck> DATA  len=0x0f04=3844, ch=0
+IN    53 04 00 82 02 00 db            END   ch=0
+```
+
+**Example (CH2, verified):** `OUT 53 04 00 02 01 01 5b` → SIZE
+`53 07 00 82 00 01 00 0f 00 ec` (src=1, 3840), DATA `82 01 01 …`, END
+`53 04 00 82 02 01 dc`.
+
+**Example (LA acquire this session, verified):**
+
+```
+OUT   53 04 00 02 01 05 5f          request LA
+IN    53 04 00 82 03 03 df          NO-DATA (subtype 03, ch=3): no fresh LA block
+```
+
+[verified] — this session's LA read returned the `03` no-data reply. In earlier
+captures the same request answered with a full 3-frame block whose SIZE was
+`82 00 03 …` (src=3) and DATA `82 01 05 …` (7680/6400 bytes). The *usability* of
+LA-over-`0x02` content remains an open hardware question (captured LA words were
+idle-zero). [gap]
+
+---
+
+### `0x10` — Read file
+
+Streams a file from the scope's on-board Linux filesystem back to the host. This
+is how a driver reads `/protocol.inf`, `/keyprotocol.inf`, and — the big one —
+pulls a deep-capture CSV that the front panel saved (see §10), sidestepping the
+lack of a deep-memory USB acquire.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `<len>` LE | len = framelen − 3 |
+| 3 | 1 | `10` | selector (read file) |
+| 4 | 1 | `00` | fixed |
+| 5 … | `len−3` | ASCII | absolute file path (no NUL terminator) |
+| last | 1 | `<ck>` | checksum — normally the **`0x66` wildcard** |
+
+The path length is `len − 3` (excludes selector, the `00`, and the checksum). The
+path is a plain absolute path, e.g. `/protocol.inf`, `/help.db`,
+`/mnt/udisk/WaveData1410.csv`.
+
+**Reply — echo `0x90`, NO size frame:**
+
+| Frame | Subtype | Layout |
+|---|---|---|
+| CONTENT | `01` | `53 <chunk+3 LE16> 90 01 <up to 10208 file bytes> <ck>` — repeated |
+| END | `02` | `53 04 00 90 02 <sum8> <ck>` |
+
+- The per-content-frame payload cap is **10208 bytes** (not 64 KB). A file of
+  size `S` arrives as `ceil(S / 10208)` content frames followed by one end frame. [verified]
+- The END payload byte is **`sum8` = the 8-bit sum of every byte of the whole
+  file** (`Σ file_bytes & 0xFF`) — a transfer integrity check over the complete
+  file, not per-chunk. [verified]
+- **No size/`90 00` frame** precedes the content — the host reads content frames
+  until it sees the `90 02` end marker. [verified]
+- **Checksum on the request:** `0x10` is the one selector for which the vendor
+  always sends the **`0x66` wildcard** checksum. A correctly computed checksum is
+  **also accepted** — both forms work. [verified] (confirmed on hardware this session)
+
+**Echo:** `0x90`.
+
+**Example — read `/protocol.inf` (verified):**
+
+```
+OUT   53 10 00 10 00 2f 70 72 6f 74 6f 63 6f 6c 2e 69 6e 66 66
+                     └────────── "/protocol.inf" (13 bytes) ─────────┘ └ 0x66 wildcard
+IN    53 21 0e 90 01 5b 54 4f 54 41 4c 5d …           CONTENT "[TOTAL]…", single frame
+IN    53 04 00 90 02 <sum8> <ck>                       END
+```
+
+**Example — read `/help.db` (911 360 bytes, verified this session):** the reply
+is **90 content frames** (each ≤ 10208 bytes) followed by
+`53 04 00 90 02 61 4a` — the end marker whose payload `0x61` equals the 8-bit
+sum of all 911 360 file bytes. [verified]
+
+**Throughput:** large-file reads run at roughly **800 KB/s** over USB; a deep
+512K-point CSV (~7.7 MB) is retrievable in about 10 s. [verified this session]
+
+---
+
+### `0x11` — Write settings
+
+The inverse of `0x01`: writes the whole 213-byte settings block back to the
+device. It is the primary control primitive — do a **read-modify-write**: poll
+with `0x01`, decode, change the field(s) you want, re-encode, write with `0x11`.
+Any field in the datasheet (§8) is settable this way.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `00D7` LE | len (= 213 + 2) |
+| 3 | 1 | `11` | selector (write settings) |
+| 4 … | 213 | bytes | the full parameter block (same layout as the `0x01` reply payload) |
+| last | 1 | `<ck>` | checksum |
+
+The block starts immediately at `i4` (no subtype byte) and is exactly 213 bytes
+today (`datalen = len − 2`). It is walked with the same `/protocol.inf` field
+table used to decode `0x01`, writing each named field.
+
+**Reply** — echo `0x91`, one status byte:
+
+```
+53 03 00 91 <status> <ck>       status: 00 = success, FF = failure
+```
+
+**Echo:** `0x91`.
+
+**Example (verified):**
+
+```
+OUT   53 d7 00 11 01 0a 00 …(213 bytes)… <ck>
+IN    53 03 00 91 00 e7                       status 00 = OK
+```
+
+[verified] — round-tripping a polled block back with `0x11` and re-reading with
+`0x01` reproduces the written fields.
+
+---
+
+### `0x12` — Latch (run / acquisition mode)
+
+A two-argument control latch. It is **not** a stop/panel-lock and **not** a
+channel selector (both were earlier misconceptions). The vendor app uses only
+`sub=1`, pulsing the value `1 → 0` around every refresh as part of its acquire
+loop.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0004` LE | len |
+| 3 | 1 | `12` | selector (latch) |
+| 4 | 1 | `<sub>` | `01` = run-latch, `00` = acquisition-mode |
+| 5 | 1 | `<val>` | boolean value |
+| 6 | 1 | `<ck>` | checksum |
+
+- **`sub = 1` (run-latch):** sets the acquisition run latch to `val != 0` and
+  kicks the acquisition. **Reply echoes the new latch value:** `53 04 00 92 01
+  <val> <ck>`. This is the one the vendor pulses `12 01 01` → `12 01 00` every
+  refresh. [verified]
+- **`sub = 0` (acquisition-mode):** sets an internal acquire-mode flag from `val`.
+  **Reply has no value byte:** `53 03 00 92 00 <ck>`. Vendor never uses it. [verified]
+
+Only `sub ∈ {0, 1}` do anything; other sub values fall through with no reply.
+
+**Echo:** `0x92`.
+
+**Examples (verified this session):**
+
+```
+OUT   53 04 00 12 01 01 6b        sub=1 run-latch, val=1
+IN    53 04 00 92 01 01 eb        echoes val
+
+OUT   53 04 00 12 00 00 69        sub=0 acq-mode, val=0
+IN    53 03 00 92 00 e8           subtype 00, no value byte
+```
+
+[verified] — neither combination stops acquisition or locks the panel; the
+"sub=0→STOP / sub=1→PANEL-LOCK" description from third-party notes is wrong.
+
+---
+
+### `0x13` — Key event
+
+Injects one front-panel key press. Because whole menus and actions (Autoset,
+Run/Stop, Default Setup, Force-Trigger, Set-50%, every soft-key) are reachable as
+keys, this plus `0x11` is enough to drive the entire UI remotely.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0004` LE | len |
+| 3 | 1 | `13` | selector (key event) |
+| 4 | 1 | `<keyid>` | 0-based index into `/keyprotocol.inf` |
+| 5 | 1 | `<state>` | **IGNORED by the device** |
+| 6 | 1 | `<ck>` | checksum |
+
+- `keyid` (`i4`) is the 0-based position of the key in `/keyprotocol.inf`
+  (§Appendix B). Known ids: Autoset = 17, Run/Stop = 19, Default Setup = 21,
+  Trig-50% = 46, Force = 47.
+- **The state byte `i5` is ignored** — every `0x13` frame is exactly **one key
+  press** regardless of `state`. The vendor always sends `01`, but `00` behaves
+  identically. Send one frame per press; do not model press/release. [verified]
+- The key is delivered through a **single-slot mailbox** the UI consumes on its
+  own poll — issuing keys faster than the UI drains them can drop one. Space key
+  events out. [inferred]
+
+**Reply** — echo `0x93`, one status byte:
+
+```
+53 03 00 93 <status> <ck>
+```
+
+The status byte is the device's **current menu/key status** at reply time (it
+changes as menus open/close — observed values `0x01`, `0x0b`, `0x19`). It is
+**not** a fixed echo of the request's state byte. [verified]
+
+**Echo:** `0x93`.
+
+**Example (Autoset, verified):**
+
+```
+OUT   53 04 00 13 11 01 7c        keyid 0x11=17 (Autoset), state 01 (ignored)
+IN    53 03 00 93 01 ea           status byte = current menu status
+```
+
+[verified] — key ids 17/19/21/46/47 observed on the wire, all with state `01`.
+
+---
+
+### `0x14` / `0x21` — Descriptor write / read
+
+A matched write/read pair over a small static descriptor structure carrying a
+16-bit id and a few bytes. Purpose is **unknown** — likely a version/capability
+descriptor. The vendor app never uses either selector; documented for
+completeness. [gap]
+
+**`0x14` — descriptor WRITE**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `<len>` LE | len |
+| 3 | 1 | `14` | selector |
+| 4–5 | 2 | `<id16>` LE | descriptor id |
+| 6 … | n | bytes | descriptor field bytes |
+| last | 1 | `<ck>` | checksum |
+
+`0x14` **emits no reply** — it silently stores the descriptor. [verified] (no
+reply frame ever follows)
+
+**`0x21` — descriptor READ**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0002` LE | len |
+| 3 | 1 | `21` | selector |
+| 4 | 1 | `<ck>` | checksum |
+
+**Reply** — echo `0xA1`, the 16-bit id then the stored bytes:
+
+```
+53 <len> a1 <id16 LE> <b1> <b2> … <ck>
+```
+
+**Echo:** `0xA1`.
+
+**Example (verified):**
+
+```
+OUT   53 02 00 21 76
+IN    53 09 00 a1 d9 07 01 01 03 01 18 fb
+                  └id16 = 0x07D9 = 2009┘ └ 01 01 03 01 18 (payload) ┘
+```
+
+The default id is **`0x07D9` = 2009**; the meaning of the id and the trailing
+bytes is unresolved. [gap]
+
+---
+
+### `0x20` — Screen framebuffer
+
+Grabs the scope's rendered LCD as a raw RGB565 bitmap. The vendor "virtual
+panel" is just this command streamed continuously — it is a real screenshot
+(including firmware-drawn LA rows), not a host-side re-render. This is also the
+**safe way to view LA** (the firmware draws the D-rows into the screen), avoiding
+the unreliable `02 01 05` path.
+
+**OUT layout**
+
+| Offset | Width | Value | Meaning |
+|---|---|---|---|
+| 0 | 1 | `53` | leader |
+| 1–2 | 2 | `0002` LE | len |
+| 3 | 1 | `20` | selector (framebuffer) |
+| 4 | 1 | `75` | checksum |
+
+**Reply — echo `0xA0`, NO size frame:**
+
+| Frame | Subtype | Layout |
+|---|---|---|
+| CONTENT | `01` | `53 <chunk+3 LE16> a0 01 <up to 10208 pixel bytes> <ck>` — repeated |
+| END | `02` | `53 04 00 a0 02 <sum8> <ck>` |
+
+- Total image = exactly **768000 bytes = 800 × 480 × 2** (16-bpp RGB565). [verified]
+- Delivered as **76 content frames**: 75 full frames of 10208 bytes + 1 tail of
+  2400 bytes (`75 × 10208 + 2400 = 768000`), then one END. **No size frame.** [verified]
+- The END payload byte is **`sum8` = the 8-bit sum of all 768000 pixel bytes**
+  (`Σ pixel_bytes & 0xFF`) — a whole-image integrity check. [verified]
+- Pixels are little-endian RGB565; the exact channel bit order (assumed
+  R:5 G:6 B:5, MSB=R) is not independently confirmed. [gap]
+
+**Echo:** `0xA0`.
+
+**Example (verified):**
+
+```
+OUT   53 02 00 20 75
+IN    53 e3 27 a0 01 93 31 93 31 … <ck>      CONTENT frame 1 (len 0x27e3 = 10211 = 10208+2+1)
+      … 74 more full content frames …
+IN    53 63 09 a0 01 <2400 px bytes> <ck>    CONTENT frame 76 (len 0x0963 = 2403)
+IN    53 04 00 a0 02 47 40                   END: img sum8 = 0x47
+```
+
+[verified] — 76 content frames sum to exactly 768000 pixel bytes; the first
+pixels `93 31` decode as the RGB565 word `0x3193`.
+
+## 5. Command reference — leader `0x43` (command / shell / FPGA channel)
+
+Everything in Section 4 used the leader byte `0x53` — the *data channel* the vendor
+"Scope" application actually speaks. The device answers a **second, parallel command
+set under leader `0x43`** ("C" for *command*). This is a **private service / debug
+channel: the vendor app never issues a single `0x43` frame** — across every capture in
+`scope_dump/captures_wireshark/` and `scope_dump/captures_wireshark/control/` there are **zero** `0x43`-leader OUT frames (the
+lone `43` byte that shows up in a naive scan is the ASCII letter "C" inside file
+payload, not a frame leader). [verified]
+
+The channel was **discovered from the sibling open-source project
+`github.com/onnokort/dsoc`** (which drives the same 049f:505a silicon family) and every
+selector below was then **confirmed on this MSO5202D over its own USB link**. Because no
+vendor traffic exercises it, treat it as powerful but unsupported: several selectors
+**write** device memory or run **arbitrary root shell commands**, and a few can **brick
+the instrument**. The read-only selectors (`0x00`–`0x03`, `0x10`, and — with care —
+`0x11`) are safe and genuinely useful (FPGA register introspection, region dumps, file
+pull, on-scope shell).
+
+### 5.0 What is shared with the `0x53` channel
+
+`0x43` uses the **identical framing, checksum, and echo rules** as `0x53`
+(see Section 3): `43 | len_LE16 | selector | args… | checksum`, `len = framelen − 3`,
+`checksum = (Σ all preceding bytes) & 0xFF` (or the `0x66` wildcard), and every reply
+echoes `selector | 0x80`. The only difference the device makes internally is a
+**leader flag** it sets from byte 0 (1 for `0x43`, 0 for `0x53`), which routes the frame
+to a separate 128-entry dispatch table. Multi-frame replies (file, shell) reuse the
+same `01` = content / `02` = end subtype convention as `0x53/0x10`. [verified]
+
+Selectors that are **defined** on the `0x43` table but not listed below (everything
+outside the set here) return **no reply** (silent no-op). [verified]
+
+### 5.1 Selector map (leader `0x43`)
+
+| sel | name | OUT form | echo | reply | safety |
+|---|---|---|---|---|---|
+| `0x00` | FPGA config-register read | `43 05 00 00 <mode> <b> <c> ck` | `0x80` | regs as LE32 words | read-only [verified] |
+| `0x01` | engine-sample debug read | `43 04 00 01 <n_LE16> ck` | `0x81` | up to 1024 samples | read-only [verified] |
+| `0x02` | dump region 1 (config, 5072 B) | `43 02 00 02 ck` | `0x82` | single 5072-byte frame | read-only [verified] |
+| `0x03` | dump region 2 (ADC cal, 8664 B) | `43 02 00 03 ck` | `0x83` | single 8664-byte frame | read-only [verified] |
+| `0x10` | read file | `43 <len> 10 00 <path> ck` | `0x90` | content/end (same as `0x53/0x10`) | read-only [verified] |
+| `0x11` | **shell exec (root)** | `43 <len> 11 <ascii cmd> ck` | `0x91` | stdout content/end | **DANGEROUS** [verified] |
+| `0x40` | **write region 1** | `43 <len> 40 <bytes> ck` | `0xc0` | ack | **DESTRUCTIVE** [inferred] |
+| `0x41` | **write region 2 (cal)** | `43 <0x21DA> 41 <8664 B> ck` | `0xc1` | ack | **DESTRUCTIVE** [inferred] |
+| `0x42` | parameter setter | `43 05 00 42 <a> <v_LE16> ck` | `0xc2` | empty ack | not swept [gap] |
+| `0x43` | repeat-action command | `43 04 00 43 <a> <cnt> ck` | `0xc3` | empty ack | not swept [gap] |
+| `0x44` | beep | `43 03 00 44 <a> ck` | `0xc4` | empty ack | harmless [verified] |
+| `0x45` | 8-byte misc write | `43 <len> 45 <id_LE16> <8 B> ck` | `0xc5` | empty ack | not swept [gap] |
+| `0x50` / `0x60` | parameter I/O (mfg/debug) | `43 <len> 50/60 …` | `0xd0`/`0xe0` | — | not decoded [gap] |
+| `0x7f` | commit / apply settings | `43 02 00 7f ck` | `0xff` | empty ack | safe (no reboot) [verified] |
+
+The remainder of this section documents each selector byte-for-byte.
+
+### 5.2 `0x00` — FPGA config-register read
+
+Reads the acquisition FPGA's configuration register file. Three argument bytes follow
+the selector: **`mode`, `b` (start register), `c` (count)**.
+
+- **`mode == 1`** (bulk): returns registers `b .. b+c−1`, **each as a 4-byte
+  little-endian word** (the underlying registers are 16-bit; the high half of each
+  returned word reads back 0). The device enforces the bound **`b + c ≤ 0x6F` (111)**;
+  violate it and you get **no reply**. [verified]
+- **`mode == 0`** (single): reads one register at `b`. [verified]
+- Any other `mode`: empty reply. [verified]
+
+Reply length field = `2 + 4·c`. Example — read registers 0..3 (`mode=1, b=0, c=4`):
+
+```
+OUT  43 05 00 00 01 00 04 4d
+IN   43 12 00 80 <r0 LE32> <r1 LE32> <r2 LE32> <r3 LE32> <ck>      # len 0x0012 = 2 + 16
+```
+
+The register file is **static configuration**: sweeping run → stop, **0 of the 110
+registers changed value**. [verified] It is FPGA config/status, not a sample FIFO — do
+not expect waveform data here.
+
+### 5.3 `0x01` — engine-sample debug read
+
+`n = LE16(args) >> 2`, clamped to **≤ 1024** samples. The bytes come **through the
+normal acquisition engine** (the same source as `0x53/0x02`), so this is a *live rolling*
+debug tap — it returns **nothing beyond the 3840-sample screen record**, not deep memory.
+[verified]
+
+```
+OUT  43 04 00 01 00 10 58        # LE16 = 0x1000 = 4096 -> 4096>>2 = 1024 samples
+IN   43 <len> 81 <samples…> <ck>
+```
+
+Use `0x53/0x02` (Section 4) for real acquisition; `0x01` is only an engine sanity tap.
+
+### 5.4 `0x02` / `0x03` — fixed region dumps
+
+Two constant-size snapshots of the FPGA configuration/coefficient RAM. **Read-only, no
+side effects.**
+
+| sel | size | contents |
+|---|---|---|
+| `0x02` | **5072 B** (`0x13D0`) | region 1 — FPGA config/coefficient snapshot [verified] |
+| `0x03` | **8664 B** (`0x21D8`) | region 2 — **ADC-lane linearization calibration RAM** [verified] |
+
+```
+OUT  43 02 00 02 47      IN  43 d2 13 82 <5072 bytes> <ck>     # len 0x13D2 = 5072 + 2
+OUT  43 02 00 03 48      IN  43 da 21 83 <8664 bytes> <ck>     # len 0x21DA = 8664 + 2
+```
+
+The 8664-byte region-2 dump is **byte-identical to the on-disk calibration file**
+retrievable with a file read (`/param/sav/chk1kb_091023`) — verified equal byte-for-byte
+this session. [verified] It is the per-lane / per-code linearization LUT for the 8-lane
+interleaved ADC (see the Calibration section). These two dumps are the *only* fixed-region
+reads; they are **not** a deep-memory sample path.
+
+### 5.5 `0x10` — read file
+
+**Identical** to `0x53/0x10` (Section 4) but on the `0x43` leader; the reply still echoes
+`0x90` and streams `90 01` content frames (≤ 10208 bytes each) + a `90 02 <sum8>` end
+marker, no size frame, and accepts the `0x66` wildcard checksum. Use whichever leader is
+convenient. [verified]
+
+### 5.6 `0x11` — shell exec (root)
+
+> ### ⚠️ SAFETY — `0x43/0x11` runs arbitrary commands as **root** on the scope
+>
+> - The payload is a shell command line executed on the instrument's Linux with **full
+>   root privileges**. There is no sandbox. **A destructive command (`rm`, `mkfs`,
+>   `dd`, overwriting `/dso_bin`, corrupting `/param/*`) can permanently brick the
+>   scope.** Treat this selector as **read-only in practice** — inspection commands
+>   (`cat`, `ls`, `ps`, `cat /proc/*`) only.
+> - **A command that stalls / never returns will reboot the scope.** The instrument is
+>   watched by a hardware dead-man timer and a software supervisor; if the shell blocks
+>   long enough the supervisor kills and respawns the scope app (transient USB-link loss)
+>   and the hardware watchdog can reset the whole SoC. **Never launch a blocking or
+>   long-running command** (no `sleep`, no daemons, no `tail -f`, no unbounded `cat` of a
+>   device node). [verified — observed reboot on a stalling command]
+> - **No writes, no experiments.** Everything on this channel is unsupported and
+>   untested by the vendor.
+
+**How it works on the wire.** The command line is the ASCII payload after the selector
+(`cmdlen = len − 2`). The device appends an output redirect to a **relative** message
+file, runs the whole thing, then **streams that message file back exactly like a file
+read** — content frames `43 <len> 91 01 <stdout…>` + end `43 04 00 91 02 <sum8>`,
+echo `0x91`. [verified]
+
+```
+OUT  43 0e 00 11 63 61 74 20 2f 73 79 73 2e 69 6e 66 66     # "cat /sys.inf", 0x66 wildcard ck
+IN   43 <len> 91 01 6d 6f 64 65 6c 3d …                     # stdout content
+IN   43 04 00 91 02 <sum8> <ck>                             # end marker
+```
+
+**Two practical hazards from that "redirect to a relative message file" design:** [verified]
+
+1. **One-behind message race.** Because the redirect target is a single fixed relative
+   file and the reply streams *that file's current contents*, a fast command can be read
+   back **one call behind** — you occasionally get the *previous* command's output. Guard
+   against it by making each command **emit a unique marker** (e.g. append
+   `; echo __DONE_<nonce>__`) and **retry the read** until the marker appears in the
+   returned stream.
+2. **Multi-command input must be a brace group.** Only the *last* shell segment lands in
+   the redirected message file. To capture output from several commands in one call, wrap
+   them so the redirect applies to the group — send `{ cmd1; cmd2; cmd3; }` as the payload
+   (the device appends the redirect to the whole line), not `cmd1; cmd2; cmd3`.
+
+### 5.7 `0x40` / `0x41` — region write (DESTRUCTIVE)
+
+The write counterparts of `0x02`/`0x03`. `0x40` overwrites region 1 with the payload
+bytes; `0x41` overwrites region 2 (the ADC cal RAM) and **only proceeds if you supply
+the full 8664 bytes** (`len == 0x21DA`). These **were not swept** on hardware — writing
+either region can leave the acquisition path miscalibrated or non-functional until a
+factory cal is restored. **Do not use.** [inferred] echo `0xc0` / `0xc1`.
+
+### 5.8 `0x42` / `0x43` / `0x44` / `0x45` — setters & beep
+
+Small command selectors, each answered by an **empty ack** `43 02 00 <echo> ck`:
+
+- **`0x44` — beep.** One argument byte selects the beep; harmless and handy as a
+  round-trip liveness test. echo `0xc4`. [verified]
+  ```
+  OUT  43 03 00 44 01 8b        IN  43 02 00 c4 09
+  ```
+- **`0x42`** — parameter setter: `a` byte + a 16-bit LE value. echo `0xc2`. Effect not
+  swept. [gap]
+- **`0x43`** — repeat-action command: `a` byte + a repeat `cnt`; runs a begin / repeat×cnt
+  / end sequence. echo `0xc3`. Effect not swept. [gap]
+- **`0x45`** — 16-bit id + an 8-byte payload write. echo `0xc5`. Effect not swept. [gap]
+- **`0x50` / `0x60`** — parameter I/O (manufacturing/debug); argument layout not decoded,
+  echo `0xd0` / `0xe0`. [gap]
+
+### 5.9 `0x7f` — commit / apply settings
+
+Persists the current settings to non-volatile storage (if dirty) and re-applies them,
+then returns an **empty ack echoing `0xff`**. **This is NOT a reboot** — despite the name
+it is sometimes given in third-party notes, no reset occurs; the scope keeps running.
+[verified]
+
+```
+OUT  43 02 00 7f c4        IN  43 02 00 ff 44
+```
+
+Normal `0x53/0x11` settings writes already take effect live; `0x7f` is only needed if you
+want a change to **survive a power cycle**. It is safe to call.
+
+---
+
+## 6. Waveform sample format
+
+This section is the definitive decode of the sample bytes returned by the acquire
+command (selector `0x02`, §4/§5). It answers exactly what each byte means, where it
+sits on the screen, and how many bytes to expect. Read §5's acquire handshake first
+for the frame envelope (size / data / end); here we open the payload.
+
+> **Legend:** `[verified]` = seen on the wire or reproduced on hardware ·
+> `[inferred]` = from cross-referenced captures / vendor manual · `[gap]` = unknown.
+
+### 6.1 One glance
+
+| property | value | tag |
+|---|---|---|
+| analog sample width | **1 byte**, two's-complement **signed int8** | `[verified]` |
+| range on the wire | **−127 … +127** (`0x81` … `0x7F`), hard-clamped | `[verified]` |
+| screen centre (0 V offset baseline) | `0x00` | `[verified]` |
+| top rail (trace parked above screen) | `0x7F` (+127) | `[verified]` |
+| bottom rail (trace parked below screen) | `0x81` (−127) | `[verified]` |
+| trigger-column marker | one sample forced to `0xFF` | `[verified]` |
+| `0x80` (−128) | **never occurs** (the clamp precludes it) | `[verified]` |
+| vertical scale | **25 counts / division** | `[verified]` |
+| vertical decode | `y_div = (int8(byte) − 16) / 25` (up = positive) | `[verified]` scale / `[gap]` the `+16` |
+| horizontal density | **200 samples / division** | `[verified]` |
+| block width | **3840** samples (or **3200** when a soft-menu panel is open) | `[verified]` |
+| Logic-Analyzer sample width | **2 bytes**, little-endian 16-bit word, bit N = D(N) | `[verified]` |
+| deep memory over USB | **not available** — screen block only | `[verified]` |
+
+### 6.2 Analog samples are a signed int8 (this replaces the old "unsigned wrap" model)
+
+Each analog sample byte (channels CH1 = `02 01 00`, CH2 = `02 01 01`, Math =
+`02 01 02`) is a **two's-complement signed 8-bit integer** giving the sample's
+vertical position **in counts, at 25 counts per division**, measured from a
+fixed baseline. `[verified]`
+
+```
+s = byte - 256   if byte >= 128     # sign-extend the wire byte to a signed int8
+    byte         otherwise
+                                     #   0x00 -> 0   (screen centre baseline)
+                                     #   0x7F -> +127 (top rail / clamp ceiling)
+                                     #   0x81 -> -127 (bottom rail / clamp floor)
+```
+
+The device **clamps** every sample to `[-127, +127]` before transmitting, so:
+
+- `0x7F` (+127) and `0x81` (−127) are the two saturation rails. A trace scrolled
+  fully above the graticule reads a solid run of `0x7F`; fully below, a solid run of
+  `0x81`. `[verified]`
+- `0x80` (−128) can **never** appear — it is outside the clamp window. This is a
+  reliable integrity check: a `0x80` in an analog data payload means a framing error,
+  not a sample. Confirmed on hardware: **0 occurrences of `0x80`** across a full
+  vertical-position sweep (`scope_dump/captures_wireshark/mso5202d-ch1-vpos.pcapng`, 138 240 sample bytes),
+  and again this session across live CH1/CH2 reads. `[verified]`
+
+**Session ground truth (2026-07-10):** a live capture of a centred signal read CH1
+bytes in `0x26…0x55` (signed **+38 … +85**) and CH2 bytes in `0xD7…0x05`
+(signed **−41 … +5**); no `0x80` bytes appeared; CH2 carried **exactly one** `0xFF`
+sample = the trigger-column marker (§6.4). `[verified]`
+
+#### Polarity: larger signed value = HIGHER on screen
+
+The byte **increases as the trace moves up** on the display. Do **not** decode with
+`128 − byte`; that inverts the motion (raise the trace and the plot descends). `[verified]`
+
+#### Vertical decode (counts → divisions)
+
+The sample byte already folds in the channel's vertical position (`VERT-CHx-POS`),
+because the device draws the trace pre-positioned. To recover divisions-from-centre:
+
+```
+s      = int8(byte)            # signed, per above
+y_div  = (s - 16) / 25         # +16 counts (~0.64 div) is a fixed baseline offset
+                               # up = positive; each division = that channel's V/div
+```
+
+The `−16` removes a **≈0.64-division baseline bias**: with the channel centred
+(`VERT-CHx-POS = 0`) the zero-signal baseline sits at byte `+16`, not `0x00`.
+Whether this `+16` is a fixed instrument bias or an artifact of the position-zero
+reference is **[gap]** — the `25` counts/div scale is solid, the `−16` offset is the
+one un-nailed constant (see §7 for the absolute counts→volts offset, still open).
+
+#### Equivalence to the position-unwrap form
+
+Earlier tooling decoded via a position-aware unwrap:
+
+```
+base   = (VERT-CHx-POS + 16) & 0xFF
+signal = ((byte - base + 128) mod 256) - 128       # AC part, in counts
+y_div  = (VERT-CHx-POS + signal) / 25
+```
+
+Because the wire byte is `byte = POS + 16 + signal` clamped to a signed int8 (no
+modular wrap survives the clamp), `signal = s − (POS + 16)` and the whole thing
+collapses to `y_div = (s − 16)/25` — **identical result, no modulo arithmetic
+needed.** `[verified]` The signed-int8 form is the canonical one; the unwrap form is
+kept only to show equivalence.
+
+#### RETRACTION — the old "unsigned mod-256 wrap / centre-hash / 0x0A–0xF2 rails" model is wrong
+
+Prior documentation modeled the byte as **unsigned** `byte = (POS + 16 + signal) mod
+256` with an "8-bit wrap producing a rail-to-rail hash near screen centre", and
+treated bytes near `0x0A`/`0xF2` as **clipped rails**. All three claims were a
+mis-reading of signed data and are **retracted**:
+
+- **No wrap exists.** The clamp to `[−127, +127]` makes an 8-bit overflow impossible.
+  The "hash near centre" was an unsigned reader seeing the signed-**zero crossing**:
+  a small signal oscillating around 0 alternates `0xFF` (−1) ↔ `0x00` (0), which an
+  unsigned decode reads as ~255 ↔ 0, i.e. a fake rail-to-rail toggle. Decoded signed,
+  it is an ordinary small waveform. `[verified]`
+- **`0x0A` / `0xF2` are NOT rails.** They are signed **+10 / −14** — a normal
+  ~24-count (≈1-division) square wave straddling the signed-zero line. A rail detector
+  keyed on "≈0 or ≈255" will falsely flag healthy on-screen signals as clipped. The
+  **real** rails are `0x7F` (+127) and `0x81` (−127). `[verified]`
+- **"Parked ≈ flat 129" was the bottom rail.** `0x81` = −127 is the clamp floor, not a
+  mid-code idle. `[verified]`
+
+> **[gap] — the genuine off-screen bimodal block.** Separately from the retraction
+> above, there remains one *real* unexplained phenomenon: when a trace is dragged
+> off-screen and back, a whole block can come back **split ~50/50 between `0x0A` and
+> `0xF2`** with nothing in between (e.g. 1919 samples at `0x0A` + 1921 at `0xF2` in
+> `scope_dump/captures_wireshark/mso5202d-ch1-vpos.pcapng`). This bimodal fill is **not** the `0x7F`/`0x81`
+> clamp rails and is **not** predicted by the signed model. Treat such a block as
+> "trace off-screen / invalid" and do not plot it as data. Its origin is unresolved.
+
+### 6.3 Horizontal: 200 samples/division, block width tracks the display, not the timebase
+
+- **200 samples per division** `[verified]`. Therefore
+  `sample_interval = time_per_div / 200` and `sample_rate = 200 / time_per_div`.
+  (`decode_settings()` exposes these as `SAMPLE-INTERVAL-ns` and `SAMPLERATE-HZ`.)
+- The **block width is not fixed** and, crucially, **does not depend on the timebase**.
+  It is governed by whether the right-hand soft-menu panel is open — the settings-blob
+  field `CONTROL-DISP-MENU` (frame offset 206):
+
+  | `CONTROL-DISP-MENU` | samples/block | plot width |
+  |---|---|---|
+  | 0 (no soft-menu panel) | **3840** | 19.2 div | `[verified]` |
+  | 1 (menu panel open) | **3200** | 16.0 div | `[verified]` |
+
+  Opening the panel shaves 3.2 divisions (640 samples ≈ 128 px) off the right of the
+  plot. The timebase (`HORIZ-TB`) is unchanged across the transition — **it is the plot
+  width that changes, not the sample rate.** `[verified]`
+- **Never hard-code 3840.** Always read the sample count from the SIZE frame
+  (§6.5). Interrupted reads have been observed to report short counts (e.g. 1537).
+- The vendor app never reads more than one screen block per refresh; the largest single
+  transfer it ever makes is the 3840-sample data frame (a 3847-byte frame). `[verified]`
+
+### 6.4 Trigger-column marker and roll/scan fill (both use `0xFF`)
+
+`0xFF` (−1) is overloaded on the wire and must be interpreted by context:
+
+- **Trigger column:** exactly **one** sample in the block — the one aligned to the
+  trigger instant — is forced to `0xFF`. Observed this session: CH2's block contained a
+  single `0xFF` at the trigger column. `[verified]` (The internal renderer draws this as
+  a vertical trigger tick.)
+- **Roll / scan fill:** in roll or scan display modes a contiguous **sub-range** of the
+  block is force-written `0xFF` to mean "not yet acquired". `[verified]` The filled span
+  is a leading/trailing run rather than a single sample.
+- **Ambiguity:** because `0xFF` is also the legitimate value −1 (one count below
+  centre), a lone `0xFF` cannot be distinguished from a real −1 sample by value alone —
+  only its position (single trigger column) or run-length (roll fill) disambiguates it.
+  A decoder should special-case the trigger column and treat long `0xFF` runs as
+  unacquired, but must not blanket-drop every `0xFF`.
+
+### 6.5 SIZE frame — how to learn the length before reading the data
+
+The acquire response begins with a SIZE frame (subtype `0x00`) that states the payload
+length. Layout `[verified]`:
+
+```
+53 07 00 | 82 | 00 | <src> | <count byte0> <count byte1> <count byte2> | <ck>
+          echo  sub   src            count, 24-bit little-endian
+```
+
+- `src` is the device's **internal** source id: **CH1 → 0, CH2 → 1, LA → 3**. For the
+  Logic Analyzer this is `3` even though the request code and the DATA/END frames echo
+  `5`. `[verified]`
+- `count` is a **24-bit little-endian byte count of the DATA payload** (a fourth,
+  most-significant byte is present in the buffer but is overwritten by the checksum, so
+  only three bytes are usable — never an issue below 16.7 M). It is the **byte** count,
+  so for analog `count == samples` but for LA `count == 2 × samples`. `[verified]`
+
+Verified SIZE frames:
+
+| device | frame | src | count | meaning |
+|---|---|---|---|---|
+| CH1 | `53 07 00 82 00 00 00 0f 00 eb` | 0 | `0x000f00` = 3840 | 3840 analog samples |
+| CH2 | `53 07 00 82 00 01 00 0f 00 ec` | 1 | 3840 | 3840 analog samples |
+| LA  | `53 07 00 82 00 03 00 19 00 f8` | 3 | `0x001900` = 6400 | 3200 LA samples × 2 B |
+
+### 6.6 Full acquire payload — the three (or four) frames
+
+For the acquire handshake envelope see §5; the payload-relevant facts:
+
+| subtype | frame skeleton | meaning |
+|---|---|---|
+| `0x00` size | `53 07 00 82 00 <src> <count24> <ck>` | payload length (above) |
+| `0x01` data | `53 <lenLE> 82 01 <ch> <count bytes> <ck>` | the samples; `len = count + 4` |
+| `0x02` end  | `53 04 00 82 02 <ch> <ck>` | end-marker — **must be consumed** or the stream desyncs |
+| `0x03` nodata | `53 04 00 82 03 <ch> <ck>` | "no fresh block" — treat as an empty/aborted read |
+
+- Example CH1 data frame: `53 04 0f 82 01 00 <3840 bytes> <ck>` (`len 0x0f04 = 3844`). `[verified]`
+- Example CH1 end frame: `53 04 00 82 02 00 db`. `[verified]`
+- **Subtype `0x03` (no fresh data)** is a real fourth reply, emitted when the acquire
+  poll finds no new block (this is the byte-level reason a too-deep store depth makes
+  `0x02` appear to "stop responding": it is answering `82 03`, not hanging). Verified
+  this session: an LA request while LA was idle returned `82 03 03` — subtype `0x03`,
+  channel byte `3`, no data frame. `[verified]`
+
+### 6.7 Logic Analyzer samples (channel code 5)
+
+`02 01 05` returns the digital pod. `[verified]`
+
+- **2 bytes per sample**, a **little-endian 16-bit word**: `word = raw[2i] |
+  (raw[2i+1] << 8)`. `[verified]`
+- **Bit N = digital channel D(N)** (D0 = LSB … D15 = MSB), the same bit order as
+  `LA-CHANNEL-STATE`: `Dn(i) = (word >> n) & 1`. `[verified]`
+- 3840 samples ⇒ 7680 bytes (or 3200 ⇒ 6400 when a menu panel is open). The SIZE frame
+  reports the **byte** count (§6.5), so divide by 2 for the sample count. `[verified]`
+- The vendor app **does** issue `02 01 05` over USB (contrary to earlier claims), but in
+  every capture the returned words were idle-zero (LA inputs quiet), so the *usefulness*
+  of the live LA-over-USB path is unresolved. `[gap]` The reliable way to view LA is the
+  rendered screen framebuffer (selector `0x20`), which already contains the firmware-drawn
+  D0–D15 rows.
+
+### 6.8 What you cannot read over USB
+
+- **No deep-memory readout.** The acquire command serves only the on-screen block
+  (3840/3200 samples). Raising `ACQURIE-STORE-DEPTH` does not enlarge the USB read —
+  beyond screen depth the device simply answers subtype `0x03` (no data). The vendor app
+  never issues any larger or alternate read; the deep record is genuinely not exposed on
+  the USB host link. `[verified]`
+- To capture the deep record (40K/512K/…​) you must go through the file path: have the
+  instrument write a CSV/reference file and read that file back over USB (selector
+  `0x10`). See §7.4 for the CSV format and the depth-driven sample rate.
+
+### 6.9 Open items for §6
+
+- **[gap]** the genuine off-screen **bimodal `0x0A`/`0xF2` block** (§6.2) — not the
+  clamp rails, not explained by the signed model.
+- **[gap]** the absolute **counts → volts offset** and whether the `+16`-count baseline
+  bias is a fixed instrument constant or a position-zero artifact (§7 gives the *scale*,
+  `Vdiv/25`, exactly; the *offset* is the missing piece).
+
+---
+
+## 7. Calibration & counts → volts
+
+Section 6 leaves samples in **counts** (25 counts/division). This section gives the
+exact conversion the instrument itself uses to turn counts into volts, and documents the
+analog front-end calibration pipeline that produces those counts. The conversion is
+**[verified]** against ground-truth CSVs the instrument exports; the pipeline stages are
+`[verified]` where a calibration file could be read back over USB and `[inferred]` where
+only the on-screen effect is observable.
+
+### 7.1 The exact conversion (matches the exported CSV to the digit)
+
+```
+volts = ( raw − zero_offset ) × Vdiv_uV_eff × probe / 25 000 000
+```
+
+| operand | meaning | units |
+|---|---|---|
+| `raw` | the sample value | counts (§6) |
+| `zero_offset` | per-channel ADC zero / vertical-position reference | counts |
+| `Vdiv_uV_eff` | effective volts/division, fine-vernier interpolated (§7.2) | **µV/div** |
+| `probe` | probe attenuation, one of `{1, 10, 100, 1000}` | — |
+| `25 000 000` | fixed constant | µV·count / (div·V) |
+
+The constant factors cleanly: **`25 000 000 = 25 counts/div × 1 000 000 µV/V`**.
+Substituting `Vdiv_uV_eff = Vdiv_V × 1 000 000`, everything cancels to
+
+```
+volts_per_count = Vdiv_V / 25          (exactly)
+```
+
+so **each count is `V/div ÷ 25` volts** — the same `DIV_UNIT = 25` the driver already
+uses, now shown to be the ADC's own counts-per-division, not an approximation. `[verified]`
+
+**Ground-truth check `[verified]`:** the exported `WaveData1410/1411.csv` were taken at
+**5 V/div, 1× probe**. `5 V/div ÷ 25 = 0.200 V/count`. The CSV voltage column is entirely
+multiples of **0.200** (`0.000, ±0.200, 1.000, 2.200, 3.000, −7.400, …`) → LSB = 0.2 V,
+and the header reports `#voltbase=5000000` (= 5 V/div expressed in µV; see §7.4). The
+formula reproduces the file exactly.
+
+### 7.2 The V/div ladder and the Fine vernier
+
+`Vdiv_uV_eff` starts from a **12-entry V/div ladder in microvolts** (this is the value
+stored in the exported CSV's `voltbase` header, §7.4):
+
+| V/div | 2 mV | 5 mV | 10 mV | 20 mV | 50 mV | 100 mV | 200 mV | 500 mV | 1 V | 2 V | 5 V | 10 V |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| µV/div | 2000 | 5000 | 10000 | 20000 | 50000 | 100000 | 200000 | 500000 | 1000000 | 2000000 | 5000000 | 10000000 |
+
+This is exactly the driver's `VB_TO_MV` table × 1000. The 10 V/div entry is the
+`VB = 0`-quirk range noted elsewhere. `[verified]`
+
+When the **Fine (vernier)** vertical adjust is engaged (`VERT-CHx-FINE = 1`), the
+effective V/div is interpolated toward the next-lower range:
+
+```
+Vdiv_uV_eff = table[vb] − fineV × table[vb−1] / 100
+```
+
+where `vb` is the V/div index and `fineV` is the vernier value. With the vernier at
+zero, `Vdiv_uV_eff = table[vb]` (nominal). `[verified]` scale · `[gap]` the exact unit of
+`fineV` (treated as 0..100 of a percent-style step).
+
+### 7.3 The 8-lane ADC pipeline (how counts are produced)
+
+The analog front-end is an **8-way time-interleaved ADC**: 8 lanes at **125 MHz each**
+→ **1 GSa/s** single-channel (4 lanes/channel → 500 MSa/s dual), matching the vendor
+manual's rate spec. `[inferred]` (manual + timing) Interleaving eight physical
+converters introduces per-lane gain/offset mismatch, so the instrument applies a
+two-stage per-lane correction before the sample reaches the host:
+
+```
+analog in
+  → 8 interleaved ADC lanes (ad1 … ad8)
+  → (1) per-lane DC offset      : add adc_off[lane]           (from /param/adc_off)
+  → (2) per-lane, per-code LUT  : remap each 8-bit code through a 256×8 int8 table
+                                   (linearization; enabled unless /linear_adc present)
+  → linearized int16 sample, mid-scale-centred, 25 counts/division
+  → clamp to signed int8 [−127, +127]  → the wire byte the host receives (§6)
+```
+
+Each stage corresponds to a calibration file that lives on the instrument filesystem and
+can be read back over USB with the file-read command (selector `0x10`) — that readability
+is why these are documented as observed artifacts rather than inference:
+
+| file | role | format |
+|---|---|---|
+| `/param/adc_off` | **stage 1** — per-lane DC offset | INI keys `[ad1_off]`…`[ad8_off]`, one signed byte per lane `[inferred]` (self-cal generated) |
+| `mult_adc.log` | **stage 2** — human-readable dump of the linearization table | ASCII, 3 blocks × 256 codes × 8 lanes of signed lane-correction values `[verified]` (readable) |
+| `chk1kb_091023` | **stage 2** — the binary form loaded into the FPGA | **8664 bytes**: 32-B header + 2 KB reserved + three 256×8 int8 blocks (`HALF`, `CH1`, `CH2`) + a factory self-cal trailer `[verified]` |
+| `/linear_adc` | **enable flag** for stage 2 | *presence* of this file **disables** linearization; **absence enables** it (counter-intuitive, verified from the loader behaviour) `[verified]` |
+
+The three linearization blocks are `HALF` (reduced-rate interleave, fewer lanes active),
+`CH1`, and `CH2` (full 8-lane per-channel tables). Each row maps a raw 8-bit code to a
+linearized, mid-scale-centred signed value (monotone ≈ −116 at code 0 → +125 at code
+255). `[verified]` The exact meaning of the 32-byte header and the self-cal trailer
+records is `[gap]`.
+
+The whole 8664-byte linearization image is also exposed on the command channel (leader
+`0x43`, region-2 read) as an ADC-config dump — it is **cal data, not samples**; do not
+mistake it for a deep-waveform readout. `[verified]`
+
+### 7.4 Two more calibration inputs (gain trim; display path only)
+
+- **4-point gain cal — `chk_base_volt`** (43-byte ASCII file, readable over USB): four
+  keyed integers = the ADC code recorded for a known reference on four V/div ranges:
+  ```
+  [8mv]195
+  [20mv]387
+  [400mv]405
+  [2000mv]2006
+  ```
+  These feed a per-range **software gain** used for the **on-screen / measurement**
+  readout. `[verified]`
+- **Per-range software gain trims** (≈1.0 ± a few %, e.g. 0.929 at 5 V/div, 0.899 at
+  10 V/div) are applied on the **display / measurement** path only. `[inferred]`
+
+> **Important:** the **CSV/save export path does NOT apply the software gain trims** —
+> it uses the plain `(raw − zero_offset) × Vdiv_uV_eff × probe / 25e6` of §7.1. So a
+> saved CSV is corrected only by the FPGA lane linearization, while the live on-screen
+> amplitude additionally carries the ±few-% software trim. A saved-CSV amplitude may
+> therefore differ from the screen readout by up to the trim (~7 % on the trimmed
+> ranges). `[inferred]` — confirm on hardware.
+
+### 7.5 The exported-CSV format (deep capture readout)
+
+Because the USB acquire cannot serve deep memory (§6.8), the route to a long contiguous
+record is: set the store depth, have the instrument save a CSV to its (internal) storage,
+and read that file back over USB. The file is one channel of `time, volts`:
+
+```
+#timebase=<n>(ns)
 ,#voltbase=<n>(mv/100)
-#size=<N samples>
-<time_s>,<volts>      ; N rows, one per sample
+#size=<N>
+<time_s>,<volts>            ; N data rows: printf "%0.5E,%0.3f"
 ...
 ```
 
-- **One channel per file** (`time, volts`); for a 2-wire decode (SPI/I²C) save
-  CH1 then CH2 from the *same stopped acquisition* → two index-aligned CSVs.
-- **Calibrated:** the value column is **volts directly** (scope-computed), so this
-  side-steps the open counts→volts calibration entirely for exported captures.
-- **Deeper = faster:** at 512K the sample step was **5 ns (200 MSa/s)** over a
-  2 ms span, vs 20 ns (50 MSa/s) at 4K — deep memory keeps the full sample rate
-  rather than decimating to the screen.
-- This is the route past the 3840-sample USB cap for **long contiguous
-  captures**; our decoders can run on these CSVs (threshold the volts column).
-  Screenshot save is separate: **`pic_<t>_<n>.bmp`** = 800×480×24 BMP (the LCD),
-  no samples.
-- **The saved CSV can be read straight back over USB** (no card removal): the
-  file-read handshake is fast and multi-frame (§4), so a 512K `WaveData*.csv`
-  (~7.7 MB) comes back in ~10 s via `read_file("/mnt/udisk/WaveDataXXXX.csv")`.
-  Combined with a `0x11` depth-set and a `0x13` Save-CSV key-trigger, this makes
-  **deep capture fully retrievable over USB** — the card just stays in the slot.
-- **Sample polarity (screen layout): smaller count = HIGHER on screen.**
-  Matching the scope's static layout needs an *inverted* Y axis: with CH2 at the
-  top of the scope reading bytes ~17–85 and CH1 at the bottom reading ~161–189,
-  the smaller bytes belong up top. **Caveat / open:** while a trace is *moved*
-  the byte can track the *opposite* way (a controlled on-screen raise of CH1
-  drove `VERT-CH1-POS` −82→−20 while the byte went 184→239, i.e. the wrong
-  direction for the static rule) — the vertical byte↔position mapping is
-  self-inconsistent, entangled with the unresolved amplitude-scaling bug below.
-  Match the static layout (invert); don't trust it for absolute volts yet.
-- **Horizontal scale: 200 samples per division** → sample interval =
-  `TDIV / 200`, sample rate = `200 / TDIV`. So a 3840-sample block spans
-  **19.2 divisions**. The vendor MSO5000-series manual states "sample interval
-  = s/div ÷ 200"; confirmed to the digit on our hardware (500 samples/period
-  of the 1 kHz cal at 400 µs/div → 2 µs interval → 0.5 MSa/s, and the cal
-  cycle count per block matches at every timebase). `decode_settings()` exposes
-  `SAMPLE-INTERVAL-ns` and `SAMPLERATE-HZ`; the block max rate is 500 MSa/s
-  (dual-channel) per the manual.
-- The size frame (`53 07 00 82 00 00 00 0f 00`) reports the byte count as a little
-  value inside `00 00 00 0f 00` → `0x0F00 = 3840`.
-- 8-bit samples, screen-oriented (see the polarity note below). Beyond that the
-  **vertical amplitude scale is NOT yet modelled** — see the open item below;
-  don't assume a fixed counts/div.
-- **Off-screen positioning yields CLIPPED / invalid bytes.** Part of a trace
-  moved past a graticule edge clamps to that rail (top ≈ `0x0A`, bottom
-  ≈ `0xF2`), and while a trace is scrolled across/through the screen a block can
-  come back **rail-to-rail bimodal** — ~50 % of samples at each rail, nothing in
-  between (the "full-height hash" seen when moving a trace off and back on
-  screen). In `../captures/mso5202d-ch1-vpos.pcapng` such blocks show e.g. 1919
-  samples at `0x0A` + 1921 at `0xF2`. **Display/decoding code must treat
-  rail-pinned samples (≈0/≈255) as clipped, not real** and can flag "off
-  screen" (the plotter does).
-- **Multi-channel readout — SOLVED (2026-07-08, extended 2026-07-09):** the
-  channel is selected by the **acquire value byte** `02 01 <ch>`: `00` = CH1,
-  `01` = CH2, `02` = Math, `05` = **LA** (16-bit words, 2 B/sample — see the
-  acquire-code map above). Verified on hardware with CH2's probe disconnected
-  (CH1 returned the square wave, CH2 its flat line);
-  `../captures/mso5202d-2ch-readout.pcapng` records 6 alternating CH1/CH2 acquire
-  pairs with their distinct 3840-sample responses. The `0x12` param is **not** a
-  channel select — early tests varying it returned identical data because it does
-  something else entirely
-  (the vendor app toggles it `1` → `0` around every refresh; run/hold?).
-  Values `12 01 02`/`03` make the next acquire return nothing. Note the vendor
-  captures (`session1/2`) were taken with **CH2 display off**, which is why
-  they never showed a CH2 fetch.
-- **Vertical byte encoding — SOLVED (2026-07-09).** A controlled single-channel
-  `VERT-CH1-POS` sweep (one channel, one V/div, one 1 kHz/5 V cal, moving the
-  trace bottom-off-screen → top-off-screen) with **POS read from the same frames**
-  pins the encoding exactly. Each sample byte is:
+Header decode (two of the labels are misleading — believe the numbers, not the units in
+parentheses):
 
-  **`byte = (VERT-CHx-POS + 16 + signal) mod 256`**
+| header | printed as | actual meaning | example |
+|---|---|---|---|
+| `#timebase` | `%d(ns)` | a **constant screen-timebase tag**, **NOT** the record's sample step | `4000000` |
+| `#voltbase` | `%d(mv/100)` | actually **µV/div** → `V/div = voltbase / 1 000 000` (the `(mv/100)` label is wrong) `[verified]` | `5000000` = 5 V/div |
+| `#size` | `%d` | number of data rows | `4064` / `40064` / `400064` |
 
-  where `VERT-CHx-POS` is the channel's position (1/25-div units) and `signal` is
-  the AC waveform in counts (**25 counts/division**, so ≈28 counts p-p for a 1-div
-  cal). Consequences — and the two bugs they cause a naïve decoder:
-  - **Baseline** `= (POS + 16) mod 256`, slope **exactly 1 byte per POS unit**
-    (verified: POS 18→byte 34, 50→66, 95→111; −57→213, −90→179 …).
-  - **Reversed sense:** the byte *rises* as the trace moves **up** (POS up). A
-    decoder that does `128 − byte` moves the trace the wrong way ("raise → app
-    descends").
-  - **8-bit wrap:** as the trace nears screen centre the baseline nears the byte
-    boundary (0/256), so the AC signal wraps around it → a **rail-to-rail "hash"**
-    block (~500-sample runs pinned to `≈0x08`/`≈0xF2` alternating with mid). This
-    is *not* a bad frame — it is the real signal, folded across the 8-bit edge.
-  - **Off-screen / parked:** far past ±4 div the block **flat-lines near mid-code
-    (~129)** — no data.
+- **The voltage column is volts already** (float, `%0.3f`), scope-computed via §7.1 —
+  it side-steps the counts→volts conversion entirely for exported captures. `[verified]`
+  (An earlier claim that the column held raw integer counts was mistaken.)
+- **The time column is real seconds** (`%0.5E`), `time_s = i × dt`, where `dt` is the
+  record's own sample step — **not** derived from the `#timebase` header. `[verified]`
+- **Deeper memory samples faster**, and the step is depth-driven:
 
-  **Correct decode** (undoes both the reverse and the wrap; recovers a clean trace
-  at every position, centre included):
-  ```
-  base   = (POS + 16) & 0xFF
-  signal = ((byte − base + 128) mod 256) − 128      # AC counts, unwrapped
-  y_div  = (POS + signal) / 25                       # divisions, up = positive
-  ```
-  This is what `mso5202d_plot.py` / `MSO5202D-rendering.md` implement. (Absolute
-  `counts→volts` is still uncalibrated — 25 counts/div is scale; the viewer shows
-  divisions, each = that channel's V/div.)
-- **Inter-channel PHASE — uncorrelated while RUNNING, aligned when STOPPED
-  (SOLVED 2026-07-10).** While the scope is running, each `02 01 <ch>` re-triggers
-  its own acquisition, so CH1 and CH2 come from different acquisitions ~100 ms
-  apart and their phase is uncorrelated (the CH1→CH2 first-edge offset jittered
-  66/89/30/94 samples across reads). **But STOP freezes ONE simultaneous
-  two-channel acquisition**, and both `02 01 00` and `02 01 01` then read out of
-  that same frozen buffer — phase-aligned. Verified: with the scope STOPped, three
-  back-to-back `02 01 00` reads are byte-identical (buffer frozen, not
-  re-captured), and an SPI clock+data pair captured this way decodes to a clean
-  consecutive-byte ramp. To get a *fresh* aligned pair you must RUN then STOP (a
-  scope left stopped holds a stale buffer): press Run/Stop (key 19) to run, let it
-  acquire, then press again to STOP. This is what `mso5202d_decode.py capture`
-  does, and it's what makes 2-wire serial decoding (SPI/I²C) possible — see
-  **§9. Serial-protocol decoding**.
+  | store depth | `#size` rows | sample step `dt` | sample rate |
+  |---|---|---|---|
+  | 4K | 4064 | **20 ns** | 50 MSa/s |
+  | 40K | 40064 | **5 ns** | 200 MSa/s |
+  | 512K | 400064 | **5 ns** | 200 MSa/s |
 
-### Reference rendering model (how to draw the trace like the scope)
+  So deep memory retains the fast rate rather than decimating to the screen; the record's
+  `dt` comes from the depth, not from `time/div ÷ 200`. `[verified]`
 
-A faithful trace is drawn from a **point list** `(x, y)` (x = sample index,
-y = sample value) using **fixed scale factors** — never a per-frame auto-fit;
-that fixed scale is what keeps the trace anchored like a real scope:
+- Note the **record length differs from the USB screen block**: the front-panel save
+  record is **4064** samples (20.32 div) at the shallowest depth, versus the **3840**
+  (or 3200) of the USB acquire — two distinct acquisition lengths, not a contradiction.
+  `[verified]`
+- The saved CSV is re-readable over USB via the file-read handshake (§4), fast enough
+  that a 512K CSV (~7.7 MB) returns in ~10 s. `[verified]`
+
+### 7.6 Open items for §7
+
+- **[gap]** the absolute **counts → volts offset** / the `+16`-count baseline bias of
+  §6.2 (the *scale* `Vdiv/25` is exact; the DC offset is not yet pinned).
+- **[gap]** whether the exported CSV `voltbase` is multiplied by the probe factor when a
+  10×/100× probe is selected (the `(mv/100)` label vs the observed µV magnitude should be
+  re-checked on a fresh capture at a known V/div).
+- **[gap]** whether a saved CSV's amplitude really differs from the on-screen readout by
+  the software gain trim (§7.4).
+- **[gap]** the exact unit of the Fine-vernier field (§7.2), and the semantics of the
+  `chk1kb` 32-byte header and self-cal trailer (§7.3).
+- **[gap]** `/param/adc_off` and `/linear_adc` are produced by on-instrument self-cal;
+  their formats are documented from behaviour but were not observed as file data in the
+  captures reviewed.
+
+## 8. Settings-state blob (poll `0x01` / write `0x11`)
+
+This is the heart of the device's control surface: **one 213-byte block that mirrors
+the entire instrument front panel.** You read it with selector `0x01` and write it
+back with selector `0x11`. The block is **byte-identical in both directions**, so all
+host control is *read-modify-write*: poll the block, change the bytes you care about,
+send it back. Every enum, unit, and offset below is drawn from the on-device field
+list `/protocol.inf` (which declares `[TOTAL] 213` and one `[NAME] WIDTH` line per
+field) and was confirmed by decoding the poll response while sweeping each menu on the
+hardware (the `scope_dump/captures_wireshark/*.pcapng` menu-sweep set). [verified]
+
+### 8.1 The two frames that carry the block
 
 ```
-x_px = left_margin − ftol(x · HzRatio)                 ; HzRatio from time/div
-y_px = pivot + ftol(y · VtRatio) + displacement        ; VtRatio from V/div
+POLL request  (host → scope):  53 02 00 01 56
+POLL response (scope → host):  53 D7 00 81 <213 param bytes> <ck>      (218 B total)
+WRITE         (host → scope):  53 D7 00 11 <213 param bytes> <ck>      (218 B total)
+WRITE ack     (scope → host):  53 03 00 91 <status> <ck>              (status 00=ok, FF=reject)
 ```
 
-- **`VtRatio`** (vertical) and **`HzRatio`** (horizontal) are floats derived from
-  the channel's V/div and the timebase; both are set once per acquisition and
-  applied uniformly. `ftol` = truncate-to-int.
-- **`pivot`** = the graticule centre (window dimension ÷ 2). The grid is **8×10
-  divisions**; horizontal density is **200 points/division**.
-- **`displacement`** = the channel's vertical placement — for analog this is
-  `VERT-CHx-POS` (1/25-div units → divisions); for LA it is the per-channel row
-  baseline.
-- Consecutive mapped points are joined by **line segments** (Vectors mode;
-  `DISPLAY-MODE`=1 draws Dots instead) with a per-channel colour.
+- `len` field = `0x00D7` = 215 = `framelen − 3` (1 selector byte + 213 params + no size prefix). [verified]
+- `ck = Σ(bytes[0 .. framelen-2]) & 0xFF`, or the wildcard `0x66` (§3). [verified]
+- The poll response echoes selector `0x01 | 0x80 = 0x81`; the write echoes `0x11 | 0x80 = 0x91`. [verified]
+- **Write status byte:** `00` = accepted, `FF` = rejected (e.g. an out-of-range value or a `TRIG-SRC` disallowed for the current `TRIG-TYPE`). Only `00` observed on the wire; `FF` is [inferred].
+- There is **no per-field addressing** — `0x11` always ships the whole block. To change one field: poll, patch, re-checksum, write. [verified]
 
-**Special sample values (sentinels — must be handled, not plotted as data):**
-- `y == 0xFFFF_F9F2` (−1550) → **pen-up / gap**: the trace breaks here (do not
-  connect across it). Corresponds to the off-screen/rail-pinned samples in §5.
-- `y == 0xFFFF_FB30` (−1232) → **trigger-column marker**, drawn at the trigger
-  sample index.
+### 8.2 Offset conventions
 
-**Analog:** one polyline per channel; `VtRatio` from V/div, `pivot` = centre,
-`displacement` = `VERT-CHx-POS`.
+| column | meaning |
+|---|---|
+| **blk** | byte offset **within the 213-byte parameter block**, `0 … 212` (this is the `/protocol.inf` order) |
+| **frm** | byte offset in the **raw USB frame** = `blk + 4` (the leader `53`, the LE16 length, and the `81`/`11` selector-echo occupy frame bytes 0…3) |
 
-**LA:** the *same* point→pixel mapping, but the 16 digital channels are each
-drawn in their **own row** (per-channel `displacement`); every Dn is a 0/1
-square wave scaled by `VtRatio` to a small row height, with the D0–D15 labels
-and the enabled/selected-channel row highlight drawn alongside.
+The block is **fully contiguous** — there are no reserved or padding bytes. `Σ width = 213`,
+which exactly matches `/protocol.inf`'s `[TOTAL] 213`. [verified] All multi-byte fields
+are **little-endian**. Signed fields (type `i16`/`i64`) are two's-complement; the complete
+signed set is: `VERT-CH1-POS`, `VERT-CH2-POS`, `TRIG-VPOS`, `TRIG-SLOPE-V1`,
+`TRIG-SLOPE-V2`, `HORIZ-TRIGTIME`, `LA-D7-D0-USER-THRESHOLD-VOLT`,
+`LA-D15-D8-USER-THRESHOLD-VOLT`. **Every 8-byte TIME field is `int64` picoseconds**
+(proof in §8.4). [verified]
 
-The practical fix for a naïve plotter: stop auto-scaling to the data's min/max;
-instead scale vertically by a **fixed** counts-per-division, place each channel
-by its `VERT-CHx-POS`, frame it on an 8×10 grid, and break the line at the gap
-sentinel.
+### 8.3 The datasheet — all 213 bytes / 118 fields
+
+**Tag legend:** `V` = [verified] on the wire / on hardware · `I` = [inferred] (cross-referenced
+capture or panel label, not exercised over USB) · `G` = [gap] (function/units unknown).
+`observed` = the literal value-set seen across all menu-sweep captures.
+
+| field | blk | frm | w | type | units | enum (code → meaning) | range / observed | tag |
+|---|--:|--:|--:|---|---|---|---|:--:|
+| **VERT-CH1-DISP** | 0 | 4 | 1 | u8 | — | 0=hidden 1=shown | {0,1} | V |
+| **VERT-CH1-VB** | 1 | 5 | 1 | u8 | V/div idx | → `VB_TO_MV` (§8.4) | 0…10 | V |
+| **VERT-CH1-COUP** | 2 | 6 | 1 | u8 | — | 0=DC 1=AC 2=GND | {0,1,2} | V |
+| **VERT-CH1-20MHZ** | 3 | 7 | 1 | u8 | — | 0=Full 1=20 MHz BW-limit | {0,1} | V |
+| **VERT-CH1-FINE** | 4 | 8 | 1 | u8 | — | 0=Coarse 1=Fine | {0,1} | V |
+| **VERT-CH1-PROBE** | 5 | 9 | 1 | u8 | — | 0=1× 1=10× 2=100× 3=1000× | {0,1,2,3} | V |
+| **VERT-CH1-RPHASE** | 6 | 10 | 1 | u8 | — | 0=Off 1=On (invert) | {0,1} | V |
+| **VERT-CH1-CNT-FINE** | 7 | 11 | 1 | u8 | fine-gain step count | counter, active when `FINE=1` | {0,20,30} | G |
+| **VERT-CH1-POS** | 8 | 12 | 2 | i16 | 1/25 div (25 cnt/div, up=+) | signed vertical position | −104…103 (≈±4 div seen; ±200=±8 div travel) | V |
+| **VERT-CH2-DISP** | 10 | 14 | 1 | u8 | — | 0=hidden 1=shown | {0,1} | V |
+| **VERT-CH2-VB** | 11 | 15 | 1 | u8 | V/div idx | → `VB_TO_MV` | 0…10 | V |
+| **VERT-CH2-COUP** | 12 | 16 | 1 | u8 | — | 0=DC 1=AC 2=GND | {0,1,2} | V |
+| **VERT-CH2-20MHZ** | 13 | 17 | 1 | u8 | — | 0=Full 1=20 MHz | {0,1} | V |
+| **VERT-CH2-FINE** | 14 | 18 | 1 | u8 | — | 0=Coarse 1=Fine | {0,1} | V |
+| **VERT-CH2-PROBE** | 15 | 19 | 1 | u8 | — | 0=1× 1=10× 2=100× 3=1000× | {0,1,2,3} | V |
+| **VERT-CH2-RPHASE** | 16 | 20 | 1 | u8 | — | 0=Off 1=On (invert) | {0,1} | V |
+| **VERT-CH2-CNT-FINE** | 17 | 21 | 1 | u8 | fine-gain step count | active when `FINE=1` | {0,20} | G |
+| **VERT-CH2-POS** | 18 | 22 | 2 | i16 | 1/25 div | signed vertical position | −97…50 | V |
+| **TRIG-STATE** | 20 | 24 | 1 | u8 | — | 0=STOP 1=WAIT/Ready 2=AUTO(untrig) 3=TRIG'D 4=SCAN/roll 5=SINGLE(armed) 6=re-arm | {0,1,2,3,5} seen; **4,6 = I** | V/I |
+| **TRIG-TYPE** | 21 | 25 | 1 | u8 | — | 0=Edge 1=Video 2=Pulse 3=Slope 4=Overtime 5=Alter | {0…5} | V |
+| **TRIG-SRC** | 22 | 26 | 1 | u8 | — | 0=CH1 1=CH2 2=EXT 3=EXT/5 4=AC-line | {0…4}; set restricted per type (§8.5) | V |
+| **TRIG-MODE** | 23 | 27 | 1 | u8 | — | 0=Auto 1=Normal | {0,1}; write mirrors to both `SWAP-CHx-MODE` | V |
+| **TRIG-COUP** | 24 | 28 | 1 | u8 | — | 0=DC 1=AC 2=NoiseRej 3=HFRej 4=LFRej | {0…4} | V |
+| **TRIG-VPOS** | 25 | 29 | 2 | i16 | 1/25 div of source | trigger LEVEL; volts = (VPOS−POS_src)·Vdiv/25 | −200…31000 (scales w/ V/div, §8.5) | V |
+| **TRIG-FREQUENCY** | 27 | 31 | 8 | u64 | **milliHz** | HW freq counter of trig source (read-only); 1 000 000 = 1.000 kHz | 0…2 083 000 | V |
+| **TRIG-HOLDTIME-MIN** | 35 | 39 | 8 | u64 | ps | **FIXED** capability bound (read-only) | 100000 (100 ns) | V |
+| **TRIG-HOLDTIME-MAX** | 43 | 47 | 8 | u64 | ps | **FIXED** capability bound (read-only) | 10 000 000 000 000 (10 s) | V |
+| **TRIG-HOLDTIME** | 51 | 55 | 8 | u64 | ps | live holdoff (Horizontal menu → F4); knob-push→100000 | 100 ns…10 s | V |
+| **TRIG-EDGE-SLOPE** | 59 | 63 | 1 | u8 | — | 0=Rising 1=Falling | {0,1} | V |
+| **TRIG-VIDEO-NEG** | 60 | 64 | 1 | u8 | — | 0=Normal 1=Inverted | {0,1} | V |
+| **TRIG-VIDEO-PAL** | 61 | 65 | 1 | u8 | — | 0=NTSC 1=PAL/SECAM | {0,1} | V |
+| **TRIG-VIDEO-SYN** | 62 | 66 | 1 | u8 | — | 0=AllLines 1=LineNum 2=OddField 3=EvenField 4=AllFields | {0…4} | V |
+| **TRIG-VIDEO-LINE** | 63 | 67 | 2 | u16 | line # | used when `SYN=1`; 1…525 NTSC / 1…625 PAL | 1…525 seen (upper=I) | V |
+| **TRIG-PULSE-NEG** | 65 | 69 | 1 | u8 | — | 0=Positive 1=Negative pulse | {0,1} | V |
+| **TRIG-PULSE-WHEN** | 66 | 70 | 1 | u8 | — | 0='=' 1='≠' 2='>' 3='<' | {0…3} | V |
+| **TRIG-PULSE-TIME** | 67 | 71 | 8 | u64 | ps | pulse width; min 20 000 (20 ns) … 10 s | ≥20000 | V |
+| **TRIG-SLOPE-SET** | 75 | 79 | 1 | u8 | — | 0=Positive 1=Negative slope | {0,1} | V |
+| **TRIG-SLOPE-WIN** | 76 | 80 | 1 | u8 | — | 0=V1(upper) 1=V2(lower) 2=Both | {0,1,2} | V |
+| **TRIG-SLOPE-WHEN** | 77 | 81 | 1 | u8 | — | 0='=' 1='≠' 2='>' 3='<' | {0…3} | V |
+| **TRIG-SLOPE-V1** | 78 | 82 | 2 | i16 | 1/25 div of source | upper threshold (same volts cal as level) | V1 > V2 (e.g. 47…77) | V |
+| **TRIG-SLOPE-V2** | 80 | 84 | 2 | i16 | 1/25 div of source | lower threshold | −52…67 | V |
+| **TRIG-SLOPE-TIME** | 82 | 86 | 8 | u64 | ps | slope time; min 20 000 (20 ns) … 10 s | ≥20000 | V |
+| **TRIG-SWAP-CH1-TYPE** | 90 | 94 | 1 | u8 | — | 0=Edge 1=Video 2=Pulse 3=Overtime (**4-value**, no Slope/Alter) | {0…3} | V |
+| **TRIG-SWAP-CH1-MODE** | 91 | 95 | 1 | u8 | — | 0=Auto 1=Normal (mirror of `TRIG-MODE`) | {0,1} | V |
+| **TRIG-SWAP-CH1-COUP** | 92 | 96 | 1 | u8 | — | 0=DC 1=AC 2=NoiseRej 3=HFRej 4=LFRej | {0…4} | V |
+| **TRIG-SWAP-CH1-EDGE-SLOPE** | 93 | 97 | 1 | u8 | — | 0=Rising 1=Falling | {0,1} | V |
+| **TRIG-SWAP-CH1-VIDEO-NEG** | 94 | 98 | 1 | u8 | — | 0=Normal 1=Inverted | {0,1} | V |
+| **TRIG-SWAP-CH1-VIDEO-PAL** | 95 | 99 | 1 | u8 | — | 0=NTSC 1=PAL/SECAM | {0,1} | V |
+| **TRIG-SWAP-CH1-VIDEO-SYN** | 96 | 100 | 1 | u8 | — | 0…4 (= `TRIG-VIDEO-SYN`) | {0…4} | V |
+| **TRIG-SWAP-CH1-VIDEO-LINE** | 97 | 101 | 2 | u16 | line # | as `TRIG-VIDEO-LINE` | 1…24 seen | V |
+| **TRIG-SWAP-CH1-PULSE-NEG** | 99 | 103 | 1 | u8 | — | 0=Positive 1=Negative | {0,1} | V |
+| **TRIG-SWAP-CH1-PULSE-WHEN** | 100 | 104 | 1 | u8 | — | 0…3 (=/≠/>/<) | {0…3} | V |
+| **TRIG-SWAP-CH1-PULSE-TIME** | 101 | 105 | 8 | u64 | ps | min 20 000 (20 ns) | ≥20000 | V |
+| **TRIG-SWAP-CH1-OVERTIME-NEG** | 109 | 113 | 1 | u8 | — | 0=Positive 1=Negative | {0,1} | V |
+| **TRIG-SWAP-CH1-OVERTIME-TIME** | 110 | 114 | 8 | u64 | ps | min 20 000 (20 ns) | ≥20000 | V |
+| **TRIG-SWAP-CH2-TYPE** | 118 | 122 | 1 | u8 | — | 0=Edge 1=Video 2=Pulse 3=Overtime | {0…3} | V |
+| **TRIG-SWAP-CH2-MODE** | 119 | 123 | 1 | u8 | — | 0=Auto 1=Normal | {0,1} | V |
+| **TRIG-SWAP-CH2-COUP** | 120 | 124 | 1 | u8 | — | 0…4 (coupling) | {0…4} | V |
+| **TRIG-SWAP-CH2-EDGE-SLOPE** | 121 | 125 | 1 | u8 | — | 0=Rising 1=Falling | {0,1} | V |
+| **TRIG-SWAP-CH2-VIDEO-NEG** | 122 | 126 | 1 | u8 | — | 0=Normal 1=Inverted | {0,1} | V |
+| **TRIG-SWAP-CH2-VIDEO-PAL** | 123 | 127 | 1 | u8 | — | 0=NTSC 1=PAL/SECAM | {0,1} | V |
+| **TRIG-SWAP-CH2-VIDEO-SYN** | 124 | 128 | 1 | u8 | — | 0…4 | {0…4} | V |
+| **TRIG-SWAP-CH2-VIDEO-LINE** | 125 | 129 | 2 | u16 | line # | as `TRIG-VIDEO-LINE` | 0…525 seen | V |
+| **TRIG-SWAP-CH2-PULSE-NEG** | 127 | 131 | 1 | u8 | — | 0=Positive 1=Negative | {0,1} | V |
+| **TRIG-SWAP-CH2-PULSE-WHEN** | 128 | 132 | 1 | u8 | — | 0…3 | {0…3} | V |
+| **TRIG-SWAP-CH2-PULSE-TIME** | 129 | 133 | 8 | u64 | ps | pulse width | ≥20000 | V |
+| **TRIG-SWAP-CH2-OVERTIME-NEG** | 137 | 141 | 1 | u8 | — | 0=Positive 1=Negative | {0,1} | V |
+| **TRIG-SWAP-CH2-OVERTIME-TIME** | 138 | 142 | 8 | u64 | ps | overtime | ≥20000 | V |
+| **TRIG-OVERTIME-NEG** | 146 | 150 | 1 | u8 | — | 0=Positive 1=Negative | {0,1} | V |
+| **TRIG-OVERTIME-TIME** | 147 | 151 | 8 | u64 | ps | overtime; min 20 000 … 10 s (SRC = CH1/CH2 only) | ≥20000 | V |
+| **HORIZ-TB** | 155 | 159 | 1 | u8 | time/div idx | → `TB_TO_NS`; **acquisition TB, floors at idx 6 = 200 ns** | {6…31} | V |
+| **HORIZ-WIN-TB** | 156 | 160 | 1 | u8 | time/div idx | → `TB_TO_NS`; knob/displayed TB, full range | {0…31} | V |
+| **HORIZ-WIN-STATE** | 157 | 161 | 1 | u8 | — | window/zoom state — **always 0** in every capture | {0} | G |
+| **HORIZ-TRIGTIME** | 158 | 162 | 8 | **i64** | **signed ps** | horizontal delay (neg = post-trigger); knob-push→0 | −4.06e9 … 5e13 | V |
+| **MATH-DISP** | 166 | 170 | 1 | u8 | — | 0=off 1=on | {0,1} | V |
+| **MATH-MODE** | 167 | 171 | 1 | u8 | — | 0=CH1+CH2 1=CH1−CH2 2=CH2−CH1 3=CH1×CH2 4=CH1/CH2 5=CH2/CH1 6=FFT | {0…6} | V |
+| **MATH-FFT-SRC** | 168 | 172 | 1 | u8 | — | 0=CH1 1=CH2 | {0,1} | V |
+| **MATH-FFT-WIN** | 169 | 173 | 1 | u8 | — | 0=Hanning 1=Flattop 2=Rectangular (**only 3 exist**) | {0,1,2} | V |
+| **MATH-FFT-FACTOR** | 170 | 174 | 1 | u8 | — | 0=×1 1=×2 2=×5 3=×10 (FFT zoom) | {0…3} | V |
+| **MATH-FFT-DB** | 171 | 175 | 1 | u8 | dB/div | 0=1 1=2 2=5 3=10 4=20 | {0…4} | V |
+| **DISPLAY-MODE** | 172 | 176 | 1 | u8 | — | 0=Vectors 1=Dots | {0,1} | V |
+| **DISPLAY-PERSIST** | 173 | 177 | 1 | u8 | — | 0=Auto 2=0.2 s 4=0.4 s 8=0.8 s 10=1.0 s 11=2.0 s 13=4.0 s 17=8.0 s 19=Infinity | {0,2,4,8,10,11,13,17,19} | V |
+| **DISPLAY-FORMAT** | 174 | 178 | 1 | u8 | — | 0=XT 1=XY 2=FFT (FFT mode forces 2) | {0,1,2} | V |
+| **DISPLAY-CONTRAST** | 175 | 179 | 1 | u8 | 0…15 | waveform intensity | {0…15} | V |
+| **DISPLAY-MAXCONTRAST** | 176 | 180 | 1 | u8 | — | **FIXED 15** upper limit (read-only) | {15} | V |
+| **DISPLAY-GRID-KIND** | 177 | 181 | 1 | u8 | — | 0=Off 1=Dotted 2=RealLine | {0,1,2} | V |
+| **DISPLAY-GRID-BRIGHT** | 178 | 182 | 1 | u8 | 0…15 | grid intensity | {0…15} | V |
+| **DISPLAY-MAXGRID-BRIGHT** | 179 | 183 | 1 | u8 | — | **FIXED 15** upper limit (read-only) | {15} | V |
+| **ACQURIE-MODE** | 180 | 184 | 1 | u8 | — | 0=Normal 1=Peak 2=Average | {0,1,2} | V |
+| **ACQURIE-AVG-CNT** | 181 | 185 | 1 | u8 | avg idx | → `ACQ_AVG_COUNTS` (0…5 = 4/8/16/32/64/128) | {0…5} | V |
+| **ACQURIE-TYPE** | 182 | 186 | 1 | u8 | — | 0=Realtime 1=Equ-time | {0,1} | V |
+| **ACQURIE-STORE-DEPTH** | 183 | 187 | 1 | u8 | — | 0=4K 4=40K 6=512K 7=1M (gaps 1/2/3/5 = greyed depths) | {0,4,6,7} | V |
+| **MEASURE-ITEM1-SRC** | 184 | 188 | 1 | u8 | — | 0=CH1 1=CH2 3=LA (2 unused, no Math src) | {0,1,3} | V |
+| **MEASURE-ITEM1** | 185 | 189 | 1 | u8 | — | measure type → §8.4 enum (0=Off) | {0…19 on wire} | V |
+| **MEASURE-ITEM2-SRC** | 186 | 190 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM2** | 187 | 191 | 1 | u8 | — | measure type | ≤19 | V |
+| **MEASURE-ITEM3-SRC** | 188 | 192 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM3** | 189 | 193 | 1 | u8 | — | measure type | ≤19 | V |
+| **MEASURE-ITEM4-SRC** | 190 | 194 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM4** | 191 | 195 | 1 | u8 | — | measure type | ≤19 | V |
+| **MEASURE-ITEM5-SRC** | 192 | 196 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM5** | 193 | 197 | 1 | u8 | — | measure type | ≤19 | V |
+| **MEASURE-ITEM6-SRC** | 194 | 198 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM6** | 195 | 199 | 1 | u8 | — | measure type | ≤19 | V |
+| **MEASURE-ITEM7-SRC** | 196 | 200 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM7** | 197 | 201 | 1 | u8 | — | measure type | ≤19 | V |
+| **MEASURE-ITEM8-SRC** | 198 | 202 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
+| **MEASURE-ITEM8** | 199 | 203 | 1 | u8 | — | measure type | ≤19 | V |
+| **CONTROL-TYPE** | 200 | 204 | 1 | u8 | — | menu-event kind — **always 0** in every capture | {0} | G |
+| **CONTROL-MENUID** | 201 | 205 | 1 | u8 | — | active on-screen menu id (full map in §9) | {1…63} | V |
+| **CONTROL-DISP-MENU** | 202 | 206 | 1 | u8 | — | 0=menu closed 1=menu shown; **governs acquire width 3840↔3200** (§ acquire) | {0,1} | V |
+| **LA-SWI** | 203 | 207 | 1 | u8 | — | 0=LA off 1=LA on | {0,1} | V |
+| **LA-CHANNEL-STATE** | 204 | 208 | 2 | u16 | bitmask | bit N = D(N) enabled (D0=LSB; lo byte=D0–7, hi byte=D8–15; all-on=0xFFFF) | 0…65535 | V |
+| **LA-CURRENT-CHANNEL** | 206 | 210 | 1 | u8 | — | selected digital channel 0…15 | {0…15} | V |
+| **LA-D7-D0-THRESHOLD-TYPE** | 207 | 211 | 1 | u8 | — | 0=TTL 1=CMOS 2=ECL 3=User | {0…3} | V |
+| **LA-D15-D8-THRESHOLD-TYPE** | 208 | 212 | 1 | u8 | — | 0=TTL 1=CMOS 2=ECL 3=User | {0…3} | V |
+| **LA-D7-D0-USER-THRESHOLD-VOLT** | 209 | 213 | 2 | i16 | volts = raw/4096 | user thr (12-bit DAC = code<<4, raw%16==0; ±8 V, ≈3.9 mV step); used when type=3 | −32336…32656 | V |
+| **LA-D15-D8-USER-THRESHOLD-VOLT** | 211 | 215 | 2 | i16 | volts = raw/4096 | user thr; used when type=3 | −32336…32656 | V |
+
+Block ends at **blk 213 / frm 217** (the checksum byte follows). `Σ width = 213`. ✓
+
+> **Worked decode example.** A poll response begins
+> `53 D7 00 81 | 01 09 00 01 01 00 00 00 CA 00 …` The first param byte `01` (blk 0) =
+> `VERT-CH1-DISP` = shown; `09` (blk 1) = `VERT-CH1-VB` = **2 V/div**; `00 00`... then at
+> blk 8 the LE i16 `CA 00` = `VERT-CH1-POS` = +202 (off-scale high in that grab). To change
+> only CH1 coupling to AC: patch frm byte 6 (blk 2) to `01`, recompute `ck`, and send the
+> full block back as `53 D7 00 11 …`. [verified]
+
+### 8.4 Conversion tables (every code)
+
+**`VB_TO_MV`** — `VERT-CHx-VB` index → mV/div. Verified end-to-end by stepping the V/div knob in
+`mso5202d-ch1-vdiv.pcapng` / `-ch2-vdiv.pcapng`.
+
+| idx | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|--|--|--|--|--|--|--|--|--|--|--|
+| mV/div | 2 | 5 | 10 | 20 | 50 | 100 | 200 | 500 | 1000 | 2000 | 5000 |
+
+> **VB = 0 quirk.** The knob ladder wraps `… → 9 (2 V) → 10 (5 V) → 0 (2 mV) → 1 …`, i.e. **10 V/div
+> also lands on index 0**. So index `0` is ambiguous — it means 2 mV/div *or* 10 V/div (12 physical
+> sensitivities on 11 codes). Disambiguate from `TRIG-VPOS` magnitude when a level is set (a 2 mV/div
+> level pushes `VPOS` into the thousands; §8.5), or from the trace scale. The stored `VB` index is
+> unaffected by `VERT-CHx-PROBE` (probe scales only the *displayed* V/div label). [verified]
+
+**`TB_TO_NS`** — `HORIZ-TB` / `HORIZ-WIN-TB` index → ns/div. A **2-4-8 decade ladder**, 32 steps,
+verified in `mso5202d-timediv.pcapng`.
+
+| idx | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|
+| /div | 2 ns | 4 ns | 8 ns | 20 ns | 40 ns | 80 ns | 200 ns | 400 ns | 800 ns | 2 µs | 4 µs | 8 µs | 20 µs | 40 µs | 80 µs | 200 µs |
+| **idx** | **16** | **17** | **18** | **19** | **20** | **21** | **22** | **23** | **24** | **25** | **26** | **27** | **28** | **29** | **30** | **31** |
+| /div | 400 µs | 800 µs | 2 ms | 4 ms | 8 ms | 20 ms | 40 ms | 80 ms | 200 ms | 400 ms | 800 ms | 2 s | 4 s | 8 s | 20 s | 40 s |
+
+> `HORIZ-WIN-TB` (the knob/displayed timebase) covers the full 0…31. **`HORIZ-TB` (the *acquisition*
+> timebase) floors at idx 6 = 200 ns** — for knob positions 0…5 (2…80 ns/div) the acquisition stays at
+> idx 6 while the display digitally zooms in (observed set `{6…31}`, never below 6; at the boundary
+> `HORIZ-TB` may briefly lead by one index). This is why the fast end reaches 2 ns/div on screen but the
+> sampler never runs finer than 200 ns/div-equivalent. [verified]
+
+**`ACQ_AVG_COUNTS`** — `ACQURIE-AVG-CNT` index → averages, `= 4·2ⁿ`:
+
+| idx | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|--|--|--|--|--|--|
+| averages | 4 | 8 | 16 | 32 | 64 | 128 |
+
+**MEASURE type enum** — `MEASURE-ITEMn`. Codes **0–19 are [verified]** on the wire (observed set
+{0-11,13,17,19} across the `mso5202d-measure.pcapng` ITEM-8 sweep). Codes **12, 14, 15, 16, 18 and
+20–31 are [inferred]** from on-screen menu labels only — never seen over USB.
+
+| code | meaning | tag | code | meaning | tag |
+|--:|---|:--:|--:|---|:--:|
+| 0 | Off | V | 16 | Vbase | I |
+| 1 | Frequency | V | 17 | Vtop | V |
+| 2 | Period | V | 18 | Vmid | I |
+| 3 | Mean | V | 19 | Vamp | V |
+| 4 | Pk-Pk | V | 20 | Overshoot | I |
+| 5 | Cyc RMS | V | 21 | Preshoot | I |
+| 6 | Minimum | V | 22 | Period Mean | I |
+| 7 | Maximum | V | 23 | Period RMS | I |
+| 8 | Rise Time | V | 24 | FOvershoot | I |
+| 9 | Fall Time | V | 25 | RPreshoot | I |
+| 10 | +Width | V | 26 | Burst Width | I |
+| 11 | −Width | V | 27 | FRF | I |
+| 12 | Delay1-2 Rise | I | 28 | FFR | I |
+| 13 | Delay1-2 Fall | V | 29 | LRR | I |
+| 14 | +Duty | I | 30 | LRF | I |
+| 15 | −Duty | I | 31 | LFR | I |
+
+**The picosecond ladder (proof every 8-byte TIME field is `int64` ps, not IEEE-754 double).** The
+`TIME`/`HOLDTIME`/`TRIGTIME` fields on the wire are always clean base-10 integers drawn from a 1-2-5
+decade ladder spanning 5 ns … 10 s: `5000, 10000, 20000, 50000, 100000, 200000, 500000, 1e6, 2e6, 5e6,
+1e7, 2e7, 5e7, 1e8, 2e8, 5e8, 1e9, 2e9, 5e9, 1e10 … 1e13`. Concretely, a 500 ns pulse width serializes
+as `TRIG-PULSE-TIME = 500000` → LE bytes `20 A1 07 00 00 00 00 00`; the 10 s holdoff ceiling is
+`10000000000000` → `00 A0 72 4E 18 09 00 00`. If these were IEEE-754 doubles, `500000.0` would instead
+appear as `00 00 00 00 80 84 1E 41` (= the integer 4692333547057315840). The wire shows the plain
+integer, so the encoding is unambiguously **`int64` picoseconds**. Minimum-width fields floor at
+`20000` (20 ns). [verified]
+
+### 8.5 Field-behaviour notes
+
+- **`TRIG-MODE` fans out.** A single `TRIG-MODE` change writes `TRIG-MODE`, `TRIG-SWAP-CH1-MODE`, and
+  `TRIG-SWAP-CH2-MODE` to the same value **in one frame** (seen 0→1 together in `mso5202d-trig-edge.pcapng`
+  frame 208, and 1→0 in frame 218). Treat them as one logical field; when writing, set all three. The
+  untriggered `TRIG-STATE` follows: Auto→2, Normal→1. [verified]
+
+- **`VERT-CHx-RPHASE = 1` reflects the trigger level.** Inverting the *source* channel negates the signed
+  trigger level about `POS_src`. Exact pair from `mso5202d-ch1-menu.pcapng` (CH1 POS=68, VB=10=5 V/div):
+  `RPHASE 0 → TRIG-VPOS 81` (81−68 = +13 → +2.6 V) flips to `RPHASE 1 → TRIG-VPOS 55` (55−68 = −13 → −2.6 V).
+  Inverting the non-source channel does nothing to the level. [verified]
+
+- **Knob-push resets** (from `mso5202d-pos-knob-push.pcapng` / `-trig-knob.pcapng`):
+  vertical position push → `VERT-CHx-POS = 0` (centre); horizontal position push → `HORIZ-TRIGTIME = 0`;
+  holdoff knob push → `TRIG-HOLDTIME = 100000` (100 ns); trigger-level knob push → `TRIG-VPOS := POS_src`
+  (level = 0 V / channel ground). Distinct from the **"Set 50 %"** softkey, which snaps `TRIG-VPOS` to the
+  signal's mid-amplitude. [verified]
+
+- **`TRIG-VPOS` scales with V/div — it is NOT clamped to ±200.** The field stores the level in 1/25-div of
+  the *current* V/div, and the instrument rescales it when V/div changes so the *absolute volts* are
+  preserved. Holding a fixed +2.480 V level while stepping V/div (from `mso5202d-ch1-vdiv.pcapng`,
+  CH1 POS=0):
+
+  | VB | V/div | TRIG-VPOS | VPOS·Vdiv/25 |
+  |--:|--|--:|--|
+  | 9 | 2 V | 31 | 2480 mV |
+  | 8 | 1 V | 62 | 2480 mV |
+  | 7 | 500 mV | 124 | 2480 mV |
+  | 6 | 200 mV | 310 | 2480 mV |
+  | 5 | 100 mV | 620 | 2480 mV |
+  | 0 | 2 mV | 31000 | 2480 mV |
+
+  So `TRIG-VPOS` reaches **~31000 at 2 mV/div**. The familiar **±200 = ±8 div** figure is only the
+  on-screen *knob-travel* limit at a fixed V/div, not the field's range. Volts (CH1/CH2 sources):
+  `level_V = (TRIG-VPOS − POS_src) × Vdiv/25`, where `POS_src = VERT-CH{src}-POS`. `TRIG-SLOPE-V1/V2` use
+  the identical calibration. (EXT/EXT-5/AC-line level→volts is not derivable from the blob — [gap].) [verified]
+
+- **`TRIG-SRC` is restricted by `TRIG-TYPE`.** Edge = all 5 (CH1/CH2/EXT/EXT-5/AC-line);
+  Video/Pulse/Slope = CH1/CH2/EXT/EXT-5 (no AC-line); **Overtime = CH1/CH2 only** (confirmed:
+  `mso5202d-trig-overtime.pcapng` SRC ∈ {0,1}). A write with a disallowed source is expected to be
+  rejected with write-status `FF`. [verified / rejection = inferred]
+
+- **Alter mode leaves the main sub-params stale — read the SWAP blocks.** When `TRIG-TYPE = 5` (Alter),
+  the *main* Video/Pulse/Slope/Overtime fields are no longer maintained and read back garbage. In
+  `mso5202d-trig-type.pcapng` the main `TRIG-PULSE-TIME` reads **5652756404163837952**
+  (`00 00 00 00 00 A0 72 4E` LE = `0x4E72A00000000000`) — a byte-shifted image of the 10 s holdtime-max
+  constant `10000000000000` (`00 A0 72 4E 18 09 00 00`; note the shared `A0 72 4E`), i.e. a serializer
+  artifact, **not** a real time. In Alter mode, read each channel's active config from the
+  `TRIG-SWAP-CHx-*` blocks and **treat any TIME field > 1e13 ps (10 s) as invalid**. [verified]
+
+- **Alter menu-id ↔ type order caveat.** In Alter, `CONTROL-MENUID` encodes both channel and type, but
+  its order differs from the `TRIG-SWAP-*-TYPE` code order: CH1 menu ids `26/27/28/29` =
+  Edge/Pulse/Video/Overtime → type codes `0/2/1/3`; CH2 ids `30/31/32/33` likewise (24 = Alter base).
+  Verified on both channels. [verified]
+
+- **Read-only / constant fields** (echo hardware capability, never settable, constant across all 44
+  captures): `TRIG-HOLDTIME-MIN = 100000` (100 ns), `TRIG-HOLDTIME-MAX = 10000000000000` (10 s),
+  `DISPLAY-MAXCONTRAST = 15`, `DISPLAY-MAXGRID-BRIGHT = 15`. Writing them has no effect. [verified]
+
+- **Always-0 / unmapped fields:** `HORIZ-WIN-STATE` (blk 157) and `CONTROL-TYPE` (blk 200) held `0` in
+  every capture — even in the horizontal-window / zoom menus — so their function is unknown. [gap]
+  `VERT-CHx-CNT-FINE` (blk 7/17) is a fine-gain step counter active when `FINE=1` (observed {0,20,30});
+  its magnitude/units are unmapped. [gap]
+
+- **`MATH-FFT-WIN` has exactly 3 windows.** The FFT-window knob cycles `0→1→2→0` only in
+  `mso5202d-math.pcapng` (value-set {0,1,2}); there is **no** Bartlett (3) or Blackman (4) on this
+  instrument — any earlier 5-window claim was speculative. [verified]
+
+- **`TRIG-FREQUENCY` is milliHz.** For the 1 kHz calibration signal the field reads `1000000`
+  (mHz → Hz = field/1000); it reads `0`/noise when the source is not triggering. Read-only. [verified]
+
+- **`CONTROL-DISP-MENU` shrinks the acquire record.** Opening any soft-menu (`CONTROL-DISP-MENU` 0→1)
+  drops the acquire SIZE-frame count from 3840 to 3200 samples (the menu overlay shaves 3.2 div off the
+  plot width); the timebase does not change the count. See the acquire section for the SIZE-frame detail. [verified]
+
+## 9. Menus & front-panel keys
+
+Everything a human does at the front panel — pressing a bezel softkey, turning a
+knob, opening a menu — is reachable over USB through **one selector: `0x13`**
+(key events). There is no "open menu X" or "save waveform" USB command; the host
+reproduces panel actions by injecting the *same* key events the physical buttons
+generate. Two on-device files describe the mapping and are themselves readable
+over USB with the file-read selector `0x10`:
+
+- **`/keyprotocol.inf`** — the 49-entry key list; a key is named by its **0-indexed
+  position** in this file (that index is the `keyid` you put in a `0x13` frame).
+- **`/protocol.inf`** — the settings-blob layout; its `CONTROL-MENUID` field (raw
+  offset 201, wire offset 205) reports *which menu is currently open*, letting the
+  host see the panel's menu state via the `0x01` poll.
+
+### 9.1 `CONTROL-MENUID` — which menu is open
+
+`CONTROL-MENUID` is a single byte in the settings blob (poll `0x01` / write `0x11`).
+Reading it tells you the active menu; the companion byte `CONTROL-DISP-MENU` (raw
+202 / wire 206) is `1` while a menu is visible and `0` when the menu bar is closed.
+The full id→menu map, assembled by opening each menu and polling the blob
+(`scope_dump/captures_wireshark/mso5202d-utility.pcapng`, `-la-*.pcapng`, and the per-menu captures):
+
+| id | menu | id | menu |
+|---:|------|---:|------|
+| 1  | CH1 vertical | 24 | Trigger → Alter (base) |
+| 2  | CH2 vertical | 25 | Default Setup (factory reset) |
+| 3  | Horizontal page 1 (window / marks) | 26/27/28/29 | Alter → CH1 Edge/Pulse/Video/Overtime |
+| 4  | Display page 1 (Type/Persist/Contrast) | 30/31/32/33 | Alter → CH2 Edge/Pulse/Video/Overtime |
+| 5  | Trigger → Edge | 36 | Display page 2 (Grid / Format) |
+| 6  | Trigger → Pulse page 1 | 38 | Trigger → Overtime page 1 |
+| 7  | Trigger → Pulse page 2 (When/Time) | 39 | Trigger → Overtime page 2 (Coupling) |
+| 8  | Trigger → Video | 40 | Horizontal page 2 (holdoff / coarse-fine) |
+| 10 | default / no active menu — **also** Utility page 3 (reuses this id) | 41 | Math operations (`MATH-DISP`) |
+| 11 | Trigger base (level / Edge default) | 42 | Utility page 1 (sys-status/update/save-wave/self-cal) |
+| 15 | Cursor (cursor state is **not** in the blob) | 43 | Utility page 2 |
+| 16 | Math → FFT page 1 (source / window) | 47 | Save/Recall base (type selector) |
+| 17 | Acquire | 48 | Save/Recall → CSV **and** FileList (shared browser) |
+| 18 | Save/Recall → SETUP | 56 | Math → FFT page 2 (zoom / vertical scale) |
+| 19 | Save/Recall → REF | 61 | Logic Analyzer base (`LA-SWI`) |
+| 20 | Measure base | 62 | LA config → D7-D0 group |
+| 21 | Measure → item add/config (`MEASURE-ITEM*`) | 63 | LA config → D15-D8 group |
+| 22 | Trigger → Slope page 1 |  |  |
+| 23 | Trigger → Slope page 2 (V1/V2/When/Time) |  |  |
+
+Notes and caveats:
+
+- **Constant-while-open menus.** Some menus set `CONTROL-MENUID` when opened and
+  keep it constant while open, so in a poll they show up as a steady *value* rather
+  than a *change* — CH1 = 1, CH2 = 2, Acquire = 17 behave this way; only
+  `CONTROL-DISP-MENU` toggles 0↔1. [verified]
+- **Reused id 10.** Utility page 3 gets no dedicated id and reuses `10`, the same
+  value as the no-menu baseline (distinguished only by `CONTROL-DISP-MENU`=1). The
+  three Utility pages cycle `42 → 43 → 10`. [verified]
+- **Multi-page trigger submenus use consecutive ids** for page 1 / page 2 (Pulse
+  6/7, Slope 22/23, Overtime 38/39). [verified]
+- **Menus with NO blob footprint** (so they cannot be observed through the poll):
+  Cursor (15), the Horizontal window/marks controls, Display refresh-rate,
+  Save/Recall (Storage), and Utility — these place *no* parameters in the settings
+  blob; their softkeys are pure actions. [verified]
+- **Candidate deeper ids 58 and 69** (Utility / self-cal sub-pages) are suspected
+  but were **not** seen in any capture. [gap]
+- Remaining unmapped ids (0, 9, 12, 13, 14, 34, 35, 37, 44–46, 49–55, 57–60) stay
+  unassigned until each corresponding page is opened on hardware. [gap]
+
+### 9.2 `/keyprotocol.inf` — the 49 front-panel keys
+
+`[TOTAL] 49`, one CRLF-terminated name per line between `[START]`/`[END]`. The
+**line index (0-based) is the `keyid`** you send in `0x13 | keyid | state`. The full
+list (byte-exact from the on-device file):
+
+| id | name | meaning |
+|---:|------|---------|
+| 0–7 | FN-0-KEY … FN-7-KEY | bezel softkeys F1…F8 (menu option keys) |
+| 8 | FN-MLEFT-KEY | multipurpose knob turn − / prev |
+| 9 | FN-MRIGHT-KEY | multipurpose knob turn + / next |
+| 10 | FN-MZERO-KEY | multipurpose knob push (zero / select) |
+| 11 | MENU-SR-KEY | Save/Recall menu |
+| 12 | MENU-MEASURE-KEY | Measure menu |
+| 13 | MENU-ACQUIRE-KEY | Acquire menu |
+| 14 | MENU-UTILITY-KEY | Utility menu |
+| 15 | MENU-CURSOR-KEY | Cursor menu |
+| 16 | MENU-DISPLAY-KEY | Display menu |
+| 17 | CT-AUTOSET-KEY | **Autoset** |
+| 18 | CT-SINGLESEQ-KEY | Single sequence |
+| 19 | CT-RS-KEY | **Run/Stop** |
+| 20 | CT-HELP-KEY | Help |
+| 21 | CT-DS-KEY | **Default Setup** (factory reset) |
+| 22 | CT-STU-KEY | Setup ("STU") key |
+| 23 | VT-MATH-MENU-KEY | Math menu |
+| 24 | VT-CH1-MENU-KEY | CH1 menu |
+| 25 | VT-CH1-PSUB-KEY | CH1 vertical position − |
+| 26 | VT-CH1-PADD-KEY | CH1 vertical position + |
+| 27 | VT-CH1-PZERO-KEY | CH1 position knob push (`VERT-CH1-POS := 0`) |
+| 28 | VT-CH1-VBSUB-KEY | CH1 V/div − |
+| 29 | VT-CH1-VBADD-KEY | CH1 V/div + |
+| 30 | VT-CH2-MENU-KEY | CH2 menu |
+| 31 | VT-CH2-PSUB-KEY | CH2 vertical position − |
+| 32 | VT-CH2-PADD-KEY | CH2 vertical position + |
+| 33 | VT-CH2-PZERO-KEY | CH2 position knob push (`VERT-CH2-POS := 0`) |
+| 34 | VT-CH2-VBSUB-KEY | CH2 V/div − |
+| 35 | VT-CH2-VBADD-KEY | CH2 V/div + |
+| 36 | HZ-MENU-KEY | Horizontal menu |
+| 37 | HZ-PSUB-KEY | Horizontal delay − |
+| 38 | HZ-PADD-KEY | Horizontal delay + |
+| 39 | HZ-PZERO-KEY | Horizontal position push (`HORIZ-TRIGTIME := 0`) |
+| 40 | HZ-TBSUB-KEY | SEC/DIV − (slower) |
+| 41 | HZ-TBADD-KEY | SEC/DIV + (faster) |
+| 42 | TG-MENU-KEY | Trigger menu |
+| 43 | TG-PSUB-KEY | Trigger level − |
+| 44 | TG-PADD-KEY | Trigger level + |
+| 45 | TG-PZERO-KEY | Trigger level knob push (`TRIG-VPOS := ground`) |
+| 46 | TG-PHALF-KEY | **Trigger Set-50 %** |
+| 47 | TG-FORCE-KEY | **Force trigger** |
+| 48 | TG-PROBECHECK-KEY | Probe check / probe compensation |
+
+`FN-0..7` are the eight bezel option keys (which softkey is which depends on the
+currently-open menu, §9.1). The five bold ids (17/19/21/46/47) match the earlier
+Appendix-F control keys exactly. [verified against the on-device file]
+
+### 9.3 How a `0x13` key press flows — and the single-slot mailbox
+
+Frame form (leader `0x53`): `53 04 00 13 <keyid> <state> <ck>`. Two verified facts
+shape correct use:
+
+1. **The `state` byte is not acted on.** Every `0x13` frame injects exactly **one**
+   key press regardless of whether `state` is `00` or `01`. The vendor app always
+   sends `01`, but sending `00` produces the identical single press. Treat `0x13` as
+   an edge, not a level; there is no separate "release" event to send. [verified]
+2. **The pending-key store is a single slot, not a queue.** A `0x13` frame writes
+   `keyid` into a one-byte mailbox (idle sentinel = `0xFF`); the device's input loop
+   consumes it on its next poll and clears it back to the sentinel. **Two key events
+   issued faster than that poll can drop the first.** Space presses out (a few ms
+   apart is safe). [inferred — mailbox behaviour; observed benign at the vendor
+   app's cadence]
+
+The **IN reply** is `53 03 00 93 <status> <ck>`: echo `0x93` (= `0x13 | 0x80`) plus
+one **status byte that reflects the device's live menu/key state**, not the request.
+Observed values include `0x01`, `0x0b`, `0x19`; an earlier note that it "echoes the
+`01` state byte" was a coincidence (the status happened to be `01`). Do not rely on
+the status byte to confirm which key you sent. [verified]
+
+Internally the `keyid` is translated through a fixed table into the device's own
+keypad scan code before it reaches the menu engine; **the host never needs that scan
+code** — the `keyid` (the `/keyprotocol.inf` index) is the stable, USB-facing
+identifier and is all you send. [inferred]
+
+Softkey targeting: to press "the 3rd option in the current menu," open the menu with
+its `MENU-*` key, confirm `CONTROL-MENUID` via a poll (§9.1), then send `FN-2`
+(keyid 2). An option slot that does nothing in a given menu is simply inert (a
+no-op), so a mis-aimed `FN-n` is harmless. [inferred]
+
+### 9.4 Save / export flows are pure key sequences (no save selector)
+
+There is **no dedicated USB "save" command**. Saving a waveform, screenshot, setup,
+or reference is performed entirely by pressing softkeys; the file the panel writes to
+its USB stick is then pulled back over USB with the file-read selector `0x10`. The
+on-device behaviour behind each softkey (observed as files that appear on the stick
+and as the transient temp files) is:
+
+| Panel action | Reached by | Device writes | Then |
+|---|---|---|---|
+| **CSV waveform** | Save/Recall → CSV page (menu 48) softkey, **or** Utility page 1 → Save-Wave | `/dsocsv.tmp` → `mv` to `/mnt/udisk/WaveData<n><n>.csv` | read back over `0x10` |
+| **Screenshot** | Utility → Save-Wave (image mode) | renders BMP → converts BMP→GIF → copies **both** `.bmp` and `.gif` to `/mnt/udisk/…` | read back over `0x10` |
+| **Setup** | Save/Recall → SETUP (menu 18) | `/dsosetup.tmp` → `mv` to destination | on-device recall / read back |
+| **Reference** | Save/Recall → REF (menu 19) | `/ref.dat.tmp` → `mv`; refs live under `/param/sav/` (`refa`,`refa.dat`,…) | read back over `0x10` |
+
+Reproducing a save from the host is therefore: **(1)** press `MENU-SR` (keyid 11) or
+`MENU-UTILITY` (keyid 14); **(2)** press the `FN-n` softkey that the on-screen menu
+labels "Save"; **(3)** wait for the write to complete; **(4)**
+`read_file("/mnt/udisk/WaveData<n><n>.csv")` over `0x10`. [verified: files appear on
+the stick and are retrievable over `0x10`; [gap]: which exact `FN-n` ordinal is
+"Save" on each page, and the `<n><n>` numbering scheme — date vs. sequence — need a
+live save to pin down.]
+
+Exported-file details cross-referenced elsewhere: a front-panel CSV/Ref record is
+**4064 samples** (20.32 div), distinct from the 3840/3200-sample USB screen block;
+saved setup/reference files are wrapped with GPG (a fixed passphrase is used for the
+saved-file container, separate from the firmware-update passphrase); the CSV's second
+column is **volts** (see the calibration section). This is the *only* route to
+deep-memory (40K/512K/1M) records — they are never served over USB by the `0x02`
+acquire path. [verified]
 
 ---
 
-## 6. Handshake: settings-state blob (poll selector 0x01) — alignment RESOLVED
+## 10. Host-control recipes
 
-Polling `0x01` returns a single 218-byte frame `53 d7 00 81 <213 param bytes> <ck>`
-(`selectorEcho 0x81`, **no subtype byte**). The app polls this continuously to
-mirror the scope's live state — **this is how the app shows the correct V/div and
-time/div: it reads them from this blob, it does NOT compute them from the sample
-data.** Changing a front-panel knob updates the blob within one poll.
+Practical, tested procedures for driving the scope from a host, built entirely on the
+`0x53` data channel (Section 4) plus the settings datasheet (Section 8). Each recipe is a
+sequence of frames; checksums follow the Section 3 rule (or send `0x66`).
 
-**The alignment is fully resolved (2026-07-08):** the 213 data bytes are exactly
-the `/protocol.inf` parameter list (`[TOTAL] 213`, Appendix A), starting
-**immediately after the `0x81` echo** — i.e. at **raw frame offset 4** — with no
-prefix and no reordering. The old "unmodeled prefix" mystery was a misparse: the
-first data byte (`0x01`) was taken to be a frame subtype, when it is actually the
-first parameter `[VERT-CH1-DISP] = 1` (CH1 shown). Offset of any field = `4 +`
-the sum of the widths of all parameters before it, multi-byte fields
-little-endian (positions/levels signed).
+Throughout, remember the **transport quirk** (Section 2): the device only answers if a
+bulk IN read is **already pending** when you write the OUT frame — post the read first,
+then write.
 
-Proof — a 60 s capture of a full CH1 V/div knob sweep, 2 mV → 10 V and back
-(`captures/mso5202d-ch1-vdiv.pcapng`, 323 settings frames): across the whole
-sweep **only four raw offsets changed**, and each lands exactly on the computed
-offset of a field that *should* react:
+### 10.1 Read-modify-write a single setting
 
-| raw offset | computed field | observed |
+The whole instrument state is one **213-byte block** (Section 8). To change any field:
+
+1. **Poll** the current block: `OUT 53 02 00 01 56` → `IN 53 d7 00 81 <213 bytes> ck`.
+   The 213 parameter bytes start **immediately after the `0x81` echo** (no subtype).
+2. **Modify** the target field's bytes in place, using the datasheet offsets in
+   Section 8 (`blk` = index within the 213-byte block). Multi-byte numeric fields are
+   little-endian; positions / levels are signed 1/25-div; time fields are int64
+   picoseconds.
+3. **Write** the block back: `OUT 53 d7 00 11 <213 bytes> ck` → `IN 53 03 00 91 <status> ck`.
+   `status = 0x00` on success, `0xFF` on failure. [verified]
+
+```
+# example acknowledgement of a good write
+OUT  53 d7 00 11 01 0a 00 … (213 bytes) … ck
+IN   53 03 00 91 00 e7
+```
+
+Always **read-modify-write the whole block** — never synthesise a block from scratch, and
+preserve every byte you are not intentionally changing. A few fields are read-only
+constants (holdoff min/max, max-contrast/brightness) and writing them is ignored. Note
+that some logical actions fan out: writing `TRIG-MODE` updates both
+`TRIG-SWAP-CH1-MODE` and `TRIG-SWAP-CH2-MODE` in the same block. [verified]
+
+### 10.2 Set the timebase (and pick it for a target bit rate)
+
+Time/div is governed by **two** fields (Section 8):
+
+- **`HORIZ-WIN-TB`** — the front-panel knob index, `0..31`, mapping to the 2-4-8 ns…s
+  ladder (index 0 = 2 ns/div, larger = slower).
+- **`HORIZ-TB`** — the *acquisition* timebase index, which **cannot go faster than index
+  6 (200 ns/div)**.
+
+To set a timebase to knob index `idx`, write **`HORIZ-WIN-TB = idx`** and
+**`HORIZ-TB = max(idx, 6)`** in the same block, then `0x11`. [verified] For serial-decode
+work, choose `idx` so the message spans the 3840-sample screen at **≈15–25 samples per
+bit** (200 samples/div ⇒ pick div/bit accordingly).
+
+### 10.3 Press a front-panel key
+
+`OUT 53 04 00 13 <keyid> <state> ck` → `IN 53 03 00 93 <status> ck` (echo `0x93`). The
+**`keyid`** is the 0-based index into `/keyprotocol.inf` (Section 9); the **`state` byte
+is ignored** — every `0x13` frame is exactly one key press regardless of it (send `01` by
+convention). The reply's `status` byte is the **live menu/key status** (values like
+`0x01` / `0x0b` / `0x19`), *not* an echo of the state byte. [verified]
+
+Useful keyids: **17 = AUTOSET, 19 = RUN/STOP, 21 = DEFAULT-SETUP, 46 = TRIG-50%,
+47 = FORCE**. [verified]
+
+```
+OUT  53 04 00 13 11 01 7c        # keyid 17 = AUTOSET
+IN   53 03 00 93 <status> <ck>
+```
+
+The key mailbox is **single-slot** (consumed when the GUI polls it): if you inject keys
+faster than the scope's key-scan loop drains them, one can be dropped. **Space presses
+out** (a few tens of ms) and, for toggles, verify the effect (next recipe). [verified]
+
+### 10.4 Run / Stop (press-until-observed)
+
+RUN/STOP is a **toggle** (keyid 19); there is no absolute set. To reach a *known* state,
+press then confirm via `TRIG-STATE` in the settings poll, and repeat if needed:
+
+```
+loop:
+    poll 0x01;  read TRIG-STATE     # 0 = STOP, 3 = triggered/RUN (2 = auto-searching)
+    if already in desired state: done
+    press key 19 (0x13);  wait ~50 ms
+    poll again; if still wrong, press again        # press-until-observed
+```
+
+This idempotent loop absorbs a dropped key (10.3) and the toggle ambiguity. Do **not**
+assume a single press landed. [verified]
+
+### 10.5 Grab a screenshot (`0x20` → RGB565 → PNG)
+
+`OUT 53 02 00 20 75` streams the LCD framebuffer with echo `0xa0`. There is **no size
+frame**: you get a run of `a0 01` content frames (each ≤ 10208 bytes) totalling **exactly
+768000 bytes**, then a single `a0 02 <img_sum8>` end marker whose payload byte is the
+8-bit sum of all 768000 pixel bytes. [verified]
+
+Decode: **800 × 480, 16-bit RGB565, little-endian, row-major**. Per 16-bit pixel
+`R = (px >> 11) & 0x1F`, `G = (px >> 5) & 0x3F`, `B = px & 0x1F` (channel order
+[inferred] — assumed MSB=R); scale each to 8-bit and write a PNG. `800 × 480 × 2 =
+768000` confirms the layout. [verified]
+
+```
+OUT  53 02 00 20 75
+IN   53 e3 27 a0 01 <10208 pixel bytes> ck      # first of 76 content frames (75×10208 + 2400)
+     … 75 more …
+IN   53 04 00 a0 02 <img_sum8> ck               # end; verify sum8 over the 768000 bytes
+```
+
+### 10.6 Synchronized 2-channel capture (STOP-then-read)
+
+CH1 and CH2 are **separate acquires ~100 ms apart** if you read them while the scope is
+free-running, so their phase relationship is lost. To capture both channels from **one
+frozen simultaneous acquisition** (required for any 2-wire decode):
+
+1. **STOP** the scope (recipe 10.4) so the on-screen record is frozen.
+2. Read **CH1**: `OUT 53 04 00 02 01 00 ck` → size/data/end (echo `0x82`).
+3. Read **CH2**: `OUT 53 04 00 02 01 01 ck` → size/data/end.
+4. **RUN** again if you want live update.
+
+Because the record is frozen, steps 2 and 3 return the **same simultaneous acquisition** —
+clock and data edges line up. [verified] Always **read the sample count from the SIZE
+frame** (`82 00 <src> <count_LE24>`, count = data-byte count; analog = 1 B/sample so
+count = samples; typically 3840, sometimes 3200 when a soft-menu is open) — **never
+hard-code 3840**. Samples are **signed int8**, screen-centre `0x00`, rails `0x7F`/`0x81`,
+trigger column `0xFF`; convert with `y_div = (int8(byte) − 16) / 25` and
+`volts ≈ y_div × Vdiv` (counts→volts scale = `Vdiv/25`, ground-truth-matched this
+session). [verified]
+
+### 10.7 Deep capture — front-panel Save-CSV, then pull the file over USB
+
+There is **no host command for deep memory** (`0x53/0x02` and the `0x43` debug taps only
+ever return the ≤ 3840-sample screen record — confirmed against the vendor app's own USB
+traffic, whose largest single transfer is the 3847-byte screen block). Deep records live
+only in the on-instrument **Save-waveform** flow. To retrieve a deep capture on a host
+*without* a USB stick:
+
+1. Set the desired memory depth (`ACQURIE-STORE-DEPTH`, Section 8) and STOP.
+2. Drive the **Save → CSV** front-panel sequence with key presses (recipe 10.3;
+   the Save/Storage menu is action-only — it writes the CSV internally, no dedicated USB
+   selector). The scope writes `/mnt/udisk/WaveData<N>.csv`.
+3. **Pull the file over USB** with a file read:
+   `OUT 53 <len> 10 00 2f 6d 6e 74 2f 75 64 69 73 6b 2f 57 61 76 65 44 61 74 61 …csv 66`
+   (`"/mnt/udisk/WaveData….csv"`, `0x66` wildcard checksum) → `90 01` content frames +
+   `90 02 <sum8>` end. [verified]
+
+A **512K-point** CSV is ≈ **7.7 MB** and reads back in **≈ 10 s** at the observed
+**~800 KB/s** USB file-read rate. [verified] CSV format: header lines then rows
+`<time_seconds>,<volts>` (`%0.5E,%0.3f`); the value column is **volts** (the
+`#voltbase=…(mv/100)` header label is a misnomer — the stored magnitude is µV/div, so
+`V/div = voltbase/1e6`). The on-instrument save record length is **4064 samples** at
+screen depth (distinct from the 3840 USB screen block), 40064 / 400064 for deep saves; the
+per-sample `dt` is depth-driven (4K → 20 ns/50 MSa/s; 40K & 512K → 5 ns/200 MSa/s), **not**
+the constant `#timebase` header tag. [verified]
+
+### 10.8 Serial-bus decode (UART / SPI / I²C) — constraints
+
+The scope has no built-in bus decoder, but a host can reconstruct UART / SPI / I²C from
+captured analog traces (implemented in `scripts/serial_decode.py` +
+`scripts/mso5202d_decode.py`; test signals from `scripts/esp_combo_gen/`, an ESP32 that
+streams a `0x00..0xFF` ramp). Verified end-to-end this session. The constraints all come
+from the transport, not the decoder:
+
+- **Only 2 signals per capture.** CH1/CH2 are the only usable inputs (LA-over-USB is a
+  dead firmware path — Section 6). So **UART = 1 line; SPI = SCLK + one data line**
+  (MOSI *or* MISO, no full-duplex, no CS channel — bytes re-frame on an idle-clock gap);
+  **I²C = SDA + SCL**. [verified]
+- **Short messages only** — the record is ≤ 3840 samples (no deep memory over USB), so a
+  message must fit one screen. **Set the timebase** for the bit rate (recipe 10.2,
+  ≈ 15–25 samples/bit). [verified]
+- **Threshold** the analog trace to logic: unwrap bytes → divisions
+  (`y_div = (int8(byte) − 16)/25`), then Schmitt-trigger at the midpoint of the detected
+  low/high rails. Use the **STOP-then-read** synchronized capture (recipe 10.6) so the
+  clock and data channels come from one frozen acquisition. [verified]
+- **Some frozen acquisitions come back glitched** (more so at slow timebases) — re-capture;
+  the decoders are deterministic. [verified]
+
+Verified bit-rate ranges (ESP32 sources, ramp decoded byte-for-byte): UART 8N1
+**9600 – 115200 baud**; SPI mode 0 MSB **10 kHz – 2 MHz SCLK**; I²C **~17 – 167 kHz SCL**
+(source ceiling; the edge-driven decoder has no inherent limit). [verified]
+
+## 11. Hardware & device background (appendix)
+
+This appendix documents the physical instrument behind the wire protocol. Facts here
+were reconstructed from the device's own filesystem — every file named below is
+readable over USB with the file-read selector `0x10` — and from observed device
+behaviour. It is background: none of it is required to drive the scope over USB, but
+it explains *why* the protocol looks the way it does (e.g. why a waveform sample is a
+16-bit FPGA FIFO word, why the framebuffer is exactly 768000 bytes, why a crashed app
+reappears in ~100 ms).
+
+### 11.1 Physical memory map
+
+The instrument is an ARM SoC (S3C2416 family, CPU 400 MHz / bus 100 MHz per
+`/dso/driver/driver.log`) with two external FPGAs on separate chip-select banks:
+
+| Physical base | Region | Role |
 |---|---|---|
-| 5 | `[VERT-CH1-VB]` | V/div index, one step per click — see table below |
-| 24 | `[TRIG-STATE]` | 3→2→3 blips as the trigger dropped in/out at extreme V/div |
-| 29–30 | `[TRIG-VPOS]` (LE16) | trigger level in **screen-relative units**: rescaled as 1/V-div on every click because the absolute trigger voltage stayed fixed (`VPOS = 62000 // vdiv_mV` throughout that session) |
-| — | (nothing else moved) | `[VERT-CH2-VB]`@15 stayed 9, `[HORIZ-TB]`@159 stayed 15 ✓ |
+| `0x10000000` | nGCS2 | **Analog front-end FPGA** data window (acquisition samples) |
+| `0x18000000` | nGCS3 | **Logic-analyzer FPGA** data window |
+| `0x4F000000` | 516-byte SFR block | FPGA / SROM **bus-timing control** registers (set once at boot; two parallel FPGA-control register groups 0x20 apart, one per FPGA) |
+| `0x58000000` | 1 MB | SoC **housekeeping/touch ADC** (not the waveform ADC) |
+| `0x20000000` | nGCS4 | **DM9000 Ethernet** controller |
 
-Additional confirmations from the same frames: `[VERT-CH2-DISP]`@14 = 0 (CH2 was
-off), `[TRIG-SRC]`@26 = 0 (CH1), `[TRIG-FREQUENCY]`@31–38 (LE64) = 1,000,000 =
-the 1 kHz cal signal **in mHz** (this had been mislabeled "timebase"), and
-`[HORIZ-TB]`@159 / `[HORIZ-WIN-TB]`@160 are the real timebase indices (mislabeled
-"vdiv" before; index→time/div table = `TB_TO_NS`, see Appendix E).
+Correction to earlier notes: the analog/LA sample windows are `0x10000000` /
+`0x18000000` — **not** `0x4F000000`. The `0x4F000000` block is only bus/SROM timing
+control (the value `11811` = `0x2E23` from `/fpgabank.conf` is programmed into it at
+boot; the boot log prints `fpga bank 11811`). [inferred]
 
-**`[VERT-CHx-VB]` → V/div** (verified over the full range on hardware):
+### 11.2 FPGA register model (why samples are 16-bit FIFO words)
 
-| VB | V/div | VB | V/div | VB | V/div |
-|---|---|---|---|---|---|
-| 0 | 2 mV | 4 | 50 mV | 8 | 1 V |
-| 1 | 5 mV | 5 | 100 mV | 9 | 2 V |
-| 2 | 10 mV | 6 | 200 mV | 10 | 5 V |
-| 3 | 20 mV | 7 | 500 mV | 0 | **10 V (quirk: wraps mod 11!)** |
+Each FPGA data window is a bank of **256 × 16-bit registers, halfword-addressed**:
+register `addr` (0..0xFF) lives at `base + addr*2`. Reads/writes are 16-bit
+(`ldrh`/`strh`-width). Crucially, **bulk acquisition is a single auto-advancing FIFO
+port**: the acquisition block is read by hammering *one* register `addr` `count`
+times, and the FPGA advances its internal sample pointer on each 16-bit read. There
+is no large contiguous sample buffer to mmap — deep memory never crosses this port to
+the host, which is the hardware reason the USB `0x02` path only ever returns the
+on-screen block. Analog samples arrive as one byte each on the wire (the FPGA's 16-bit
+word narrowed to a signed int8, §6); the LA path is genuinely 2 bytes/sample (16 D-bit
+word). [inferred]
 
-The 10 V/div position re-uses VB=0 — a firmware quirk. If it matters, a nonzero
-`[TRIG-VPOS]` disambiguates (it scales as 1/V-div for a fixed trigger level).
-The table and the wrap quirk were confirmed **identical for CH2** by a clean CH2
-V/div sweep (`captures/mso5202d-ch2-vdiv.pcapng`, 2026-07-08): across 324
-frames the **only** changing offset was `[VERT-CH2-VB]`@15 — notably
-`[TRIG-VPOS]` did **not** move, so VPOS is bound to the **trigger source** (CH1
-here), not to the channel being adjusted.
+### 11.3 Device nodes & control paths
 
-**Vertical position & trigger level — RESOLVED** (combined-knobs capture
-`captures/mso5202d-combined.pcapng`, 2026-07-08: both channels on; V/div,
-vertical position, time/div and horizontal position all exercised):
+The instrument's peripherals are exposed as device nodes with these observed control
+conventions (background — the USB protocol does not touch them directly):
 
-- `[VERT-CHx-POS]` (signed LE16) is the channel's vertical position in
-  **1/25-division units** (knob fine step = 8 = 0.32 div; see the calibration
-  below). **Pushing the vertical-position knob resets it to 0** (channel to
-  vertical centre) — `mso5202d-pos-knob-push.pcapng`, matching the manual.
-- `[TRIG-VPOS]` (signed LE16) = **`[VERT-CHsrc-POS]` + trigger level ⁄ V-div ×
-  25** — i.e. the trigger marker's screen position, where the position/level
-  fields are in **1/25-division units** (see below). VPOS tracks the CH1
-  position knob 1:1 and CH2's knobs never move it, confirming it is bound to the
-  trigger *source*. Derived `TRIG-LEVEL-mV` is computed in `decode_settings()`.
-
-  **Unit = 1/25 division, calibrated against the scope readout (2026-07-08).**
-  A full trigger-level sweep clamped `TRIG-VPOS` at **±200**, which the scope
-  displayed as **+13.4 V … −18.5 V at 2 V/div** and **+33.6 V … −46.4 V at
-  5 V/div** (`../captures/mso5202d-trig-level.pcapng`, CH1 POS +32). Both fit
-  `level = (VPOS − POS) × vdiv / 25` to <1 %:
-  (200−32)/25×2 V = +13.44 V, (−200−32)/25×2 V = −18.56 V; ×5 V → +33.6/−46.4 V.
-  So **±200 = ±8 divisions** (200/25), matching the manual's "±8 divisions from
-  centre" trigger range — and the general rule is `1 unit = 1/25 div`
-  (25 counts/div), used for `VERT-CHx-POS`, `TRIG-VPOS` and the trigger level.
-  *(Corrects an earlier guess of 1/100-div here — it was never scope-calibrated;
-  the ×4 error surfaced when the scope's V readout was compared.)*
-  Two distinct level-reset controls, verified separately:
-  - The front-panel **"Set 50 %"** softkey snaps `TRIG-VPOS` to the signal's
-    **mid-amplitude**: in `../captures/mso5202d-trig-buttons.pcapng` six presses
-    from different starting levels all landed on VPOS 63 = **2480 mV ≈ 50 % of
-    the 5 V cal**.
-  - **Pushing the trigger-level knob** snaps `TRIG-VPOS` to the **source
-    channel's 0 V / ground** (`TRIG-VPOS := VERT-CHsrc-POS`, level = 0 mV):
-    in `../captures/mso5202d-trig-knob.pcapng` every push from various levels
-    (VPOS 54/41/48) landed on VPOS 35 = CH1 POS = **0 mV**. So the knob-push is
-    "level to ground", *not* Set-50 %.
-
-**8-byte time fields are PICOSECONDS.** `[TRIG-HOLDTIME-MIN]` = 100 000 =
-100 ns and `[TRIG-HOLDTIME-MAX]` = 10¹³ = 10 s — exactly the scope's holdoff
-limits (the vendor manual lists **Holdoff Range 100 ns to 10 s**, confirming
-both the unit and the field). `[TRIG-HOLDTIME]` is the **live holdoff value**,
-verified to track the knob (`mso5202d-trig-holdoff.pcapng`): it lives under the
-**HORIZONTAL menu → F4 (Holdoff Time)** — turn the multi-function knob to adjust,
-push it to reset to 100 ns (the observed floor). The Horizontal menu is
-`[CONTROL-MENUID]` **3 (page 1)** / **40 (page 2, holdoff)`
-(`mso5202d-horiz-menu.pcapng`). **Window ctrl (Major/Minor), Mark right/left,
-Set/Clear, Clear-all produce NO change in the polled settings blob** —
-`[HORIZ-WIN-STATE]` never moved over 2 min of trying, so the dual-window/zoom
-and mark state must live in a separate structure (not the 213-byte state), or
-require dual-window mode to be actively engaged first. The horizontal *position*
-knob moves `[HORIZ-TRIGTIME]` (delay, ps). `[HORIZ-TRIGTIME]`@162–169 is the **horizontal
-trigger position (delay) in ps**: in the combined capture each click moved it
-by ≈0.3 div worth of time at every timebase tried (e.g. ±240 µs at 800 µs/div,
-±1.2 ms at 4 ms/div). It is **SIGNED** (int64) — the horizontal-position sweep
-in `mso5202d-horiz-position.pcapng` drove it from ≈−4 ms through 0 to +29 ms;
-negative values (post-trigger) show up as ≈2⁶⁴−x if read unsigned, so
-`decode_settings()` treats it as signed. **Pushing the horizontal-position knob
-resets it to 0** (delay to centre) — `mso5202d-pos-knob-push.pcapng`. The `TRIG-*-TIME` family (pulse/slope/overtime) reads
-sanely in ps too (500 000 = 500 ns defaults; the manual gives pulse/slope/
-overtime ranges of **20 ns to 10 s**).
-
-**`[HORIZ-TB]` / `[HORIZ-WIN-TB]` → time/div** (verified end stop to end stop by
-a full time/div knob sweep, `captures/mso5202d-timediv.pcapng`, 2026-07-08; only
-raw@159, raw@160 and `[TRIG-STATE]`@24 changed across 810 frames):
-
-- The knob has **32 positions** = the scope's 2 ns…40 s range in the **2-4-8
-  sequence** (2, 4, 8, 20, 40, 80, 200 ns, …, 8, 20, 40 s). Confirmed against
-  the on-screen readout — it is NOT the usual 1-2-4/1-2-5 sequence (8 ns, not
-  10 ns; 80 µs, not 100 µs; …). The vendor manual states **"SEC/DIV Range:
-  4 ns/div to 40 s/div, in a 2, 4, 8 sequence"** — matching the sequence; the
-  manual is for the 60/100 MHz MSO5000B base model (min 4 ns/div, index 1),
-  while our 200 MHz MSO5202D extends one detent faster to 2 ns/div (index 0).
-- **`[HORIZ-WIN-TB]`@160 tracks the knob over the full index range 0..31**
-  (0 = 2 ns/div … 31 = 40 s/div).
-- **`[HORIZ-TB]`@159 is the real acquisition timebase and clamps at index 6**
-  (200 ns/div): for the six fastest settings (80 ns…2 ns) only WIN-TB keeps
-  falling — the fast timebases are zoom/interpolation over a 200 ns/div
-  acquisition (a known trait of this scope family). At index ≥ 6 the two move
-  in lockstep (transient ±1 skews right around the clamp boundary).
-- `index → ns`: `TB_TO_NS` table in `mso5202d.py` ((2, 4, 8)·10ⁿ).
-
-**`[TRIG-STATE]` observed values** — mapped by a known button sequence
-(`mso5202d-trig-runstop.pcapng`: stop→run→stop→run→single→run→stop→run→force):
-- `0` = **STOPPED** — pressing Run/Stop takes 3→0 (confirmed 3×). Run resumes
-  via 0→2→3.
-- `2` = **not triggered / auto-searching** (free-running in Auto with no valid
-  trigger; also seen when the level is swept off the signal in
-  `mso5202d-trig-level.pcapng`, 3→2→3).
-- `3` = **triggered / running**. Force-Trigger while already running causes no
-  state change (just forces an acquire).
-- `4` = **scan/roll mode** (slow timebase, see below).
-- `5` = **SINGLE (armed)** — Single-Seq takes 3→5; the next Run leaves it 5→2→3.
-- `6` = transient flicker while re-arming (bursts when the signal drops out of
-  range mid-adjustment).
-- `1` = **WAIT / READY** (Normal mode, armed but no valid trigger yet) —
-  resolved in `mso5202d-trig-edge.pcapng`: setting `TRIG-MODE`→Normal with the
-  level off the signal took `TRIG-STATE`→1, and Auto→2. So the untriggered state
-  is **1 in Normal mode, 2 in Auto mode**.
-
-Run/Stop/Single state lives in this field, not a separate one
-(`TRIG-MODE`/`ACQURIE-MODE` never changed). The manual pins
-the scan-mode threshold: *"With the SEC/DIV control set to 80 ms/div or slower
-and the trigger mode set to Auto, the oscilloscope works in the scan
-acquisition mode."* — i.e. `[HORIZ-WIN-TB]` index ≥ 23 (80 ms/div), which
-matches our earliest `state=4` onset; the later onset in another session was
-Normal-mode trigger holding `state=3` longer. Enum not exhaustively mapped.
-
-**`[TRIG-TYPE]` enum** — mapped by stepping the trigger-type menu twice
-(`mso5202d-trig-type.pcapng`, both passes identical): `0` = **Edge**,
-`1` = **Video**, `2` = **Pulse**, `3` = **Slope**, `4` = **Overtime**,
-`5` = **Alter** (swap — at this type `[TRIG-SRC]` rapidly toggles 0↔1 as the
-alternating trigger flips between CH1/CH2). `[CONTROL-MENUID]` follows each
-type's submenu (Edge 5, Video 8, Pulse 6, Slope 22, O.T. 38, Alter 24), and
-opening the trigger menu sets `[CONTROL-DISP-MENU]` 0→1. (`TRIG_TYPE_NAMES` in
-`mso5202d.py`.)
-
-**Edge-trigger enums** — mapped by stepping the Edge trigger menu twice
-(`mso5202d-trig-edge.pcapng`, both passes identical):
-- `[TRIG-SRC]`: `0` = **CH1**, `1` = **CH2**, `2` = **EXT**, `3` = **EXT/5**,
-  `4` = **AC line**. (`TRIG-LEVEL-mV` is only derived for CH1/CH2; for EXT the
-  manual range is ±1.2 V, EXT/5 ±6 V.)
-- `[TRIG-MODE]`: `0` = **Auto**, `1` = **Normal**. Setting it also mirrors into
-  `[TRIG-SWAP-CH1-MODE]`/`[TRIG-SWAP-CH2-MODE]`. (Determines the untriggered
-  `TRIG-STATE`: Auto→2, Normal→1.)
-- `[TRIG-EDGE-SLOPE]`: `0` = **Rising**, `1` = **Falling**.
-- `[TRIG-COUP]`: `0` = **DC**, `1` = **AC**, `2` = **Noise Reject**,
-  `3` = **HF Reject**, `4` = **LF Reject**.
-
-(`TRIG_SRC_NAMES` / `TRIG_MODE_NAMES` / `TRIG_SLOPE_NAMES` / `TRIG_COUP_NAMES`
-in `mso5202d.py`.)
-
-**Video-trigger enums** — mapped by stepping the Video trigger menu
-(`mso5202d-trig-video.pcapng`). Video sources are CH1/CH2/EXT/EXT/5 (no AC line):
-- `[TRIG-VIDEO-NEG]`: `0` = **Normal** (positive video), `1` = **Inverted**.
-- `[TRIG-VIDEO-PAL]`: `0` = **NTSC**, `1` = **PAL/SECAM**.
-- `[TRIG-VIDEO-SYN]`: `0` = **All Lines**, `1` = **Line Num**, `2` = **Odd
-  Field**, `3` = **Even Field**, `4` = **All Fields**.
-- `[TRIG-VIDEO-LINE]` (LE16): selected line number, active when SYN = Line Num;
-  range **1…525** for NTSC (1…625 for PAL/SECAM).
-
-(`TRIG_VIDEO_NEG_NAMES` / `TRIG_VIDEO_STD_NAMES` / `TRIG_VIDEO_SYN_NAMES` in
-`mso5202d.py`.)
-
-**Slope-trigger enums** — mapped by stepping the Slope trigger menu
-(`mso5202d-trig-slope.pcapng`; source/mode/coupling behave as for Edge):
-- `[TRIG-SLOPE-SET]`: `0` = **Positive** slope, `1` = **Negative**.
-- `[TRIG-SLOPE-WIN]`: `0` = **V1** (upper), `1` = **V2** (lower), `2` = **Both**
-  — selects which threshold the knob adjusts (at Both, V1 and V2 move together).
-- `[TRIG-SLOPE-V1]`, `[TRIG-SLOPE-V2]` (signed LE16): the two slope thresholds
-  in **1/25-div** units, using the **same volts calibration as the trigger
-  level** — scope-verified at CH1 5 V/div (V1/V2 range read **+12 V … −36 V**,
-  matching `(field − POS) × vdiv/25`). `decode_settings()` exposes derived
-  `TRIG-SLOPE-V1-mV` / `TRIG-SLOPE-V2-mV`.
-- `[TRIG-SLOPE-WHEN]`: `0` = **=**, `1` = **≠**, `2` = **>**, `3` = **<** (the
-  slope-time condition; likely the same enum as `[TRIG-PULSE-WHEN]`).
-- `[TRIG-SLOPE-TIME]` (ps): 20 ns (`20000`) … 10 s.
-
-(`TRIG_SLOPE_SET_NAMES` / `TRIG_SLOPE_WIN_NAMES` / `TRIG_WHEN_NAMES` in
-`mso5202d.py`.)
-
-**Pulse-trigger enums** — mapped by stepping the Pulse trigger menu
-(`mso5202d-trig-pulse.pcapng`):
-- `[TRIG-PULSE-NEG]`: `0` = **Positive** pulse, `1` = **Negative**.
-- `[TRIG-PULSE-WHEN]`: `0` = **=**, `1` = **≠**, `2` = **>**, `3` = **<**
-  — **confirmed identical to `[TRIG-SLOPE-WHEN]`** (shared `TRIG_WHEN_NAMES`).
-- `[TRIG-PULSE-TIME]` (ps): pulse width, **20 ns (`20000`) … 10 s** (both limits
-  hardware-confirmed).
-
-(`TRIG_PULSE_NEG_NAMES` in `mso5202d.py`.)
-
-**Overtime-trigger enums** — mapped by stepping the O.T. trigger menu
-(`mso5202d-trig-overtime.pcapng`):
-- `[TRIG-OVERTIME-NEG]`: `0` = **Positive**, `1` = **Negative**.
-- `[TRIG-OVERTIME-TIME]` (ps): the overtime, **20 ns … 10 s**.
-- Coupling (page 2) uses the same `[TRIG-COUP]` enum as Edge. New menu id:
-  `[CONTROL-MENUID]` 38 = Overtime page 1, **39 = page 2** (38/39 consecutive,
-  as with Pulse 6/7 and Slope 22/23).
-
-(`TRIG_OVERTIME_NEG_NAMES` in `mso5202d.py`.)
-
-**Alter/Swap trigger** (`mso5202d-trig-alter-ch1.pcapng`) — in Alter mode each
-channel carries its **own independent trigger config** in the
-`[TRIG-SWAP-CH1-*]` / `[TRIG-SWAP-CH2-*]` blocks (offsets 94–121 / 122–149), and
-`[TRIG-SRC]` alternates CH1↔CH2 as the scope switches between them.
-- `[TRIG-SWAP-CHx-TYPE]`: a **4-value** enum (no Slope/Alter): `0` = **Edge**,
-  `1` = **Video**, `2` = **Pulse**, `3` = **Overtime**. (Distinct from the main
-  6-value `[TRIG-TYPE]`.)
-- All the per-channel sub-params **reuse the main-trigger enums**:
-  `[TRIG-SWAP-CHx-EDGE-SLOPE]` = 0 Rising/1 Falling, `-COUP` = the 5-value
-  `TRIG-COUP` set, `-MODE` = Auto/Normal, `-VIDEO-NEG/PAL/SYN/LINE` = the video
-  enums, `-PULSE-NEG/WHEN/TIME` and `-OVERTIME-NEG/TIME` = the pulse/overtime
-  fields (ps times). Verified independently on **both channels** (CH1 and CH2
-  blocks are identical layout).
-- Menu ids for the Alter per-type submenus (`[CONTROL-MENUID]`): 24 = Alter
-  base; **CH1** block **26 Edge / 27 Pulse / 28 Video / 29 Overtime**; **CH2**
-  block **30 Edge / 31 Pulse / 32 Video / 33 Overtime** (so the menu id encodes
-  both the selected channel and its type).
-
-(`TRIG_SWAP_TYPE_NAMES` in `mso5202d.py`; per-channel enums reuse the main
-trigger name maps.)
-
-**Vertical (CHx) menu enums** — mapped by stepping the CH1 menu
-(`mso5202d-ch1-menu.pcapng`, menu id `[CONTROL-MENUID]` = **1**) and confirmed
-on CH2 (`mso5202d-ch2-menu.pcapng`, menu id **2**, identical layout & values):
-- `[VERT-CHx-COUP]`: `0` = **DC**, `1` = **AC**, `2` = **GND** (channel input
-  coupling — **not** the same enum as `[TRIG-COUP]`).
-- `[VERT-CHx-20MHZ]`: `0` = **Full** bandwidth, `1` = **20 MHz** limit.
-- `[VERT-CHx-FINE]`: `0` = **Coarse**, `1` = **Fine** (V/div resolution).
-- `[VERT-CHx-PROBE]`: `0` = **1×**, `1` = **10×**, `2` = **100×**, `3` = **1000×**.
-- `[VERT-CHx-RPHASE]`: `0` = **Off**, `1` = **On** — the **Invert** function.
-  Inverting also flips the sign of the trigger level (observed `TRIG-VPOS`
-  81→55, `TRIG-LEVEL-mV` +2600→−2600) since the trigger follows the inverted
-  trace — but **only for the trigger-source channel**: inverting CH2 (with the
-  trigger on CH1) left the level unchanged, confirming the source-binding.
-
-(`VERT_COUP_NAMES` / `VERT_BW_NAMES` / `VERT_FINE_NAMES` / `VERT_PROBE_NAMES` /
-`VERT_INVERT_NAMES` in `mso5202d.py`.)
-
-**Acquire-menu enums** — mapped by stepping the Acquire menu
-(`mso5202d-acquire.pcapng`, menu id `[CONTROL-MENUID]` = **17**):
-- `[ACQURIE-TYPE]`: `0` = **Realtime**, `1` = **Equivalent-time**.
-- `[ACQURIE-MODE]`: `0` = **Normal**, `1` = **Peak Detect**, `2` = **Average**.
-- `[ACQURIE-AVG-CNT]`: index → averages, `0`=4 `1`=8 `2`=16 `3`=32 `4`=64
-  `5`=128 (count = 4·2ⁿ).
-- `[ACQURIE-STORE-DEPTH]`: record length, **gapped codes** (unavailable/greyed
-  depths still occupy enum slots): `0` = **4K**, `4` = **40K**, `6` = **512K**,
-  `7` = **1M**. 1M is single-channel only (captured with one channel on;
-  `mso5202d-acquire-1m.pcapng`); dual-channel maxes at 512K, matching the manual.
-  The gaps (1/2/3/5) are greyed-out depths (e.g. 20K).
-
-(`ACQ_TYPE_NAMES` / `ACQ_MODE_NAMES` / `ACQ_AVG_COUNTS` / `ACQ_DEPTH_NAMES` in
-`mso5202d.py`.)
-
-**Display-menu enums** — mapped by stepping the Display menu
-(`mso5202d-display.pcapng`; two pages: `[CONTROL-MENUID]` **4** =
-Type/Persist/Contrast, **36** = Grid/Format):
-- `[DISPLAY-MODE]`: `0` = **Vectors**, `1` = **Dots** (waveform draw type).
-- `[DISPLAY-FORMAT]`: `0` = **XT** (YT), `1` = **XY**.
-- `[DISPLAY-GRID-KIND]`: `0` = **Off**, `1` = **Dotted**, `2` = **RealLine**
-  (grid style; the Off/Dotted/RealLine↔0/1/2 order is inferred from cycle order).
-- `[DISPLAY-GRID-BRIGHT]`: grid intensity **0…15** (max = `[DISPLAY-MAXGRID-BRIGHT]`=15).
-- `[DISPLAY-CONTRAST]`: waveform/display intensity **0…15** (max =
-  `[DISPLAY-MAXCONTRAST]`=15).
-- `[DISPLAY-PERSIST]`: persistence, **gapped codes** `0`=Auto, `2`=0.2s,
-  `4`=0.4s, `8`=0.8s, `10`=1.0s, `11`=2.0s, `13`=4.0s, `17`=8.0s, `19`=Infinity.
-
-Not captured in the blob: the **Refresh rate** control (Auto/30/40/50 fps —
-no field changed when adjusted) and the second of the two 0…15 waveform
-controls (only `DISPLAY-CONTRAST` moved; "wave intensity" vs "contrast" not
-distinctly separable here). (`DISPLAY_MODE_NAMES` / `DISPLAY_FORMAT_NAMES` /
-`DISPLAY_GRID_NAMES` / `DISPLAY_PERSIST_NAMES` in `mso5202d.py`.)
-
-**Math-menu enums** — mapped by stepping the Math menu (`mso5202d-math.pcapng`;
-menu ids `[CONTROL-MENUID]` **41** = operations, **16** = FFT page 1
-(source/window), **56** = FFT page 2 (factor/scale)):
-- `[MATH-MODE]`: `0`=CH1+CH2, `1`=CH1−CH2, `2`=CH2−CH1, `3`=CH1×CH2,
-  `4`=CH1/CH2, `5`=CH2/CH1, `6`=**FFT**. Selecting FFT sets
-  `[DISPLAY-FORMAT]` = **2** (so FORMAT is 0=XT, 1=XY, **2=FFT**).
-- `[MATH-FFT-SRC]`: `0`=CH1, `1`=CH2.
-- `[MATH-FFT-WIN]`: `0`=Hanning, `1`=Flattop, `2`=Rectangular (verified);
-  `3`=Bartlett, `4`=Blackman (inferred — only 0–2 were swept).
-- `[MATH-FFT-FACTOR]`: FFT (horizontal) zoom `0`=×1, `1`=×2, `2`=×5, `3`=×10.
-- `[MATH-FFT-DB]`: FFT vertical **dB/div** scale: `0`=1dB, `1`=2dB, `2`=5dB,
-  `3`=10dB, `4`=20dB.
-- In FFT mode the **frequency axis tracks the timebase/sample rate** — at the
-  slowest sweep (5.00 S/s) the resolution bottoms out at **250 mHz**.
-
-(`MATH_MODE_NAMES` / `MATH_FFT_SRC_NAMES` / `MATH_FFT_WIN_NAMES` /
-`MATH_FFT_FACTOR_NAMES` in `mso5202d.py`.)
-
-**Cursor menu — NOT in the settings blob** (`mso5202d-cursor.pcapng`): stepping
-cursor Type (Off/Time/Voltage/Track), Source (CH1/CH2/Math/RefA/RefB/LA), the
-S/E select and the cursor positions produced **zero** changes in the 213-byte
-state — consistent with there being no `CURSOR-*` param in `/protocol.inf`.
-Only the cursor menu id is observable: `[CONTROL-MENUID]` = **15**. (Like the
-horizontal marks and Display refresh-rate, cursor state lives outside the polled
-blob and can't be read back over this protocol.) The same capture caught
-`[MATH-DISP]` = **0/1 math on/off** and the Math menu id **41** (Math otherwise
-not yet swept).
-
-**AUTOSET** (front-panel button, `mso5202d-autoset.pcapng`) is a **compound
-reconfigure**, not a single field: it re-scales the timebase
-(`[HORIZ-TB]`/`[HORIZ-WIN-TB]`), can set `[TRIG-EDGE-SLOPE]`, and cycles
-`[TRIG-STATE]` (stop → auto → trig'd) as it re-arms. **Caveat:** while Autoset
-runs the scope goes briefly unresponsive — the settings poll times out for a
-second or two (a driver should tolerate this), so some fast intermediate changes
-(e.g. the vertical V/div the manual says Autoset also adjusts) were not captured
-cleanly. Autoset thus wasn't mapped to a single command; it's a firmware macro
-that ends in a normal settings state.
-
-`decode_settings()` in `mso5202d.py` now decodes the **entire blob** into named
-`/protocol.inf` fields (plus derived `CH1-VDIV-mV`/`CH2-VDIV-mV`, `TDIV-ns`
-(knob, from WIN-TB) and `TDIV-ACQ-ns` (real acquisition TB)), driven by a
-`SETTINGS_PARAMS` (name, width) table transcribed from Appendix A.
-
----
-
-## 7. What is verified vs. inferred
-
-**Verified on hardware / captures (high confidence):**
-- USB identity, endpoints, vendor-bulk transport.
-- Frame format, length field, checksum.
-- Connection recipe (detach → reset → claim → clear_halt → IN-before-write →
-  persistent buffer). Reproducibly required; without reset or without
-  IN-before-write it fails.
-- File-read handshake (content + end-marker) and the full contents of
-  `/protocol.inf` and `/keyprotocol.inf`.
-- Poll → 218-byte settings blob, and its **full field ↔ offset mapping**: the
-  213 param bytes are the `/protocol.inf` list verbatim, starting at raw
-  offset 4 (§6; proven by the CH1-V/div sweep capture, 2026-07-08). Includes
-  the `[VERT-CHx-VB]` → V/div table (2 mV…10 V, with the 10 V → VB=0 wrap
-  quirk; verified on **both channels**), `[VERT-CHx-POS]` and `[TRIG-VPOS]` in
-  signed **1/25-div** units (`level_V = (VPOS − POS_src) × vdiv/25`,
-  scope-calibrated), 8-byte time
-  fields in **picoseconds** (incl. `[HORIZ-TRIGTIME]` = horizontal delay), and
-  `[TRIG-FREQUENCY]` in mHz.
-- Waveform handshake and 8-bit sample format (1 kHz cal square wave confirmed).
-
-- `[HORIZ-TB]`/`[HORIZ-WIN-TB]` index → time/div table (2 ns…40 s, **2-4-8**
-  sequence, 32 steps; WIN-TB = knob, HORIZ-TB clamps at 200 ns — §6, proven by
-  the time/div sweep capture + on-screen readings).
-
-- **2-channel readout**: acquire value byte selects the channel (`02 01 <ch>`,
-  0 = CH1, 1 = CH2) — verified square-vs-flat on hardware (§5).
-
-- **Horizontal sample rate**: 200 samples/div → sample interval `TDIV/200`,
-  block = 19.2 div — matches the vendor manual and our cal-signal cycle counts
-  to the digit (§5). X axis can now be plotted in real seconds.
-
-**Inferred / open:**
-- Enum-coded field values (coupling, trigger modes, `[TRIG-STATE]` beyond
-  {3 run, 4 scan, 6 re-arm}, …).
-- Meaning of param `0x12` (vendor toggles it 1→0 per refresh; run/hold?).
-- Host-side control (likely key-press events via `/keyprotocol.inf`, unconfirmed).
-- counts→volts transfer scaling (does not track display V/div — §5) and
-  calibration (may need a scope cal file).
-
----
-
-## 8. Implementation notes for reuse
-
-- Driver library: `../scripts/mso5202d.py` (`Scope` class + `build`/`verify`
-  framing + `decode_settings`). `python3 scripts/mso5202d.py` runs a self-test.
-- Live viewer: `../scripts/mso5202d_plot.py` (matplotlib/Tk; `--png` for headless).
-- Original PoC/diagnostic: `../scripts/mso5202d_probe.py`.
-- Vendor Windows software (reference): `../docs/drivers/MSO5000D_Software.zip`.
-- Any host implementation needs: the frame builder + checksum, the file-read /
-  poll / acquire handshakes, a settings-blob parser, and an 8-bit waveform
-  assembler — over libusb bulk on IN `0x81` / OUT `0x02`, with the Linux
-  `cdc_subset` detach + `reset()` connection recipe (§2).
-
----
-
-## 9. Serial-protocol decoding (UART / SPI / I²C) — CONFIRMED on hardware
-
-The scope has no on-board serial bus decoder, but the host can reconstruct
-UART / SPI / I²C from captured analog waveforms. Implemented in
-`../scripts/serial_decode.py` (pure decode logic) + `../scripts/mso5202d_decode.py`
-(capture/decode/view CLI); test signals from `../scripts/esp_combo_gen/`
-(ESP32, streaming the `0x00..0xFF` ramp). Verified end-to-end 2026-07-10.
-
-**Method.**
-1. **Synchronized capture** — RUN then STOP so both channels come from one
-   frozen simultaneous acquisition (see §5 "inter-channel phase"), then read
-   `02 01 00` (CH1) and `02 01 01` (CH2). Required for the 2-wire protocols so
-   clock and data edges line up.
-2. **Threshold** each analog trace to logic levels — unwrap bytes → divisions
-   (§5 rendering model), Schmitt-trigger at the midpoint of the detected
-   low/high rails.
-3. **Decode** — UART (idle-high, 1 start / 8 data LSB-first / stop; baud
-   auto-detected from the shortest pulse or given), SPI (sample data on the
-   clock edge selected by CPOL/CPHA — rising iff CPOL==CPHA; re-frame bytes on
-   an idle-clock gap since there's no CS channel), I²C (START/STOP = SDA edge
-   while SCL high; sample SDA on SCL rising; 8 data + ACK per byte, MSB-first).
-
-**Constraints** (from the transport, not the decoders):
-- **2 signals per capture** — only CH1/CH2 are usable (LA-over-USB is dead, §5).
-  So UART = 1 line; SPI = SCLK + one data line (MOSI *or* MISO, not both — no
-  full-duplex); I²C = SDA + SCL.
-- **3840-sample record** — no deep memory (§5), so only short messages fit one
-  screen. Set the timebase for the bit rate (≈15–25 samples/bit); the host can
-  do this via the `0x11` timebase write (Appendix F.1).
-- **Capture quality varies** — some frozen acquisitions come back glitched
-  (more so at slow timebases); re-capture. The decoders are deterministic.
-
-**Verified bit-rate ranges** (ESP32 generators, ramp decoded byte-for-byte):
-
-| Protocol | Range verified | Note |
+| Node | What | Control |
 |---|---|---|
-| UART 8N1 | **9600 – 115200 baud** | hardware UART source |
-| SPI mode 0, MSB | **10 kHz – 2 MHz SCLK** | hardware SPI source |
-| I²C (self-ACK) | **~17 – 167 kHz SCL** | bit-bang source ceiling; decoder itself is edge-driven, no inherent limit |
+| `/dev/dso-fpga` | analog FPGA window (`0x10000000`) | mmap; 16-bit regs at `base+addr*2` |
+| `/dev/dso-fpga-la` | LA FPGA window (`0x18000000`) | mmap |
+| `/dev/dso-iobank` | GPIO + SROM bank width | ioctl `0x6900`=out-low, `0x6901`=out-high, `0x6902`=input (arg `(bank<<8)\|pin`); `0x6903/04/05`=SROM width 8/16/32-bit |
+| `/dev/adc` | SoC housekeeping/touch ADC | ioctl `0x4100`=channel-select (0..5); `read()` → ASCII decimal |
+| `/dev/dso-buzzer` | piezo buzzer (PWM) | ioctl `0x6200`=beep (arg=count), `0x6201`=off; other cmd numbers = alternate tones |
+| `/dev/bkl` | LCD backlight (PWM) | `write()` a 4-byte LE int: `-1`=off, `1..105`=brightness level |
+| `/dev/fb0` | LCD framebuffer | mmap **768000 B = 800×480 RGB565** |
+
+The `/dev/fb0` geometry (768000 bytes, 800×480, RGB565) is exactly the framebuffer
+selector `0x20` payload — the USB "screenshot" is a copy of this LCD memory. [verified
+for the 768000-byte size this session; node/ioctl details [inferred]]
+
+### 11.4 Device identity (`/sys.inf`, `/i2c.log`)
+
+Two files establish the concrete unit's identity; both are readable over USB (`0x10`):
+
+`/sys.inf` (firmware identity):
+
+```
+[DST type]dst1202b
+[soft version]3.2.35(180502.0)     ; app version, build date 2018-05-02
+[fpga version]0x55778344           ; loaded analog-FPGA bitstream id
+[start time]141                    ; power-on / boot counter
+[update time]0                     ; firmware-update counter (0 = never updated over USB)
+```
+
+`/i2c.log` — the on-board identity EEPROM image (8 KB; 16-byte binary header, zero
+padding, then an ASCII identity block at offset `0x1C00`):
+
+```
+[serial number]T 1G/112 030641
+[operation time]2018-05-18 14:44:37
+[operator]hantek
+[pcb]102  [lcd]3  [front]1
+[usb]0 [touch]0 [net]0 [iso]0 [sd]0 [vei]0 [dds]0 [key]0 [genamp]0   ; option flags (0 = absent)
+[buf]2                             ; memory / buffer size class
+[bw]200                            ; ANALOG BANDWIDTH = 200 MHz  ← authoritative MSO5202D tag
+```
+
+`[bw]200` is the authoritative in-EEPROM bandwidth stamp confirming this is the
+**200 MHz MSO5202D** (vs. the 60/100 MHz base models). The model string is carried in
+two files: `/logotype` = `dst1202b` (internal model key) and `/logotype.dis` =
+`Hantek_MSO5202D` (display brand). `/language.img` holds `license 6143 / locale 1 /
+domain 1`. [verified — file contents]
+
+### 11.5 Calibration & timing files (for completeness)
+
+Also on the filesystem and readable over `0x10`: `/chk_base_volt` (4-point gain-cal
+reference codes `[8mv]195 [20mv]387 [400mv]405 [2000mv]2006`); `/param/sav/chk1kb_*`
+(8664-byte per-lane ADC linearization table); `/tdc.log`, `/tdc_edge125M`,
+`/tdc_pulse125M` (TDC fine-timing histogram and 50-entry picosecond offset tables per
+trigger engine); `/cur_acq.type` (4-byte LE int persisting the acquire type). These
+feed the counts→volts and sub-sample-timing math documented in the calibration
+section. [verified — file contents; per-lane semantics [inferred]]
+
+### 11.6 Supervisor / watchdog / firmware-update model
+
+Two behaviours visible from the host are explained here:
+
+- **A crashed app auto-respawns in ~100 ms.** The scope-engine process is a *guarded
+  child* of a supervisor that monitors it via a heartbeat over a local UNIX socket
+  and relaunches it if the heartbeat stops (watch interval ≈ 100 ms). A hard engine
+  crash therefore causes a brief USB-link drop and reconnect — this is **normal**, not
+  a protocol fault, and is why a robust host driver should tolerate transient
+  disconnects (the repo's reconnect feature exists for exactly this). Independently, a
+  hardware watchdog (`/dev/watchdog`) resets the SoC if userspace wedges entirely.
+  [inferred]
+
+- **Firmware update is file-triggered, not a USB command.** Dropping an update package
+  (`emerg.do` / `force.up` / `system*.up` / `dst1000_4000.up`) onto the USB stick, or
+  a staged `/dso_update.exe`, causes the supervisor to decrypt (GPG) and unpack it into
+  the root filesystem and reboot. There is **no over-the-wire firmware-flash selector**;
+  the `0x53`/`0x43` protocol never carries firmware. [inferred]
+
+Shipped-firmware note (observed in the filesystem): the unit boots with a fixed dev IP
+`192.168.1.127`, an unauthenticated root `telnetd`, and an empty root password — a
+wide-open local debug/backdoor path, unrelated to the USB protocol. [verified — config
+files]
 
 ---
 
-## Appendix A — full `/protocol.inf` (parameter list; number = byte width)
+## Appendix A — full `/protocol.inf` (settings parameter list; number = byte width)
+
+The scope self-describes its 213-byte settings block via this file (read over USB with selector `0x10`). Each `[NAME] n` is a field and its byte width, in blob order. `[TOTAL] 213` = sum of widths (§8).
 
 ```
 [TOTAL]  213
@@ -1046,612 +2432,267 @@ UART / SPI / I²C from captured analog waveforms. Implemented in
 [LA-D15-D8-USER-THRESHOLD-VOLT]	2
 [END]
 ```
-(Note: `[LA-*]` lines use a TAB before the width. The `SWAP`/`OVERTIME` entries
-confirm this schema is shared across the MSO5000 family.)
 
-## Appendix B — full `/keyprotocol.inf` (front-panel keys)
+## Appendix B — full `/keyprotocol.inf` (front-panel key list)
+
+The 0-indexed position of each key entry in this file is its `keyid` for the `0x13` key-event selector (§4, §9).
 
 ```
 [TOTAL]  49
 [START]
-[FN-0-KEY] 1        [FN-1-KEY] 1        [FN-2-KEY] 1        [FN-3-KEY] 1
-[FN-4-KEY] 1        [FN-5-KEY] 1        [FN-6-KEY] 1        [FN-7-KEY] 1
-[FN-MLEFT-KEY] 1    [FN-MRIGHT-KEY] 1   [FN-MZERO-KEY] 1
-[MENU-SR-KEY] 1     [MENU-MEASURE-KEY] 1  [MENU-ACQUIRE-KEY] 1
-[MENU-UTILITY-KEY] 1  [MENU-CURSOR-KEY] 1  [MENU-DISPLAY-KEY] 1
-[CT-AUTOSET-KEY] 1  [CT-SINGLESEQ-KEY] 1  [CT-RS-KEY] 1
-[CT-HELP-KEY] 1     [CT-DS-KEY] 1       [CT-STU-KEY] 1
+[FN-0-KEY] 1
+[FN-1-KEY] 1
+[FN-2-KEY] 1
+[FN-3-KEY] 1
+[FN-4-KEY] 1
+[FN-5-KEY] 1
+[FN-6-KEY] 1
+[FN-7-KEY] 1
+[FN-MLEFT-KEY] 1
+[FN-MRIGHT-KEY] 1
+[FN-MZERO-KEY] 1
+[MENU-SR-KEY] 1
+[MENU-MEASURE-KEY] 1
+[MENU-ACQUIRE-KEY] 1
+[MENU-UTILITY-KEY] 1
+[MENU-CURSOR-KEY] 1
+[MENU-DISPLAY-KEY] 1
+[CT-AUTOSET-KEY]  1
+[CT-SINGLESEQ-KEY] 1
+[CT-RS-KEY] 1
+[CT-HELP-KEY] 1
+[CT-DS-KEY] 1
+[CT-STU-KEY] 1
 [VT-MATH-MENU-KEY] 1
-[VT-CH1-MENU-KEY] 1 [VT-CH1-PSUB-KEY] 1 [VT-CH1-PADD-KEY] 1 [VT-CH1-PZERO-KEY] 1
-[VT-CH1-VBSUB-KEY] 1  [VT-CH1-VBADD-KEY] 1     ; CH1 volts/div down / up
-[VT-CH2-MENU-KEY] 1 [VT-CH2-PSUB-KEY] 1 [VT-CH2-PADD-KEY] 1 [VT-CH2-PZERO-KEY] 1
-[VT-CH2-VBSUB-KEY] 1  [VT-CH2-VBADD-KEY] 1     ; CH2 volts/div down / up
-[HZ-MENU-KEY] 1     [HZ-PSUB-KEY] 1     [HZ-PADD-KEY] 1     [HZ-PZERO-KEY] 1
-[HZ-TBSUB-KEY] 1    [HZ-TBADD-KEY] 1                        ; timebase down / up
-[TG-MENU-KEY] 1     [TG-PSUB-KEY] 1     [TG-PADD-KEY] 1     [TG-PZERO-KEY] 1
-[TG-PHALF-KEY] 1    [TG-FORCE-KEY] 1    [TG-PROBECHECK-KEY] 1
+[VT-CH1-MENU-KEY] 1
+[VT-CH1-PSUB-KEY] 1
+[VT-CH1-PADD-KEY] 1
+[VT-CH1-PZERO-KEY] 1
+[VT-CH1-VBSUB-KEY] 1
+[VT-CH1-VBADD-KEY] 1
+[VT-CH2-MENU-KEY] 1
+[VT-CH2-PSUB-KEY] 1
+[VT-CH2-PADD-KEY] 1
+[VT-CH2-PZERO-KEY] 1
+[VT-CH2-VBSUB-KEY] 1
+[VT-CH2-VBADD-KEY] 1
+[HZ-MENU-KEY] 1
+[HZ-PSUB-KEY] 1
+[HZ-PADD-KEY] 1
+[HZ-PZERO-KEY] 1
+[HZ-TBSUB-KEY] 1
+[HZ-TBADD-KEY] 1
+[TG-MENU-KEY] 1
+[TG-PSUB-KEY] 1
+[TG-PADD-KEY] 1
+[TG-PZERO-KEY] 1
+[TG-PHALF-KEY] 1
+[TG-FORCE-KEY] 1
+[TG-PROBECHECK-KEY] 1
 [END]
 ```
 
-## Appendix C — example raw frames (hex)
+## Appendix C — annotated example frames
+
+One real OUT+IN pair per selector, byte-by-byte. Framing recap:
+`leader | len_LE16 | payload | checksum`, where **`len = (bytes after the len field)`
+= payload + 1 (the checksum byte)**, and **`checksum = (Σ all bytes except the
+checksum) & 0xFF`**. The IN payload's first byte is the echo = `selector | 0x80`. The
+special checksum value `0x66` is a **wildcard** the validator always accepts.
+
+### C.1 Leader `0x53` — data channel
 
 ```
-; --- OUT: read /protocol.inf ---
-53 10 00 10 00 2f 70 72 6f 74 6f 63 6f 6c 2e 69 6e 66 66
-;  S  <len=16> 10 00 "/protocol.inf"                    cksum
+--- 0x00  connect / ping ---
+OUT  53 02 00 00 55
+     53          leader 'S'
+        02 00    len = 2  (payload 0x00 + checksum)
+              00 selector 0x00
+                 55  checksum = (53+02+00+00)&0xFF
+IN   53 02 00 80 d5
+     80          echo = 0x00|0x80 ; empty ack, no data
 
-; --- OUT: poll (settings) ---            53 02 00 01 56
-; --- OUT: acquire latch ---              53 04 00 02 01 00 5a
-; --- OUT: pre-acquire select (v=0) ---   53 04 00 12 01 00 6a
+--- 0x01  poll settings ---
+OUT  53 02 00 01 56
+              01 selector 0x01 (no args)
+IN   53 D7 00 81 <213 param bytes> <ck>
+     D7 00       len = 0x00D7 = 215 (echo + 213 params + checksum)
+        81       echo = 0x01|0x80
+        <213 B>  the settings blob (§8) — param[0] is at frame byte offset 4
 
-; --- IN: settings-state blob (218 B), baseline ---
-53 d7 00 81 01 09 00 00 00 00 00 00 ef ff 00 05 00 00 00 00 00 00 00 03
-00 00 00 00 21 00 40 42 0f 00 ...  (213 data bytes total) ... <cksum>
-;  S  <len=215> 81 01 <213 param bytes>                               cksum
+--- 0x02  acquire, CH1 ---
+OUT  53 04 00 02 01 00 5a
+              02 selector 0x02
+                 01  sub = 1  (acquire; sub=0 would be a latch, not a read)
+                    00  channel 0 = CH1  (1=CH2, 2=Math, 5=LA)
+                       5a checksum
+IN   (frame 1, SIZE)  53 07 00 82 00 00 00 0f 00 eb
+     82            echo = 0x02|0x80
+        00         subtype 0x00 = SIZE
+           00      src = 0 (CH1; CH2=1, LA=3)
+              00 0f 00   count = 24-bit LE = 0x000F00 = 3840  (DATA-byte count;
+                         for LA it is 2×samples)
+IN   (frame 2, DATA)  53 04 0f 82 01 00 <3840 signed-int8 samples> <ck>
+     04 0f         len = 0x0F04 = 3844 (echo+sub+ch + 3840 + ck)
+        82 01 00   echo / subtype 0x01 = DATA / channel 0
+IN   (frame 3, END)   53 04 00 82 02 00 db
+        82 02 00   subtype 0x02 = END-marker (MUST be consumed or the stream desyncs)
+        (subtype 0x03 = "no fresh data", e.g. LA idle: 53 04 00 82 03 03 df)
 
-; --- IN: waveform size then data ---
-53 07 00 82 00 00 00 0f 00 eb                 ; size = 0x0F00 = 3840
-53 04 0f 82 01 00 30 2d 2d 2e 30 2f 2d 2d ... ; 3840 8-bit samples
-53 04 00 82 02 00 db                          ; end-marker
+--- 0x10  file read ("/protocol.inf") ---
+OUT  53 10 00 10 00 2f 70 72 6f 74 6f 63 6f 6c 2e 69 6e 66 66
+     10 00         len = 16
+        10         selector 0x10
+           00      reserved/subtype byte
+              2f..66  path ASCII "/protocol.inf" (13 bytes)
+                       66  checksum = 0x66 WILDCARD (0x10 always uses it)
+IN   (content) 53 <len> 90 01 <up to 10208 file bytes> <ck>   ; repeated N times
+     90 01         echo / subtype 0x01 = content chunk (cap 10208 B each)
+IN   (end)     53 04 00 90 02 61 4a
+        90 02      subtype 0x02 = END
+              61   sum8 = 8-bit sum of ALL file bytes (0x61 for /help.db, verified)
+     (no SIZE frame is ever sent for 0x10)
+
+--- 0x11  write settings ---
+OUT  53 D7 00 11 <213 param bytes> <ck>
+        11         selector 0x11 ; payload = the full 213-byte blob (read-modify-write)
+IN   53 03 00 91 00 e7
+     91            echo = 0x11|0x80
+        00         status 0x00 = OK   (0xFF = rejected: 53 03 00 91 ff e6)
+
+--- 0x12  run / acquire latch ---
+OUT  53 04 00 12 01 01 6b
+        12 01 01   selector / sub=1 (run-latch) / val=1
+IN   53 04 00 92 01 01 eb
+     92 01 01      echo / sub / val echoed
+     (sub=0 path: OUT 53 04 00 12 00 00 69  -> IN 53 03 00 92 00 e8, acq-mode;
+      neither sub is a STOP or panel-lock)
+
+--- 0x13  key event (Run/Stop = keyid 19 = 0x13) ---
+OUT  53 04 00 13 13 01 7e
+        13         selector 0x13
+           13      keyid = 19 (CT-RS-KEY)
+              01   state byte — TRANSMITTED BUT IGNORED (00 gives the same one press)
+IN   53 03 00 93 01 ea
+     93            echo = 0x13|0x80
+        01         live menu/key status byte (NOT an echo of the state byte)
+
+--- 0x20  framebuffer (screenshot) ---
+OUT  53 02 00 20 75
+              20   selector 0x20 (no args)
+IN   (data)  53 e3 27 a0 01 <10208 pixel bytes> <ck>   ; 75 full chunks
+     e3 27         len = 0x27E3 = 10211 (echo+sub + 10208 + ck)
+     a0 01         echo = 0x20|0x80 / subtype 0x01 = data
+IN   (last data) 53 ... a0 01 <2400 pixel bytes> <ck>  ; final short chunk
+IN   (end)   53 04 00 a0 02 47 40
+     a0 02         subtype 0x02 = END
+           47      sum8 = 8-bit sum of all 768000 pixel bytes
+     Total pixels = 768000 = 800×480×2 (RGB565). NO size frame.
+
+--- 0x14 / 0x21  descriptor write / read (purpose unknown) ---
+OUT  53 <len> 14 <id_lo> <id_hi> <bytes>     ; descriptor WRITE, no IN reply
+OUT  53 02 00 21 76  ->  IN 53 <len> a1 <descriptor bytes> <ck>
+     a1            echo = 0x21|0x80 ; default id16 observed = 0x07D9 (2009). [gap: contents]
 ```
 
-## Appendix D — settings-blob field datasheet (offsets, units, enums)
+### C.2 Leader `0x43` — private command / shell channel
 
-The settings poll (`0x01`) returns `53 <len> 81 <213 param bytes> <ck>`. The 213
-bytes are the `/protocol.inf` list (Appendix A) starting at **raw frame
-offset 4** (right after the `0x81` echo). Multi-byte fields are little-endian;
-positions/levels are signed. `decode_settings()` in `mso5202d.py` decodes all of
-these. Offsets below are into the raw frame (`53 xx xx 81 …`).
-
-**Units summary:** position/level fields (`VERT-CHx-POS`, `TRIG-VPOS`) are signed
-**1/25-division** units (25 counts/div; ±200 = ±8 div) — scope-calibrated §6;
-all 8-byte time fields are **picoseconds**; `TRIG-FREQUENCY` is **mHz**;
-`*-VB` are V/div indices (`VB_TO_MV`); `HORIZ-*TB` are timebase indices
-(`TB_TO_NS`, 2-4-8 sequence, §6).
+Identical framing, a **separate** selector map, and a superset of capabilities the
+vendor app never uses. Present for completeness; treat as privileged.
 
 ```
-off  w  field                       decoded meaning / enum (blank = raw value, meaning TBD)
---- VERTICAL, CH1 ---
-4    1  VERT-CH1-DISP               0/1 channel displayed
-5    1  VERT-CH1-VB                 V/div index -> VB_TO_MV (0=2mV..10=5V; 10V/div re-uses 0)
-6    1  VERT-CH1-COUP               0=DC 1=AC 2=GND (channel coupling; NOT trigger coup)
-7    1  VERT-CH1-20MHZ              0=Full 1=20 MHz BW limit
-8    1  VERT-CH1-FINE               0=Coarse 1=Fine (V/div resolution)
-9    1  VERT-CH1-PROBE              0=1x 1=10x 2=100x 3=1000x
-10   1  VERT-CH1-RPHASE             0=Off 1=On (INVERT; also flips trigger-level sign)
-11   1  VERT-CH1-CNT-FINE           fine-gain counter (unmapped)
-12   2  VERT-CH1-POS                signed; vertical position, 1/25 div
---- VERTICAL, CH2 (same layout) ---
-14   1  VERT-CH2-DISP               0/1 channel displayed
-15   1  VERT-CH2-VB                 V/div index -> VB_TO_MV
-16   1  VERT-CH2-COUP               0=DC 1=AC 2=GND
-17   1  VERT-CH2-20MHZ              0=Full 1=20 MHz BW limit
-18   1  VERT-CH2-FINE               0=Coarse 1=Fine
-19   1  VERT-CH2-PROBE              0=1x 1=10x 2=100x 3=1000x
-20   1  VERT-CH2-RPHASE             (unmapped)
-21   1  VERT-CH2-CNT-FINE           (unmapped)
-22   2  VERT-CH2-POS                signed; vertical position, 1/25 div
---- TRIGGER (main) ---
-24   1  TRIG-STATE                  0=STOP 1=WAIT(Normal) 2=AUTO 3=TRIG'D 4=SCAN 5=SINGLE 6=ARMING
-25   1  TRIG-TYPE                   0=Edge 1=Video 2=Pulse 3=Slope 4=Overtime 5=Alter
-26   1  TRIG-SRC                    0=CH1 1=CH2 2=EXT 3=EXT/5 4=AC-line
-27   1  TRIG-MODE                   0=Auto 1=Normal (mirrors TRIG-SWAP-CHx-MODE)
-28   1  TRIG-COUP                   0=DC 1=AC 2=NoiseRej 3=HFRej 4=LFRej
-29   2  TRIG-VPOS                   signed; trigger marker pos, 1/25 div.
-                                    level_V = (TRIG-VPOS - POS_src) * vdiv / 25
-31   8  TRIG-FREQUENCY              frequency counter, mHz (0 = not triggering)
-39   8  TRIG-HOLDTIME-MIN           ps (= 100 ns, holdoff lower limit)
-47   8  TRIG-HOLDTIME-MAX           ps (= 10 s, holdoff upper limit)
-55   8  TRIG-HOLDTIME               ps; live holdoff (HORIZONTAL menu > F4; knob-push resets to 100 ns)
-63   1  TRIG-EDGE-SLOPE             0=Rising 1=Falling
---- TRIGGER: Video sub-params ---
-64   1  TRIG-VIDEO-NEG              0=Normal 1=Inverted
-65   1  TRIG-VIDEO-PAL             0=NTSC 1=PAL/SECAM
-66   1  TRIG-VIDEO-SYN             0=AllLines 1=LineNum 2=OddField 3=EvenField 4=AllFields
-67   2  TRIG-VIDEO-LINE            line number (1..525 NTSC / 1..625 PAL), used when SYN=LineNum
---- TRIGGER: Pulse sub-params ---
-69   1  TRIG-PULSE-NEG             0=Positive 1=Negative pulse
-70   1  TRIG-PULSE-WHEN            0='=' 1='≠' 2='>' 3='<' (== TRIG-SLOPE-WHEN)
-71   8  TRIG-PULSE-TIME            ps; pulse width 20 ns .. 10 s (default 500000 = 500 ns)
---- TRIGGER: Slope sub-params ---
-79   1  TRIG-SLOPE-SET             0=Positive slope 1=Negative
-80   1  TRIG-SLOPE-WIN             0=V1(upper) 1=V2(lower) 2=Both (knob-adjust select)
-81   1  TRIG-SLOPE-WHEN            0='=' 1='≠' 2='>' 3='<'
-82   2  TRIG-SLOPE-V1              signed; upper slope threshold, 1/25 div (volts = (V1-POS)*vdiv/25, scope-verified)
-84   2  TRIG-SLOPE-V2              signed; lower slope threshold, 1/25 div
-86   8  TRIG-SLOPE-TIME            ps (20 ns .. 10 s)
---- TRIGGER: Alter/Swap per-channel blocks (CH1 @94, CH2 @122) ---
-; In Alter mode each channel has its own trigger config here; sub-params reuse
-; the main-trigger enums. TRIG-SRC alternates CH1<->CH2 as the scope switches.
-94   1  TRIG-SWAP-CH1-TYPE          0=Edge 1=Video 2=Pulse 3=Overtime (4-value, no Slope/Alter)
-95   1  TRIG-SWAP-CH1-MODE
-96   1  TRIG-SWAP-CH1-COUP
-97   1  TRIG-SWAP-CH1-EDGE-SLOPE
-98   1  TRIG-SWAP-CH1-VIDEO-NEG
-99   1  TRIG-SWAP-CH1-VIDEO-PAL
-100  1  TRIG-SWAP-CH1-VIDEO-SYN
-101  2  TRIG-SWAP-CH1-VIDEO-LINE
-103  1  TRIG-SWAP-CH1-PULSE-NEG
-104  1  TRIG-SWAP-CH1-PULSE-WHEN
-105  8  TRIG-SWAP-CH1-PULSE-TIME    ps
-113  1  TRIG-SWAP-CH1-OVERTIME-NEG
-114  8  TRIG-SWAP-CH1-OVERTIME-TIME ps
-122  1  TRIG-SWAP-CH2-TYPE          (CH2 block, same layout as CH1 @94..121)
-123  1  TRIG-SWAP-CH2-MODE
-124  1  TRIG-SWAP-CH2-COUP
-125  1  TRIG-SWAP-CH2-EDGE-SLOPE
-126  1  TRIG-SWAP-CH2-VIDEO-NEG
-127  1  TRIG-SWAP-CH2-VIDEO-PAL
-128  1  TRIG-SWAP-CH2-VIDEO-SYN
-129  2  TRIG-SWAP-CH2-VIDEO-LINE
-131  1  TRIG-SWAP-CH2-PULSE-NEG
-132  1  TRIG-SWAP-CH2-PULSE-WHEN
-133  8  TRIG-SWAP-CH2-PULSE-TIME    ps
-141  1  TRIG-SWAP-CH2-OVERTIME-NEG
-142  8  TRIG-SWAP-CH2-OVERTIME-TIME ps
---- TRIGGER: Overtime sub-params ---
-150  1  TRIG-OVERTIME-NEG          0=Positive 1=Negative
-151  8  TRIG-OVERTIME-TIME         ps; overtime 20 ns .. 10 s
---- HORIZONTAL ---
-159  1  HORIZ-TB                   acquisition timebase index -> TB_TO_NS (clamps at 6 = 200 ns)
-160  1  HORIZ-WIN-TB               knob timebase index 0..31 -> TB_TO_NS (2-4-8 seq)
-161  1  HORIZ-WIN-STATE            window/zoom state (never changed via Horizontal menu; needs dual-window engaged?)
-162  8  HORIZ-TRIGTIME             SIGNED ps; horizontal position/delay (goes negative = post-trigger)
---- MATH ---
-170  1  MATH-DISP                  0/1 math on/off (Math menu = CONTROL-MENUID 41)
-171  1  MATH-MODE                  0=CH1+CH2 1=CH1-CH2 2=CH2-CH1 3=CH1*CH2 4=CH1/CH2 5=CH2/CH1 6=FFT
-172  1  MATH-FFT-SRC               0=CH1 1=CH2
-173  1  MATH-FFT-WIN               0=Hanning 1=Flattop 2=Rectangular (3=Bartlett 4=Blackman, inferred)
-174  1  MATH-FFT-FACTOR            FFT zoom 0=x1 1=x2 2=x5 3=x10
-175  1  MATH-FFT-DB                FFT vertical dB/div: 0=1dB 1=2dB 2=5dB 3=10dB 4=20dB
---- DISPLAY ---
-176  1  DISPLAY-MODE               0=Vectors 1=Dots (draw type)
-177  1  DISPLAY-PERSIST            0=Auto 2=0.2s 4=0.4s 8=0.8s 10=1.0s 11=2.0s 13=4.0s 17=8.0s 19=Infinity
-178  1  DISPLAY-FORMAT             0=XT 1=XY 2=FFT (set when MATH-MODE=FFT)
-179  1  DISPLAY-CONTRAST           waveform/display intensity 0..15
-180  1  DISPLAY-MAXCONTRAST        max contrast (=15)
-181  1  DISPLAY-GRID-KIND          0=Off 1=Dotted 2=RealLine (order inferred)
-182  1  DISPLAY-GRID-BRIGHT        grid intensity 0..15
-183  1  DISPLAY-MAXGRID-BRIGHT     max grid brightness (=15)
---- ACQUIRE ---
-184  1  ACQURIE-MODE               0=Normal 1=Peak 2=Average
-185  1  ACQURIE-AVG-CNT            avg index: 0=4 1=8 2=16 3=32 4=64 5=128 (count=4*2^n)
-186  1  ACQURIE-TYPE               0=Realtime 1=Equivalent-time
-187  1  ACQURIE-STORE-DEPTH        record length: 0=4K 4=40K 6=512K 7=1M (1M single-ch only; gaps=greyed depths)
---- MEASURE (8 slots, each: SRC byte then type byte; up to 8 simultaneous) ---
-188  1  MEASURE-ITEM1-SRC          source: 0=CH1 1=CH2 3=LA (id 2 skipped; no Math source)
-189  1  MEASURE-ITEM1              type: 0=Off(empty slot) 1=Frequency 2=Period 3=Mean 4=Pk-Pk 5=Cyc RMS 6=Minimum 7=Maximum 8=Rise Time 9=Fall Time 10=+Width 11=-Width 12=Delay1-2 Rise 13=Delay1-2 Fall 14=+Duty 15=-Duty 16=Vbase 17=Vtop 18=Vmid 19=Vamp 20=Overshoot 21=Preshoot 22=Period Mean 23=Period RMS 24=FOvershoot 25=RPreshoot 26=Burst Width 27=FRF 28=FFR 29=LRR 30=LRF 31=LFR
-190  1  MEASURE-ITEM2-SRC          source  (same enum as ITEM1-SRC)
-191  1  MEASURE-ITEM2              type    (same enum as ITEM1)
-192  1  MEASURE-ITEM3-SRC          source  (same enum)
-193  1  MEASURE-ITEM3              type    (same enum)
-194  1  MEASURE-ITEM4-SRC          source  (same enum)
-195  1  MEASURE-ITEM4              type    (same enum)
-196  1  MEASURE-ITEM5-SRC          source  (same enum)
-197  1  MEASURE-ITEM5              type    (same enum)
-198  1  MEASURE-ITEM6-SRC          source  (same enum)
-199  1  MEASURE-ITEM6              type    (same enum)
-200  1  MEASURE-ITEM7-SRC          source  (same enum)
-201  1  MEASURE-ITEM7              type    (same enum)
-202  1  MEASURE-ITEM8-SRC          source  (same enum)
-203  1  MEASURE-ITEM8              type    (same enum)
---- CONTROL (menu/UI state) ---
-204  1  CONTROL-TYPE               always 0 observed
-205  1  CONTROL-MENUID             current menu id (see table below)
-206  1  CONTROL-DISP-MENU          0/1 menu displayed on screen
---- LOGIC ANALYZER (menu 61 base; 62 = D7-D0 config page, 63 = D15-D8 page) ---
-207  1  LA-SWI                     0/1 logic-analyzer on/off
-208  2  LA-CHANNEL-STATE           D0..D15 enable bitmask, bit N = D(N) (D0=LSB; all-on=0xFFFF; low byte=D0-D7, high byte=D8-D15)
-210  1  LA-CURRENT-CHANNEL         selected channel 0..15 (= D0..D15)
-211  1  LA-D7-D0-THRESHOLD-TYPE    0=TTL 1=CMOS 2=ECL 3=User (threshold is per 8-ch group)
-212  1  LA-D15-D8-THRESHOLD-TYPE   0=TTL 1=CMOS 2=ECL 3=User
-213  2  LA-D7-D0-USER-THRESHOLD-VOLT   signed; volts = raw/4096 (±8V, 12-bit DAC = code<<4). Active when TYPE=User
-215  2  LA-D15-D8-USER-THRESHOLD-VOLT  signed; same encoding (volts = raw/4096)
-(217 = checksum)
+--- 0x43 / 0x10  file read (same as 0x53/0x10) ---
+OUT  43 10 00 10 00 2f 70 72 6f ... 66     ; echo 0x90, wildcard checksum
+
+--- 0x43 / 0x11  shell exec (runs as root) ---
+OUT  43 06 00 11 6c 73 20 2f 88
+        11         selector 0x11
+           6c 73 20 2f   ASCII "ls /"   ; executed by a root shell
+IN   (command output, framed)               ; [inferred] echo 0x91
+
+--- 0x43 / 0x02, 0x03  FPGA region dumps (config/cal, not samples) ---
+OUT  43 02 00 02 <ck>  -> region-1 (~5072 B, analog run/set block)
+OUT  43 02 00 03 <ck>  -> region-2 (~8664 B, ADC linearization table)
+
+--- 0x43 / 0x44  beep ---
+OUT  43 03 00 44 <arg> <ck>  -> IN echo 0xC4
+
+--- 0x43 / 0x7f  commit / apply settings (NOT a reboot) ---
+OUT  43 02 00 7f c4
+              7f   persist-if-dirty + re-apply-all
+IN   43 02 00 ff 44
+     ff            ack (echo)
 ```
-
-### Enum tables (mapped so far)
-
-| field | value → meaning |
-|---|---|
-| `TRIG-STATE` | 0 STOP · 1 WAIT (Normal, no trig) · 2 AUTO (no trig) · 3 TRIG'D · 4 SCAN/roll · 5 SINGLE (armed) · 6 ARMING flicker. Official on-screen labels: `STOP` / `Ready` / `AUTO` / `Trig'd` / `Scan` / `Astop` / `Armed` (0–6). |
-| `TRIG-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Slope · 4 Overtime · 5 Alter (swap; alternates `TRIG-SRC` CH1↔CH2) |
-| `TRIG-SRC` | 0 CH1 · 1 CH2 · 2 EXT · 3 EXT/5 · 4 AC line. **Selectable set is restricted per trigger type:** Edge = all 5; Video / Pulse / Slope = CH1/CH2/EXT/EXT-5 (no AC line); Overtime = **CH1/CH2 only**. |
-| `TRIG-MODE` | 0 Auto · 1 Normal (mirrors into `TRIG-SWAP-CHx-MODE`) |
-| `TRIG-EDGE-SLOPE` | 0 Rising · 1 Falling |
-| `TRIG-COUP` | 0 DC · 1 AC · 2 Noise Reject · 3 HF Reject · 4 LF Reject |
-| `TRIG-VIDEO-NEG` | 0 Normal · 1 Inverted |
-| `TRIG-VIDEO-PAL` | 0 NTSC · 1 PAL/SECAM |
-| `TRIG-VIDEO-SYN` | 0 All Lines · 1 Line Num · 2 Odd Field · 3 Even Field · 4 All Fields |
-| `TRIG-VIDEO-LINE` | line number 1…525 (NTSC) / 1…625 (PAL); used when SYN = Line Num |
-| `TRIG-SLOPE-SET` | 0 Positive slope · 1 Negative |
-| `TRIG-SLOPE-WIN` | 0 V1 (upper) · 1 V2 (lower) · 2 Both |
-| `TRIG-SLOPE-WHEN` / `TRIG-PULSE-WHEN` | 0 = · 1 ≠ · 2 > · 3 < (same enum, confirmed on both) |
-| `TRIG-PULSE-NEG` | 0 Positive · 1 Negative pulse |
-| `TRIG-OVERTIME-NEG` | 0 Positive · 1 Negative |
-| `TRIG-SWAP-CHx-TYPE` | 0 Edge · 1 Video · 2 Pulse · 3 Overtime (per-channel type in Alter mode; 4-value, no Slope/Alter) |
-| `VERT-CHx-COUP` | 0 DC · 1 AC · 2 GND (channel coupling ≠ trigger coupling) |
-| `VERT-CHx-20MHZ` | 0 Full · 1 20 MHz limit |
-| `VERT-CHx-FINE` | 0 Coarse · 1 Fine |
-| `VERT-CHx-PROBE` | 0 1× · 1 10× · 2 100× · 3 1000× |
-| `VERT-CHx-RPHASE` | 0 Off · 1 On (Invert) |
-| `ACQURIE-TYPE` | 0 Realtime · 1 Equivalent-time |
-| `ACQURIE-MODE` | 0 Normal · 1 Peak Detect · 2 Average |
-| `ACQURIE-AVG-CNT` | 0=4 · 1=8 · 2=16 · 3=32 · 4=64 · 5=128 (count = 4·2ⁿ) |
-| `ACQURIE-STORE-DEPTH` | 0=4K · 4=40K · 6=512K · 7=1M (1M single-ch; gaps 1/2/3/5 = greyed depths) |
-| `MATH-MODE` | 0 CH1+CH2 · 1 CH1−CH2 · 2 CH2−CH1 · 3 CH1×CH2 · 4 CH1/CH2 · 5 CH2/CH1 · 6 FFT |
-| `MATH-FFT-SRC` | 0 CH1 · 1 CH2 |
-| `MATH-FFT-WIN` | 0 Hanning · 1 Flattop · 2 Rectangular · 3 Bartlett · 4 Blackman (3/4 inferred) |
-| `MATH-FFT-FACTOR` | 0 ×1 · 1 ×2 · 2 ×5 · 3 ×10 (FFT zoom) |
-| `MATH-FFT-DB` | FFT dB/div: 0 1dB · 1 2dB · 2 5dB · 3 10dB · 4 20dB |
-| `DISPLAY-MODE` | 0 Vectors · 1 Dots |
-| `DISPLAY-FORMAT` | 0 XT · 1 XY · 2 FFT |
-| `DISPLAY-GRID-KIND` | 0 Off · 1 Dotted · 2 RealLine |
-| `DISPLAY-PERSIST` | 0 Auto · 2 0.2s · 4 0.4s · 8 0.8s · 10 1.0s · 11 2.0s · 13 4.0s · 17 8.0s · 19 Infinity |
-| `DISPLAY-CONTRAST` / `-GRID-BRIGHT` | 0…15 intensity (max = the `-MAX*` fields = 15) |
-| `MEASURE-ITEMn-SRC` (n=1…8) | 0 CH1 · 1 CH2 · 3 LA (id 2 skipped/unused — **no Math source** in measurements) |
-| `MEASURE-ITEMn` (n=1…8) | measurement type / `0` = **Off** (empty slot): 0 Off · 1 Frequency · 2 Period · 3 Mean · 4 Pk-Pk · 5 Cyc RMS · 6 Minimum · 7 Maximum · 8 Rise Time · 9 Fall Time · 10 +Width · 11 −Width · 12 Delay1-2 Rise · 13 Delay1-2 Fall · 14 +Duty · 15 −Duty · 16 Vbase · 17 Vtop · 18 Vmid · 19 Vamp · 20 Overshoot · 21 Preshoot · 22 Period Mean · 23 Period RMS · 24 FOvershoot · 25 RPreshoot · 26 Burst Width · 27 FRF · 28 FFR · 29 LRR · 30 LRF · 31 LFR |
-| `LA-CHANNEL-STATE` | D0…D15 enable bitmask, **bit N = D(N)** (D0 = LSB, all-on = `0xFFFF`; D0–D7 = low byte, D8–D15 = high byte) |
-| `LA-CURRENT-CHANNEL` | selected channel 0…15 (= D0…D15) |
-| `LA-D7-D0-THRESHOLD-TYPE` / `LA-D15-D8-THRESHOLD-TYPE` | 0 TTL · 1 CMOS · 2 ECL · 3 User (threshold is **per 8-ch group**) |
-| `LA-*-USER-THRESHOLD-VOLT` | signed; **volts = raw/4096** (±8 V, 12-bit DAC stored as `code<<4`); active when that group's TYPE = User |
-| `VERT-CHx-VB` | V/div: 0=2mV 1=5mV 2=10 3=20 4=50 5=100 6=200 7=500mV 8=1V 9=2V 10=5V (10V/div → 0) |
-| `HORIZ-*TB` | time/div index, 2-4-8 sequence 2 ns…40 s (`TB_TO_NS`); WIN-TB = knob 0..31, HORIZ-TB clamps at 6 (200 ns) |
-
-**Measure** puts real state in the blob — 8 slots `MEASURE-ITEM1…8`, each a
-(`-SRC`, type) pair — up to **8 simultaneous measurements** (confirmed on the
-scope). Mapped 2026-07-09 by sweeping `MEASURE-ITEM8` through the on-screen list
-(`captures/mso5202d-measure.pcapng`); enum above. Menu ids: **20** = base, **21**
-= the item add/config submenu (the poll toggles `20↔21` as you set each item).
-
-**Logic analyzer** is fully mapped (2026-07-09, `captures/mso5202d-la-*.pcapng`),
-using the ESP32 16-channel test generator (`scripts/esp_combo_gen/`) as known
-inputs: `LA-CHANNEL-STATE` bit N = D(N) (verified toggling each D0–D15
-individually), `LA-CURRENT-CHANNEL` = selected 0–15, per-group threshold
-type (TTL/CMOS/ECL/User) and user volts (raw/4096, ±8 V 12-bit DAC). Menu ids
-61 base / 62 (D7-D0 page) / 63 (D15-D8 page).
-
-Still-unmapped: the EXT-source trigger level in volts; FFT window codes 3/4
-(Bartlett/Blackman, inferred).
-
-### `CONTROL-MENUID` — on-screen menu id (partial, mapped by context)
-
-| id | menu |
-|---|---|
-| 1 | **CH1** vertical menu |
-| 2 | **CH2** vertical menu |
-| 3 | Horizontal menu, **page 1** (window ctrl / marks) |
-| 4 | Display menu (Type / Persist / Contrast page) |
-| 5 | Trigger → Edge submenu |
-| 6 | Trigger → Pulse submenu, **page 1** |
-| 7 | Trigger → Pulse submenu, **page 2** (When / Time) |
-| 8 | Trigger → Video submenu |
-| 10 | default / no active menu (vendor-app baseline); **also Utility page 3** (reused generic id) |
-| 11 | Trigger menu (level/base, Edge default) |
-| 15 | Cursor menu (cursor state is **not** in the settings blob) |
-| 16 | Math → FFT submenu, **page 1** (source / window) |
-| 17 | **Acquire** menu |
-| 18 | **Save/Recall** → SETUP page |
-| 19 | **Save/Recall** → REF (reference-waveform) page |
-| 20 | **Measure** base menu |
-| 21 | **Measure** → item add/config submenu (`MEASURE-ITEM*`) |
-| 22 | Trigger → Slope submenu, **page 1** |
-| 23 | Trigger → Slope submenu, **page 2** (V1/V2 / When / Time) |
-| 24 | Trigger → Alter submenu (base) |
-| 25 | **Default Setup** (factory reset — resets all settings-blob params to defaults) |
-| 26 / 27 / 28 / 29 | Alter → **CH1** Edge / Pulse / Video / Overtime |
-| 30 / 31 / 32 / 33 | Alter → **CH2** Edge / Pulse / Video / Overtime |
-| 38 | Trigger → Overtime submenu, **page 1** |
-| 39 | Trigger → Overtime submenu, **page 2** (Coupling) |
-| 36 | Display menu (Grid / Format page) |
-| 40 | Horizontal menu, **page 2** (holdoff / play-stop / coarse-fine) |
-| 41 | Math menu (operations; `[MATH-DISP]` = math on/off) |
-| 42 | **Utility** page 1 (system status / update fw / save wave / self-cal) |
-| 43 | **Utility** page 2 |
-| 47 | **Save/Recall** base (type selector) |
-| 48 | **Save/Recall** → CSV **and** FileList (shared file-browser page) |
-| 56 | Math → FFT submenu, **page 2** (zoom factor / vertical scale) |
-| 61 | Logic Analyzer base menu (`[LA-SWI]` = LA on/off) |
-| 62 | LA channel-config submenu — **D7-D0 group** (enables + threshold) |
-| 63 | LA channel-config submenu — **D15-D8 group** |
-
-Note some menus set `[CONTROL-MENUID]` but keep it constant while open (so it
-shows in the value, not as a change) — e.g. CH1=1, CH2=2, Acquire=17 stayed put
-throughout their captures; only `[CONTROL-DISP-MENU]` toggled 0↔1.
-
-Multi-page trigger submenus use **consecutive ids** for page 1 / page 2
-(Pulse 6/7, Slope 22/23, Overtime 38/39). `CONTROL-DISP-MENU` = 1 while a menu is shown, 0 when
-closed. `CONTROL-TYPE` stayed 0 in every capture. (`MENU_NAMES` in
-`mso5202d.py`.) Remaining menu ids (LA sub-pages, Measure statistics…) to be
-mapped by opening each menu.
-
-**Utility is view-only** — mapped 2026-07-09 by a page-cycle `CONTROL-MENUID`
-poll (`captures/mso5202d-utility.pcapng`). Like Save/Recall it puts **no
-parameters in the settings blob** (system
-status, firmware update, save-waveform, self-cal are actions; `/protocol.inf`
-has no Utility/sound/language/cal fields — only the front-panel `[MENU-UTILITY-KEY]`).
-Its **3 pages cycle `42 → 43 → 10`** (menu visible throughout): page 1 = **42**
-(system status / update fw / save wave / self-cal), page 2 = **43**, page 3 =
-**10** — page 3 gets **no dedicated id, reusing the generic `10`** (same value as
-the no-menu baseline, but here with `CONTROL-DISP-MENU`=1).
-
-**Save/Recall (Storage) is view-only** — mapped 2026-07-09 by two ordered-open
-`CONTROL-MENUID` polls (base → REF → SETUP → CSV → FileList). Like Cursor and the
-Horizontal window/marks, it puts **no parameters in the settings blob**: through
-both captures the only field changes were an incidental vertical-knob touch;
-`/protocol.inf` has no REF/SETUP/CSV/FILE params (only `[ACQURIE-STORE-DEPTH]`).
-So setups (1–10 slots), Ref-A/B waveform save, and CSV export are **actions, not
-poll-able state**. Base menu = **47**; its sub-types are **19** (REF), **18**
-(SETUP), **48** (CSV). **FileList reuses 48** — it is the CSV/USB file-browser
-page, not a distinct type — so CSV and FileList are indistinguishable over the
-poll.
 
 ---
 
-## Appendix E — setting ranges, steps & units
+## Appendix D — verified / inferred / gap ledger
 
-Consolidated limits/divisions/units for every setting decoded so far. "Field" is
-the `/protocol.inf` param (Appendix D gives its offset/enum); "raw" is the stored
-value. Sequences and endpoints are hardware-verified unless marked *inferred*.
-Units for the MSO5202D (200 MHz); the 60/100 MHz base models stop at 4 ns/div.
+Compact status of every major claim. **V** = seen on the wire / confirmed on
+hardware; **I** = inferred from cross-referenced captures, on-device files, or the
+manual; **G** = unknown / open.
 
-### Vertical (per channel)
+### Transport, framing, selectors
 
-| Setting | Field | Range | Step / sequence | Unit / notes |
-|---|---|---|---|---|
-| Volts/div | `VERT-CHx-VB` | 2 mV … 5 V/div | **1-2-5**, 11 steps (idx 0–10 = 2/5/10/20/50/100/200/500 mV, 1/2/5 V) | V/div; **×probe** scales the displayed value. 10 V/div reads back `VB=0` (quirk) |
-| Vertical position | `VERT-CHx-POS` | **±8 div** (raw ±200) | 1 raw = **1/25 div** | signed; 25 counts/div. Knob-push → 0 (centre) |
-| Probe ratio | `VERT-CHx-PROBE` | 1× / 10× / 100× / 1000× | 4 discrete | attenuation multiplier |
-| Fine / coarse | `VERT-CHx-FINE` | Coarse / Fine | 2 | Fine = continuous V/div between the 1-2-5 steps |
+| Claim | Status |
+|---|---|
+| VID:PID `049f:505a`, bulk OUT `0x02` / IN `0x81`, 512-B packets | V |
+| Frame `leader\|len_LE16\|payload\|checksum`; `checksum = Σ&0xFF`; `0x66` = wildcard accepted on any frame | V |
+| Two leaders: `0x53` data channel, `0x43` private command/shell channel | V |
+| IN echo is always `selector\|0x80` | V |
+| `0x00` connect/ping (empty ack) is a distinct selector from `0x01` poll | V |
+| `0x01` returns the 213-byte settings blob; `0x11` writes it (status `00`/`FF`) | V |
+| `0x02 01 <ch>` acquire; channel map 0=CH1,1=CH2,2=Math,5=LA | V (Math path unused by vendor) |
+| SIZE frame `82 00 <src> <count_LE24>`; count = DATA-byte count; LA count = 2×samples; size `src` = 0/1/3 | V |
+| Acquire subtypes 00=SIZE, 01=DATA, 02=END, **03=no-data** | V |
+| Record length is variable (read it from SIZE); 3840↔3200 tracks `CONTROL-DISP-MENU` | V (3840/3200 V; menu-driven toggle I) |
+| `0x10` file read: content(`90 01`, 10208-B cap) + end(`90 02 <sum8>`), no SIZE, wildcard `0x66` ck | V |
+| `0x10` end sum8 = 8-bit sum of all file bytes (`/help.db` → 0x61) | V |
+| `0x12 <sub> <val>`: sub=1 run-latch, sub=0 acq-mode — NOT stop/panel-lock | V |
+| `0x13` key event: `state` byte ignored; reply status = live menu state; single-slot mailbox | V (mailbox drop-risk I) |
+| `0x20` framebuffer = exactly 768000 B (800×480 RGB565), no SIZE frame, END carries pixel sum8 | V |
+| `0x43 0x7f` = commit/apply settings, ack `0xff` — not a reboot | I |
+| `0x14` / `0x21` descriptor write/read (id16 default 2009) — purpose | **G** |
 
-### Horizontal / timebase
+### Waveform & calibration
 
-| Setting | Field | Range | Step / sequence | Unit / notes |
-|---|---|---|---|---|
-| Time/div (displayed) | `HORIZ-WIN-TB` | **2 ns … 40 s/div** | **2-4-8**, 32 steps (idx 0–31) | s/div (`TB_TO_NS`) |
-| Time/div (acquisition) | `HORIZ-TB` | 2 ns … 200 ns, then **clamps** | same seq, clamps at idx 6 | s/div; ≥200 ns the acquisition TB stays at 200 ns while the display zooms |
-| Horizontal delay | `HORIZ-TRIGTIME` | wide | 1 ps | **signed int64 ps**; negative = post-trigger. Knob-push → 0 |
-| Sample rate | *derived* | ties to time/div | — | **200 Sa/div** → `Sa/s = 200 / (s/div)`; interval `= (s/div)/200` |
-| Acquisition span | *derived* | — | — | 3840-sample block = **19.2 div** |
+| Claim | Status |
+|---|---|
+| Analog sample = two's-complement **signed int8**; centre `0x00`, rails `0x7F`/`0x81`, trigger column `0xFF` | V |
+| Larger signed value = higher on screen (no unsigned "wrap/hash"); `0x80` never occurs | V |
+| `y_div = (int8(byte) − 16) / 25`; 25 counts/div; 200 samples/div | V (scale V; the +16 baseline term I) |
+| counts→volts = `(raw − zero) × Vdiv/25` (Vdiv/25 V per count), matches CSV ground truth | V |
+| LA = 2 bytes/sample, bit N = D(N); `02 01 05` is issued by the vendor app | V (content usability G) |
+| Off-screen bimodal `0x0A`/`0xF2` blocks (not the ±127 rails) — origin | **G** |
+| `+16`-count baseline: fixed bias vs. POS-zero artifact | **G** |
+| No deep-memory readout over USB (40K/512K/1M) — only via front-panel save→CSV→stick | V |
 
-### Trigger
+### Settings blob, menus, keys
 
-| Setting | Field | Range | Step | Unit / notes |
-|---|---|---|---|---|
-| Trigger level | `TRIG-VPOS` | **±8 div** (raw ±200) | 1/25 div | volts = `(VPOS − POS_src) × vdiv / 25` |
-| Slope V1 / V2 | `TRIG-SLOPE-V1/V2` | ±8 div | 1/25 div | same volts calibration as level |
-| Holdoff | `TRIG-HOLDTIME` | **100 ns … 10 s** | ps | int64 ps (`-MIN`=100 000, `-MAX`=10¹³) |
-| Pulse / Slope / Overtime time | `TRIG-{PULSE,SLOPE,OVERTIME}-TIME` | **20 ns … 10 s** | ps | int64 ps |
-| Video line # | `TRIG-VIDEO-LINE` | 1…525 (NTSC) / 1…625 (PAL) | 1 | line number |
+| Claim | Status |
+|---|---|
+| `/protocol.inf` Σwidth = 213; `wire_offset = raw + 4`; all fields little-endian | V |
+| Enum tables (trigger/display/acquire/math/measure/LA) as in the datasheet section | V (most) / I (measure 12,14,15,16,18) |
+| `MEASURE-ITEMn` types **20–31** (and 12/14/15/16/18) — never seen on the wire | **G** (label-derived) |
+| `MATH-FFT-WIN` = 0/1/2 only (Hanning/Flattop/Rect); codes 3/4 (Bartlett/Blackman) | 0/1/2 V; 3/4 **G** (likely nonexistent) |
+| `TRIG-VPOS` scales with V/div (reaches 31000 at 2 mV/div); ±200 is only the fixed-V/div knob limit | V |
+| EXT / EXT-5 / AC-line trigger level in volts (the /25-div formula assumes a CH source) | **G** |
+| `TRIG-STATE` enum 0–6; **4 (Scan)** and **6 (re-arm)** never captured | 0/1/2/3/5 V; 4/6 **G** |
+| Read-only/const fields: `TRIG-HOLDTIME-MIN/-MAX`, `DISPLAY-MAXCONTRAST/-MAXGRID-BRIGHT` | V |
+| `HORIZ-WIN-STATE`, `CONTROL-TYPE` always 0 — function | **G** |
+| `VERT-CHx-CNT-FINE` fine-gain vernier magnitude/units | **G** |
+| `CONTROL-MENUID` map as in §9.1; candidate ids 58/69 and the unmapped id set | mapped ids V; 58/69 + rest **G** |
+| `/keyprotocol.inf` 49-key list, keyid = 0-indexed position | V |
+| Save/export are pure `0x13` key sequences; no save selector; which `FN-n` = "Save" per page | flow V; ordinal & filename numbering **G** |
 
-### Acquire
+### Hardware background (appendix)
 
-| Setting | Field | Range | Step | Unit / notes |
-|---|---|---|---|---|
-| Average count | `ACQURIE-AVG-CNT` | 4 … 128 | **×2**, 6 steps (idx 0–5 = 4/8/16/32/64/128) | averages |
-| Memory depth | `ACQURIE-STORE-DEPTH` | 4K / 40K / 512K / 1M | gapped codes (0/4/6/7) | samples; 1M = single-channel only |
-
-### Display
-
-| Setting | Field | Range | Step | Unit |
-|---|---|---|---|---|
-| Contrast | `DISPLAY-CONTRAST` | 0 … 15 | 1 | level (max = `-MAXCONTRAST`=15) |
-| Grid brightness | `DISPLAY-GRID-BRIGHT` | 0 … 15 | 1 | level (max = `-MAXGRID-BRIGHT`=15) |
-| Persistence | `DISPLAY-PERSIST` | Auto … Infinity | 9 discrete (0.2/0.4/0.8/1/2/4/8 s) | s |
-
-### Math / FFT
-
-| Setting | Field | Range | Step | Unit |
-|---|---|---|---|---|
-| FFT horizontal zoom | `MATH-FFT-FACTOR` | ×1 / ×2 / ×5 / ×10 | 4 discrete | zoom |
-| FFT vertical scale | `MATH-FFT-DB` | 1 / 2 / 5 / 10 / 20 | 5 discrete | dB/div |
-
-### Measure
-
-| Setting | Field | Range | Step | Unit |
-|---|---|---|---|---|
-| Simultaneous items | `MEASURE-ITEM1…8` | up to **8** | — | slots |
-| Measurement type | `MEASURE-ITEMn` | 0 … 31 (32 types) | 1 | enum (Appendix D) |
-| Source | `MEASURE-ITEMn-SRC` | CH1 / CH2 / LA | — | 0/1/3 (2 unused) |
-
-### Logic analyzer
-
-| Setting | Field | Range | Step | Unit / notes |
-|---|---|---|---|---|
-| Channels | `LA-CHANNEL-STATE` | D0 … D15 | per-bit | bitmask, bit N = D(N) |
-| Selected channel | `LA-CURRENT-CHANNEL` | 0 … 15 | 1 | = D0…D15 |
-| User threshold (per group) | `LA-*-USER-THRESHOLD-VOLT` | **±8 V** | ≈**3.9 mV** (16 raw = `code<<4`, 12-bit DAC) | volts = raw/4096 |
-
----
-
-## Appendix F — Host-side control (PC → scope) — CONFIRMED
-
-The PC can fully drive the scope over the same bulk protocol. Decoded 2026-07-09
-from USBPcap captures of the vendor **"Scope 2.0.0.6"** app (`captures/control/`,
-scope-only), cross-referenced against our own field decode. **Three OUT command
-paths**, all leader `0x53` with the standard framing + checksum (§3); each gets
-an IN acknowledgement (`selector | 0x80`). This resolves the long-standing
-**host-side control** question — how the PC drives the scope.
-
-### F.1 Write settings — selector `0x11`
-
-```
-OUT  53 | D7 00 | 11 | <213-byte settings block> | ck        ; len 0x00D7 = 215
-IN   53 | 03 00 | 91 | 00 | ck                               ; write ack (echo 0x91, status 0)
-```
-
-The 213 bytes are the **exact `/protocol.inf` parameter block** — identical
-layout to the `0x01` poll *response* (Appendix A/D), just without the `0x81`
-echo. So PC control of settings is **read-modify-write**: poll `0x01`, change the
-field(s), write the whole block back with `0x11`.
-
-Verified by decoding captured writes with `decode_settings()` (feed `0x81` + the
-213 bytes): in `vertical_ch1_ch2` CH1 V/div stepped 5 V→500 mV→2 V→200 mV and
-both `VERT-CHx-DISP` toggled; in `LA` the `LA-CHANNEL-STATE` mask walked D0…D3
-off — matching our field semantics exactly. **This sets any settings-blob field**
-(V/div, position, timebase, trigger, acquire, display, math, measure, LA, …).
-
-**Verified host write — setting the timebase (2026-07-10):** writing
-`HORIZ-WIN-TB = idx` and `HORIZ-TB = max(idx, 6)` (the acquisition TB clamps at
-index 6 = 200 ns/div; see §6) changes the sample rate — e.g. idx 16→15 took
-`TDIV-ns` 400 000→200 000, confirmed by a poll read-back. `mso5202d_decode.py
-set_timebase()` uses exactly this to pick a timebase per serial bit rate.
-Caveat: the `0x91` write-ack can transiently leak into the *next* poll read, so
-retry `read_settings()` until it returns a valid 214-byte `0x81` payload.
-
-### F.2 Front-panel key events — selector `0x13`
-
-```
-OUT  53 | 04 00 | 13 | <keyid> | <state> | ck                ; state 01 = press
-IN   53 | .. | 93 | ...                                       ; key ack (echo 0x93)
-```
-
-`keyid` is the **0-indexed position in `/keyprotocol.inf`** (Appendix B). This
-presses a physical key — the way to invoke **actions** that aren't settings
-(autoset, run/stop, force, default-setup, single) and the ±/menu keys. The app's
-on-screen "virtual panel" buttons all emit these. Verified in `systemfunctions`:
-autoset→17, Default-Setup→21, Run/Stop→19, Trig-50%→46, Force→47.
-
-Full key id map (index → `/keyprotocol.inf` name):
-
-| id | key | id | key | id | key |
-|---|---|---|---|---|---|
-| 0–7 | `FN-0`…`FN-7` (softkeys F1–F8) | 24 | `VT-CH1-MENU` | 36 | `HZ-MENU` |
-| 8 | `FN-MLEFT` (multi-knob ←) | 25 | `VT-CH1-PSUB` (pos −) | 37 | `HZ-PSUB` (delay −) |
-| 9 | `FN-MRIGHT` (multi-knob →) | 26 | `VT-CH1-PADD` (pos +) | 38 | `HZ-PADD` (delay +) |
-| 10 | `FN-MZERO` (multi-knob push) | 27 | `VT-CH1-PZERO` (pos 0) | 39 | `HZ-PZERO` (delay 0) |
-| 11 | `MENU-SR` (Save/Recall) | 28 | `VT-CH1-VBSUB` (V/div −) | 40 | `HZ-TBSUB` (timebase −) |
-| 12 | `MENU-MEASURE` | 29 | `VT-CH1-VBADD` (V/div +) | 41 | `HZ-TBADD` (timebase +) |
-| 13 | `MENU-ACQUIRE` | 30 | `VT-CH2-MENU` | 42 | `TG-MENU` |
-| 14 | `MENU-UTILITY` | 31 | `VT-CH2-PSUB` | 43 | `TG-PSUB` (level −) |
-| 15 | `MENU-CURSOR` | 32 | `VT-CH2-PADD` | 44 | `TG-PADD` (level +) |
-| 16 | `MENU-DISPLAY` | 33 | `VT-CH2-PZERO` | 45 | `TG-PZERO` (level 0) |
-| 17 | `CT-AUTOSET` | 34 | `VT-CH2-VBSUB` | 46 | `TG-PHALF` (level 50%) |
-| 18 | `CT-SINGLESEQ` | 35 | `VT-CH2-VBADD` | 47 | `TG-FORCE` (force trig) |
-| 19 | `CT-RS` (Run/Stop) | 23 | `VT-MATH-MENU` | 48 | `TG-PROBECHECK` |
-| 20 | `CT-HELP` | 21 | `CT-DS` (Default Setup) | 22 | `CT-STU` |
-
-### F.3 Screen framebuffer (screenshot) — selector `0x20`
-
-```
-OUT  53 | 02 00 | 20 | ck                                    ; bare, no args
-IN   53 | <len> | a0 | 01 | <RGB565 pixels…> | ck   (×N)      ; data chunks (~10 KB each)
-IN   53 | 04 00 | a0 | 02 | <b> | ck                         ; end-marker
-```
-
-The scope streams its **raw LCD framebuffer** — echo `0xa0`, using the same
-multi-frame subtype pattern as file-read/waveform (`00` size / `01` data / `02`
-end). Pixels are **RGB565**, ≈**770 KB per screen** (consistent with 800×480).
-The app polls `0x20` continuously to mirror the display — it is a genuine
-**screenshot stream, not a local re-render** from parameters (`virtual_panel_play`:
-9337 `0xa0` frames, ~93 MB of pixels; the uniform `0x3193` value is the graticule
-background).
-
-### IN acknowledgement echoes (all commands)
-
-| OUT selector | IN echo | payload |
-|---|---|---|
-| `0x00` handshake | `0x80` | empty ACK |
-| `0x01` poll | `0x81` | 213-byte settings block |
-| `0x02` acquire | `0x82` | waveform (subtyped) |
-| `0x10` file read | `0x90` | file bytes (subtyped) |
-| `0x21` block read | `0xa1` | short block descriptor |
-| `0x11` **write settings** | `0x91` | status byte (00 = ok) |
-| `0x12` param write | `0x92` | ack |
-| `0x13` **key event** | `0x93` | ack |
-| `0x20` **screen grab** | `0xa0` | RGB565 framebuffer (subtyped) |
-| `0x43 0x11` **shell exec** | `0x43`/`0x91` | command stdout (leader `0x43`; F.4) |
-
-### F.4 Command / shell channel — leader `0x43` ('C')
-
-A **second leader byte** beside `0x53` — the instrument-command channel. Same
-framing as §3 (`head | len_LE16(=payload+1) | payload | checksum`), just with
-`head = 0x43`. Discovered via the sibling open-source project
-[onnokort/dsoc](https://github.com/onnokort/dsoc) (same Tekway/Hantek DSO5x02
-family) and **confirmed on our MSO5202D 2026-07-10**.
-
-```
-OUT  43 | <len> | 11 | "<shell command>" | ck        ; run command on embedded Linux
-IN   43 | <len> | 91 | "<stdout bytes...>" | ck       ; reply: 0x11|0x80 = 0x91 ack, then stdout
-```
-
-The `0x43` leader is much richer than just the shell — it has its own selector
-map. Selectors **verified on hardware 2026-07-10** (echo = selector | 0x80):
-
-| sel | args | reply echo | verified behavior |
-|---|---|---|---|
-| `0x00` | `mode` `b` `c` | `0x80` | **read FPGA config register file.** mode `1` → returns registers `[b .. b+c−1]` (each a 4-byte word, 16-bit value), bound `b+c ≤ 0x6f`; mode `0` → single indirect read of reg `b`. The register file is **static config** (trigger/gain/position codes) — **0 of regs 0..0x6e changed between RUN and STOP**, so it is NOT live sample data or a FIFO pointer. |
-| `0x01` | `len_LE16` | `0x81` | 16-bit sample block — but **routes through the same screen-acquire engine as `0x53 0x02`** (`n = LE16(args)>>2` samples); a live *rolling* tap, not a frozen buffer, and nothing beyond the 3840 screen record. |
-| `0x02` | (none) | `0x82` | fixed **5072-byte** config/coefficient region dump (static). |
-| `0x03` | (none) | `0x83` | fixed **8664-byte** dump = the ADC **linearization cal RAM** (byte-identical to `/param/sav/chk1kb_091023`; static). |
-| `0x10` `00`+path | | `0x90` | **read file** — same handler as `0x53`/`0x10`. |
-| `0x11` + ASCII cmd | | `0x91` | **SHELL EXEC** as **root** (see below). |
-| `0x42` | | `0xc2` | empty ACK (needs args). `0x50`/`0x60` give no bare reply. |
-| `0x40` / `0x41` | region bytes | — | **FPGA-region WRITE** (region 1 / 2) — destructive, NOT swept. |
-| `0x44` `<ms/100>` / `0x7f` | | — | beep / reset-reboot. |
-
-**Deep capture over USB stays CLOSED (now firmly, not just observed).** The FPGA's
-deep record is drained on-device by reading a **single data register repeatedly**
-(the FPGA auto-advances an internal pointer per read). Over USB, `0x43` has **no
-single-register write** to arm it, and `0x00` *increments* the address (so it
-can't re-read one FIFO register); there is no bulk-DMA selector. So these `0x43`
-commands are genuine **read-only FPGA introspection** (config registers + static
-cal-region dumps) but expose **no new sample path** — the `0x53 0x02` screen
-buffer remains the only viable capture over USB; deep memory is the on-instrument
-**CSV-to-USB** export (§5). Likewise there is **no live-LA read selector** here
-(`0x02`/`0x03` are the analog config/cal regions), so LA over USB stays limited to
-the `0x20` framebuffer.
-
-**`0x11` shell exec** ⚠ — arbitrary command as **root**, unfiltered: a bad command
-(`rm`, `dd`, `mv`, a write to flash) can brick the scope. **Use READ-ONLY.**
-Verified: `ls /`, `uname -a`, `ls -la /dev`, `df -h`, `cat /proc/version`.
-
-The reply reassembles like a file read when output is large (multi-frame,
-`0x91` echo per frame); short output arrives in one frame. A stray reply can
-leak into the next `0x53` transaction, so `_resync()` after shell use.
-
-⚠ **Watchdog/guard reboot (observed 2026-07-10).** The scope runs a watchdog
-(`wdg`, `/dev/watchdog`) and a `guard_process_accepter`. A shell command that
-**stalls the live acquisition app or desyncs the USB link reboots the scope**
-(recoverable — it re-enumerates in ~15 s and resets to *factory defaults*, so
-the user's setup is lost; NOT a brick). It fired after `cat /proc/419/maps` on
-the live `/dso_bin` process. Rules learned: keep commands **short and fast**;
-**do not** read the acquisition process's `/proc/<pid>/*` or block the link;
-prefer small static files. The internal exec mechanism is `sh -c "<cmd> > msg"`
-then return that captured file — with two consequences a client must handle:
-- **The `> msg` redirect is appended to the whole string and is *relative*** to
-  the cwd. So `a; b` captures only `b`'s output — **wrap multi-command input in a
-  brace group** `{ a; b; }` so the redirect captures everything. And each call
-  writes a small `msg` file in the current directory (benign; fails on a
-  read-only dir).
-- **The reply can race one command behind** (it returns the *current* `msg`
-  before the new command finishes writing it). Guard with a **unique end-marker**
-  echoed inside the group and **re-issue until the reply contains it** (safe
-  because only read-only/idempotent commands are allowed).
-
-**Tool: `scripts/mso5202d_shell.py`** — an interactive SSH-like REPL implementing
-all of the above (brace-wrap, marker-retry, stale-frame flush, local `cd`
-tracking) plus a **destructive-command block** (`rm`/`mv`/`dd`/`mkfs`/`reboot`/…).
-Run `python3 mso5202d_shell.py` and type commands. Read-only use only.
-
-**System facts (from the shell, verified 2026-07-10):**
-- **Linux 3.2.35** `#62 PREEMPT` (2013), **armv5tejl**, hostname `Hantek`,
-  gcc 4.3.3 CodeSourcery — the Samsung S3C embedded stack (matches the
-  investigation doc).
-- Root FS `ubi0:rootfs` (UBI/NAND), 105 MB, ~28 MB used.
-- Relevant `/dev` nodes (potential paths **past** the 3840-sample USB screen
-  buffer — see §5 record-length limit): **`dso-fpga`** (char 10,61) and
-  **`dso-fpga-la`** (char 10,60) = the acquisition FPGA + its logic-analyzer
-  interface; **`dso-iobank`** (10,62); **`dso-i2c`**→`i2c-0`; `spidev0.0`;
-  **`/dev/mem`** (1,1, physical memory); `fb0` (LCD); `mtd0..4`/`mtdblock*`
-  (firmware flash — DO NOT WRITE).
-- Root `/` also holds `usbsavefile.tmp` (likely the deep Save-waveform staging
-  file), `cur_acq.type`, `chk_base_volt` (candidate counts→volts calibration),
-  `fpgabank.conf`, and the app binaries `dso`/`dso_bin`/`dst1202b`.
-
-**Why this matters:** the shell is the first route past the USB screen-buffer cap
-(§5). Reading the FPGA sample memory directly (`dso-fpga` / `/dev/mem` at the
-region in `/proc/iomem`) or a deep Save-waveform file could yield **contiguous
-captures far larger than 3840 samples**, and `dso-fpga-la` may be the real
-logic-analyzer source (the `02 01 05` USB path is a dead end, §5). All UNPROVEN
-and to be explored **read-only**.
+| Claim | Status |
+|---|---|
+| Analog FPGA `0x10000000`, LA FPGA `0x18000000`, ctrl SFRs `0x4F000000`, SoC ADC `0x58000000`, DM9000 `0x20000000` | I |
+| FPGA regs = 256×16-bit halfword-addressed; bulk read = one auto-advancing FIFO port | I |
+| `/dev/fb0` = 768000 B (800×480 RGB565) = the `0x20` payload | V (size) / I (node) |
+| Identity: `/sys.inf` (`dst1202b`, sw `3.2.35`, fpga `0x55778344`), `/i2c.log` `[bw]200`, S/N | V (file contents) |
+| Supervisor heartbeat (~100 ms) auto-respawns a crashed engine → expected transient USB drops | I |
+| Firmware update is file-triggered (GPG package on the stick) — no USB flash selector | I |
+| `0x4F000000` SFR field semantics; exact FPGA register/address assignments | **G** |

@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 CLAUDE.md
 .plot_captures/
+.claude/

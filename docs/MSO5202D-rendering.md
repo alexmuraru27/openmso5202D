@@ -28,38 +28,41 @@ channel's volts/div is shown in the title.
 
 ## 2. Vertical mapping (bytes → divisions)
 
-Each sample byte encodes **the channel's position *and* the signal, wrapped to
-8 bits**:
+Each analog sample byte is a **two's-complement signed int8** giving the trace's
+vertical position in **counts at 25 counts per division**, clamped to `[−127, +127]`.
+The device pre-positions the trace (it already folds in `VERT-CHx-POS`), and the
+byte **rises as the trace moves up**. The canonical decode is just a sign-extend:
 
 ```
-byte = (VERT-CHx-POS + 16 + signal) mod 256
+s     = byte − 256  if byte ≥ 128  else byte      # sign-extend to signed int8
+y_div = (s − 16) / 25                              # divisions from centre, up = +
 ```
 
-where `VERT-CHx-POS` is the channel position (1/25-div units) and `signal` is the
-AC waveform in counts (**25 counts per division**). Two traps for a naïve decoder
-follow directly:
+The `25` counts/div scale is hardware-verified; the `−16` removes a ≈0.64-division
+baseline bias (with the channel centred, the zero-signal baseline sits at byte
+`+16`, not `0x00`) and is the one un-nailed constant.
 
-- the byte **rises as the trace moves up** (reversed vs. a plain "small byte =
-  top" rule), and
-- as the trace nears screen centre the baseline nears the byte edge (0/256), so
-  the signal **wraps around it** → a rail-to-rail "hash" block (the real signal
-  folded across the 8-bit boundary, *not* a bad frame).
+Two traps to avoid:
 
-So do **not** map the raw byte directly. **Unwrap** each sample around the
-POS-derived baseline — this undoes both the reversal and the wrap and places the
-trace at its true division:
+- **Do not decode unsigned, and do not do `128 − byte`** (that inverts the motion).
+- **There is no 8-bit "wrap".** A small signal oscillating around 0 alternates
+  `0xFF` (−1) ↔ `0x00` (0); an *unsigned* reader misreads that zero-crossing as a
+  fake rail-to-rail "hash" block. Decoded signed, it is an ordinary small waveform.
+  The `±127` clamp makes overflow impossible.
+
+**Equivalent position-unwrap form** — what `to_divs()` in the plotter uses; kept
+for continuity, gives the identical result:
 
 ```
 base   = (VERT-CHx-POS + 16) & 0xFF
-signal = ((byte − base + 128) mod 256) − 128     # AC counts, unwrapped
+signal = ((byte − base + 128) mod 256) − 128     # AC counts
 y_div  = (VERT-CHx-POS + signal) / 25            # divisions, up = positive
 ```
 
-The trace then sits at `POS/25` divisions — moving **up** when you raise it, like
-the scope — with a clean ≈1-div signal on top, correct at **every** position
-including dead centre (where the raw bytes are a rail-to-rail hash). Off-screen
-(parked past ±4 div) the block flat-lines near mid-code (~129) and the axis clips
-it away.
+Because `byte = POS + 16 + signal` (clamped, no surviving wrap), this collapses to
+`y_div = (s − 16)/25`. See **MSO5202D-protocol.md §6** for the full derivation. A
+trace parked off-screen saturates at the rails `0x7F` (+127) / `0x81` (−127), and
+the axis (fixed at ±4 div) clips it away.
 
 ## 3. Horizontal mapping (index → divisions)
 
@@ -67,21 +70,34 @@ it away.
 x_div = sample_index / 200
 ```
 
-**200 samples per division** (hardware-verified; `SAMPLES_PER_DIV`). A full
-3840-sample block is 19.2 divisions. The time per division is in the settings
-blob (`TDIV-ns`); multiply `x_div` by it for seconds.
+**200 samples per division** (hardware-verified; `SAMPLES_PER_DIV`). The time per
+division is in the settings blob (`TDIV-ns`); multiply `x_div` by it for seconds.
 
-## 4. Rail values are *not* gaps — they are wrapped signal
+The **block width is not fixed** — read the sample count from the acquire *size*
+frame, don't assume 3840. It is **3840** (19.2 div) normally but **3200** (16 div)
+when a soft-menu panel is open on the scope, and it does **not** depend on the
+timebase (MSO5202D-protocol.md §6.3). The viewer extends the grid to whatever width
+came back.
 
-An earlier version of this doc treated near-rail bytes (≈`0x08`/`0xF2`) as
-off-screen and broke the line there. That was wrong: those bytes are the **real
-signal wrapped across the 8-bit boundary** near screen centre (§2). The **unwrap**
-in §2 recovers them into a clean trace, so there is nothing to break — do *not*
-NaN or reject rail-valued samples.
+## 4. Rail values and off-screen blocks
 
-Genuinely off-screen (parked) blocks flat-line near mid-code; after the §2 map
-they land outside ±4 div and the axis clips them. The viewer flags a channel whose
-position parks it off the 8-division screen (`|POS| / 25 > 4`) in the title.
+The signed-int8 model (§2) settles what the near-"rail" bytes are:
+
+- `0x0A` / `0xF2` are just signed **+10 / −14** — a normal on-screen signal
+  straddling the zero line, **not** rails. Do not reject them. (Earlier versions
+  wrongly treated ≈`0x08`/`0xF2` first as clipped rails, then as "wrapped signal";
+  both were unsigned mis-readings.)
+- The **real saturation rails** are `0x7F` (+127) and `0x81` (−127): a trace parked
+  fully above/below the graticule reads a solid run of one of these. `0x80` never
+  occurs, so it is a framing-error tell, not a sample.
+- Off-screen is detected by **position**: `|VERT-CHx-POS| / 25 > 4` means the trace
+  is parked off the 8-division screen (the viewer flags it in the title).
+
+**[open] genuine off-screen bimodal block:** separately, a whole block can come
+back split ~50/50 between `0x0A` and `0xF2` (nothing in between) after a trace is
+dragged off-screen and back. This is **not** the ±127 clamp and is unexplained;
+treat such a block as invalid/off-screen and don't plot it
+(MSO5202D-protocol.md §6 GAP).
 
 ## 5. Drawing style
 
@@ -130,8 +146,10 @@ arguments for the live view.
 
 ## 8. Known limits carried over from the protocol
 
-- **counts→volts** is not yet calibrated in absolute terms, so the vertical axis
-  is in divisions, not volts (each division = that channel's V/div, shown in the
-  title). The 25 counts/div *scale* is known; the absolute offset is not.
+- **counts→volts** — the *scale* is now known exactly: **volts-per-count = Vdiv/25**
+  (the ADC's own 25 counts/div, confirmed against the scope's exported CSV; see
+  protocol.md §7). The viewer still shows **divisions** (each = that channel's
+  V/div, in the title) because the *absolute* offset — the `+16`-count baseline
+  (§2) — is the one unresolved constant. To label volts: `volts ≈ (s − 16)/25 × Vdiv`.
 - **Inter-channel phase** is not preserved (CH1/CH2 are sequential acquires), so
   cross-channel timing on the plot is not meaningful (protocol.md §5).

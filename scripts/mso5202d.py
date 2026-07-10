@@ -231,7 +231,7 @@ class Scope:
 # /protocol.inf parameter list (name, byte width) in wire order. The settings
 # payload is exactly: selectorEcho 0x81 | these 213 bytes — no subtype, no
 # prefix. Alignment resolved 2026-07-08 by diffing a CH1-V/div knob sweep
-# (captures/mso5202d-ch1-vdiv.pcapng); see MSO5202D-protocol.md §6.
+# (scope_dump/captures_wireshark/mso5202d-ch1-vdiv.pcapng); see MSO5202D-protocol.md §6.
 SETTINGS_PARAMS = [
     ('VERT-CH1-DISP',1),('VERT-CH1-VB',1),('VERT-CH1-COUP',1),('VERT-CH1-20MHZ',1),
     ('VERT-CH1-FINE',1),('VERT-CH1-PROBE',1),('VERT-CH1-RPHASE',1),('VERT-CH1-CNT-FINE',1),
@@ -300,7 +300,7 @@ VB_TO_MV = {0: 2, 1: 5, 2: 10, 3: 20, 4: 50, 5: 100,
 
 # HORIZ-TB / HORIZ-WIN-TB index -> time/div in ns. 2-4-8 sequence over the
 # scope's 2 ns..40 s range: 32 steps, verified end stop to end stop on hardware
-# (captures/mso5202d-timediv.pcapng) and anchored against the on-screen
+# (scope_dump/captures_wireshark/mso5202d-timediv.pcapng) and anchored against the on-screen
 # readings (8 ns, 80 ns, 800 ns, ... — NOT a 1-2-4/1-2-5 sequence).
 # HORIZ-WIN-TB follows the time/div knob over the full 0..31; HORIZ-TB (the
 # real acquisition timebase) clamps at 6 (200 ns/div) — the 2..80 ns settings
@@ -406,7 +406,7 @@ DISPLAY_PERSIST_NAMES = {
 # DISPLAY-MAXCONTRAST / DISPLAY-MAXGRID-BRIGHT fields, both 15).
 
 # MEASURE-ITEM1..8 = the 8 measurement slots; each has a -SRC (source) and a
-# type id. Mapped 2026-07-09 (captures/mso5202d-measure.pcapng) by sweeping
+# type id. Mapped 2026-07-09 (scope_dump/captures_wireshark/mso5202d-measure.pcapng) by sweeping
 # MEASURE-ITEM8 through the on-screen list; scope-labelled. 0 = Off = empty slot.
 MEASURE_SRC_NAMES = {0: 'CH1', 1: 'CH2', 3: 'LA'}  # only CH1/CH2/LA; id 2 is skipped/unused (no Math source)
 MEASURE_TYPE_NAMES = {
@@ -422,7 +422,7 @@ MEASURE_TYPE_NAMES = {
 # Logic analyzer. LA-CHANNEL-STATE = D0..D15 enable bitmask, bit N = D(N)
 # (D0 = LSB, all-on = 0xFFFF; low byte = D0-D7 group, high byte = D8-D15).
 # LA-CURRENT-CHANNEL = selected channel 0..15. Threshold is per 8-ch group.
-# Mapped 2026-07-09 (captures/mso5202d-la-{d7-d0,d15-d8,threshold}.pcapng).
+# Mapped 2026-07-09 (scope_dump/captures_wireshark/mso5202d-la-{d7-d0,d15-d8,threshold}.pcapng).
 LA_THRESHOLD_TYPE_NAMES = {0: 'TTL', 1: 'CMOS', 2: 'ECL', 3: 'User'}  # LA-Dxx-THRESHOLD-TYPE
 LA_THRESHOLD_DAC = 4096.0   # LA user threshold: volts = raw / 4096 (±8 V, 12-bit DAC = code<<4)
 
@@ -510,7 +510,7 @@ def decode_settings(payload: bytes) -> dict:
         d['TRIG-LEVEL-mV'] = d['TRIG-SLOPE-V1-mV'] = d['TRIG-SLOPE-V2-mV'] = None
     # LA user threshold volts: signed int16, 12-bit DAC stored as code<<4 (all
     # values %16==0); volts = raw / 4096, ±8 V full-scale (step ≈ 3.9 mV).
-    # Verified 2026-07-09 (captures/mso5202d-la-threshold.pcapng). Only
+    # Verified 2026-07-09 (scope_dump/captures_wireshark/mso5202d-la-threshold.pcapng). Only
     # meaningful when the group's THRESHOLD-TYPE = 3 (User).
     d['LA-D7-D0-THRESHOLD-V'] = d['LA-D7-D0-USER-THRESHOLD-VOLT'] / LA_THRESHOLD_DAC
     d['LA-D15-D8-THRESHOLD-V'] = d['LA-D15-D8-USER-THRESHOLD-VOLT'] / LA_THRESHOLD_DAC
