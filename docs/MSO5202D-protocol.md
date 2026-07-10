@@ -141,14 +141,19 @@ is the right way for the live viewer.
 ## 3. Frame format (both directions)
 
 ```
-byte 0      : 0x53  ('S')  start-of-frame
+byte 0      : leader  0x53 ('S', data)  /  0x43 ('C', command/shell — Appendix F.4)
 byte 1..2   : length, little-endian uint16   ==  (total_frame_len - 3)
-byte 3..N-2 : payload
+byte 3..N-2 : payload    (payload[0] = selector)
 byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
 ```
 
+- **Two leader bytes:** `0x53` = the data channel (this section); `0x43` = the
+  command/shell channel (Appendix F.4). Identical framing, separate selector maps.
 - **Checksum** = 8-bit sum of every byte before it. Verified, e.g.
   `53 04 00 12 01 01 6b` → 0x53+04+00+12+01+01 = 0x6B ✓;  `53 02 00 01 56` → 0x56 ✓.
+  **Quirk (verified 2026-07-10): a checksum byte of `0x66` is a WILDCARD** — the
+  scope accepts the frame without checking (a poll sent as `53 02 00 01 66`
+  returned the settings blob despite the wrong checksum).
 - **Length** = bytes[1..2] LE = `total_len − 3` (i.e. counts payload + checksum).
   Verified: settings blob 218 B → `d7 00` (0x00D7=215); protocol.inf 3620 B →
   `21 0e` (0x0E21=3617); waveform 3847 B → `04 0f` (0x0F04=3844).
@@ -162,13 +167,16 @@ byte N-1    : checksum = (sum of all preceding bytes) & 0xFF
 
 | selector | args | meaning |
 |---|---|---|
+| `0x00` | (none) | **handshake / connect ACK** (verified 2026-07-10) — replies `53 02 00 80 <ck>` (echo `0x80`, empty). |
 | `0x01` | (none), or `00` | **keep-alive / poll.** Response is the settings-state blob (§6). `53 02 00 01 56`. A `00` variant (`53 02 00 00 55`) also seen (start/stop). |
 | `0x10` | `00` + ASCII path | **read file** (§4). `53 10 00 10 00 "/protocol.inf" <ck>` |
 | `0x12` | `<sub>` `<bool>` | **`sub`=0x00 → STOP acquisition** (bool), **`sub`=0x01 → PANEL LOCK** (bool). The acquire-loop `53 04 00 12 01 00 <ck>` is thus *panel-lock OFF*, not a channel select. (Semantics from onnokort/dsoc; `12 01 xx` verified benign in our loop, `12 00 xx` not yet swept.) |
 | `0x02` | `01` `<ch>` | **acquire channel** `<ch>` → waveform (§5). `00`=CH1 `01`=CH2 `02`=Math `05`=LA. `53 04 00 02 01 00 5a` |
 | `0x11` | 213-byte block | **WRITE settings** — push the whole `/protocol.inf` block; sets any field (host-side control, **Appendix F.1**). |
 | `0x13` | `<keyid>` `<state>` | **key event** — press a front-panel key (`keyid` = `/keyprotocol.inf` index; **Appendix F.2**). |
+| `0x14` | length-prefixed block | **block write** (paired with `0x21`; not swept — write path, left alone). |
 | `0x20` | (none) | **screen grab** — scope streams its RGB565 framebuffer (**Appendix F.3**). |
+| `0x21` | (none) | **block-transfer read** (verified 2026-07-10) — replies echo `0xa1` with a short descriptor (`a1 d9 07 01 01 03 01 18` seen); pairs with `0x14`. |
 
 SET form is `selector | vlen | value…` (the selector doubles as the param id).
 Read-file form is `0x10 | 0x00 | <path>`. **Host-side control** (`0x11`/`0x13`/`0x20`)
@@ -1523,9 +1531,11 @@ background).
 
 | OUT selector | IN echo | payload |
 |---|---|---|
+| `0x00` handshake | `0x80` | empty ACK |
 | `0x01` poll | `0x81` | 213-byte settings block |
 | `0x02` acquire | `0x82` | waveform (subtyped) |
 | `0x10` file read | `0x90` | file bytes (subtyped) |
+| `0x21` block read | `0xa1` | short block descriptor |
 | `0x11` **write settings** | `0x91` | status byte (00 = ok) |
 | `0x12` param write | `0x92` | ack |
 | `0x13` **key event** | `0x93` | ack |
@@ -1545,15 +1555,31 @@ OUT  43 | <len> | 11 | "<shell command>" | ck        ; run command on embedded L
 IN   43 | <len> | 91 | "<stdout bytes...>" | ck       ; reply: 0x11|0x80 = 0x91 ack, then stdout
 ```
 
-Opcodes on the `0x43` channel (from dsoc; `0x11` verified here):
-- **`0x11` + ASCII command → SHELL EXEC.** Runs an arbitrary command on the
-  scope's embedded Linux (as **root**) and returns its stdout. **VERIFIED** —
-  `ls /`, `uname -a`, `ls -la /dev`, `df -h`, `cat /proc/version` all executed
-  and returned real output. ⚠ **Extremely dangerous: unrestricted root, no
-  filtering — a bad command (`rm`, `dd`, `mv`, a write to flash) can brick the
-  scope. Use READ-ONLY commands only.**
-- `0x44` + `<ms/100>` → **buzzer beep** (dsoc; not swept here).
-- `0x7f` → **reset to factory defaults** (dsoc; not swept here).
+The `0x43` leader is much richer than just the shell — it has its own selector
+map. Selectors **verified on hardware 2026-07-10** (echo = selector | 0x80):
+
+| sel | reply echo | verified behavior |
+|---|---|---|
+| `0x00` + 3 args | `0x80` | 4-byte register read — **value changes between reads** (a live counter/register), e.g. `80 ac a8 00 47` → `80 ad b0 00 47`. |
+| `0x01` | `0x81` | block of 16-bit words (~`0x59ac` repeating, 70 B seen) — looks like live sample/register data. |
+| `0x02` | `0x82` | **5072-byte data block** (FPGA/register region 1; mostly zeros with sparse marks). Args ignored — returns the fixed region. |
+| `0x03` | `0x83` | **8664-byte data block** = **byte-identical to the ADC-linearization table** (`/param/sav/chk1kb_091023`) — reads the analog cal/FPGA region 2. |
+| `0x10` `00` + path | `0x90` | **read file** — same handler as `0x53`/`0x10` (returned `/protocol.inf` + end-marker). |
+| `0x11` + ASCII cmd | `0x91` (leader `0x43`) | **SHELL EXEC** — arbitrary command as **root**, returns stdout (see below). |
+| `0x42` | `0xc2` | empty ACK (no data bare; likely needs args). |
+| `0x50`, `0x60` | — | **no reply when sent bare** (require args). |
+| `0x40` / `0x41` | — | **FPGA-region WRITE** (region 1 / 2) — NOT swept (write path, left alone). |
+| `0x44` + `<ms/100>` | — | **buzzer beep**. |
+| `0x7f` | — | **reset to factory defaults / reboot**. |
+
+The `0x02`/`0x03` reads are notable: `0x03` returns the exact linearization-table
+bytes, confirming these selectors read the analog/LA FPGA + cal region over USB
+(a data path beyond the `0x02 01 <ch>` screen acquire). Not yet decoded as live
+deep samples — the returned blocks are fixed-size register/cal regions.
+
+**`0x11` shell exec** ⚠ — arbitrary command as **root**, unfiltered: a bad command
+(`rm`, `dd`, `mv`, a write to flash) can brick the scope. **Use READ-ONLY.**
+Verified: `ls /`, `uname -a`, `ls -la /dev`, `df -h`, `cat /proc/version`.
 
 The reply reassembles like a file read when output is large (multi-frame,
 `0x91` echo per frame); short output arrives in one frame. A stray reply can
