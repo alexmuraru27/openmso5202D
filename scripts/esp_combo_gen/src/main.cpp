@@ -97,9 +97,15 @@ static void serialUnit() {
 void setup() {
     Serial.begin(115200);
     delay(200);
+    // Bring the serial peripheral up FIRST. On the ESP32 the VSPI defaults collide
+    // with two LA lines — MISO = GPIO19 (= D15) and SCK = GPIO18 (= D14) — and
+    // SPI.begin() can leave GPIO19 configured as its MISO input even when MISO is
+    // passed as -1, which pins D15 low. Running laInit() AFTER serialInit() makes
+    // its pinMode(OUTPUT) the last thing to touch every LA pin, so the LA reclaims
+    // GPIO19/GPIO18 and D15/D14 toggle correctly.
+    serialInit();
     const uint32_t now = micros();
     laInit(now);
-    serialInit();
     nextSerial = now + SERIAL_GAP_US;
     Serial.println("\n[esp_combo_gen] MSO5202D combined analog + LA generator");
 #if PROTO == P_SPI
