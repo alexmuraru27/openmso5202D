@@ -554,6 +554,16 @@ IN    53 04 00 82 02 00 db            END   ch=0
 `53 07 00 82 00 01 00 0f 00 ec` (src=1, 3840), DATA `82 01 01 …`, END
 `53 04 00 82 02 01 dc`.
 
+**Channel switch is one-deep pipelined [verified 2026-07-11].** After changing the
+channel byte, the **first** `02 01 <ch>` returns the *previously selected* channel's
+buffer; the **second** returns `<ch>`. So a naïve `read(CH1); read(CH2)` yields two
+byte-identical blocks (both CH1). To read a specific channel, issue the acquire
+**twice and keep the second** (verified on a stopped scope: CH1=[253,254,…] vs
+CH2=[208,208,…] only after the double-read; a single read of each gave `diff=0`). This
+matters for inter-channel work (serial clk+data): `_direct_acquire` in
+`mso5202d_plot.py` double-reads each channel. On a *stopped* scope the second read is
+also stable/repeatable; a running scope updates the buffer between reads.
+
 **Example (LA acquire this session, verified):**
 
 ```
@@ -636,6 +646,13 @@ The inverse of `0x01`: writes the whole 213-byte settings block back to the
 device. It is the primary control primitive — do a **read-modify-write**: poll
 with `0x01`, decode, change the field(s) you want, re-encode, write with `0x11`.
 Any field in the datasheet (§8) is settable this way.
+
+**A write makes the scope busy ~3.4 s [verified 2026-07-11].** Reapplying the whole
+block reconfigures channels/trigger/depth, and the device does not answer the *next*
+read until it finishes: the first `0x01` poll after a write blocks ~3.4 s, while
+subsequent polls return in ~0.02 s. So write only when a field actually changed
+(compare the re-encoded block to the just-read one and skip a no-op write) — this is
+the dominant cost in any capture loop that re-preps each time.
 
 **OUT layout**
 
@@ -1589,7 +1606,7 @@ capture or panel label, not exercised over USB) · `G` = [gap] (function/units u
 | **VERT-CH2-RPHASE** | 16 | 20 | 1 | u8 | — | 0=Off 1=On (invert) | {0,1} | V |
 | **VERT-CH2-CNT-FINE** | 17 | 21 | 1 | u8 | fine-gain step count | active when `FINE=1` | {0,20} | G |
 | **VERT-CH2-POS** | 18 | 22 | 2 | i16 | 1/25 div | signed vertical position | −97…50 | V |
-| **TRIG-STATE** | 20 | 24 | 1 | u8 | — | 0=STOP 1=WAIT/Ready 2=AUTO(untrig) 3=TRIG'D 4=SCAN/roll 5=SINGLE(armed) 6=re-arm | {0,1,2,3,5} seen; **4,6 = I** | V/I |
+| **TRIG-STATE** | 20 | 24 | 1 | u8 | — | 0=STOP 1=WAIT/Ready 2=AUTO(untrig) 3=TRIG'D 4=SCAN/roll **5=SINGLE-CAPTURED(stopped, button red)** 6=re-arm | {0,1,2,3,5} seen; **4,6 = I** | V/I |
 | **TRIG-TYPE** | 21 | 25 | 1 | u8 | — | 0=Edge 1=Video 2=Pulse 3=Slope 4=Overtime 5=Alter | {0…5} | V |
 | **TRIG-SRC** | 22 | 26 | 1 | u8 | — | 0=CH1 1=CH2 2=EXT 3=EXT/5 4=AC-line | {0…4}; set restricted per type (§8.5) | V |
 | **TRIG-MODE** | 23 | 27 | 1 | u8 | — | 0=Auto 1=Normal | {0,1}; write mirrors to both `SWAP-CHx-MODE` | V |

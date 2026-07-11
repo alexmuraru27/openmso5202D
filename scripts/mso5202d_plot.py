@@ -89,6 +89,7 @@ def fmt_rate(hz):
 KEY_SR_MENU = 11        # MENU-SR-KEY (Save/Recall)
 KEY_SINGLE  = 18        # CT-SINGLESEQ — arm one trigger-aligned acquisition
 KEY_RUNSTOP = 19        # CT-RS — Run/Stop toggle
+KEY_DEFAULT_SETUP = 21  # CT-DS — factory Default Setup (idempotent known state)
 KEY_FORCE   = 47        # TG-FORCE — force trigger
 # ACQURIE-STORE-DEPTH codes (mso5202d.ACQ_DEPTH_NAMES): 0=4K 4=40K 6=512K 7=1M(1ch).
 DEEP_DEPTHS = [('4K', 0), ('40K', 4), ('512K', 6), ('1M (1-ch)', 7)]
@@ -120,16 +121,19 @@ def _list_wavedata(sh, retries=4):
     return set()
 
 
-def _prep_block(sc, depth_code, setup=True, la=False):
+def _prep_block(sc, depth_code, setup=True, la=False, tb_idx=None):
     """ONE 0x11 settings-block write — the scope MUST be stopped first (changing store
     depth on a running scope crashes/reboots it — verified 2026-07-10). With `setup`,
     also configure both channels for a clean logic capture: display on, 1× probe, DC
     coupling, invert off, full BW, **1 V/div** (3.3 V logic → ~3.3 divisions, no clip),
     CH1 centred / CH2 −2 div (separated), and Edge/CH1/**Auto** trigger. `la` turns the
     logic pod on (all 16 channels) — but **LA forces the depth to 4K** (deep memory is
-    not available with LA, verified 2026-07-11). Without `setup`, only depth (+LA) change."""
+    not available with LA, verified 2026-07-11). `tb_idx` (0..31) sets the horizontal
+    timebase (HORIZ-WIN-TB = idx, HORIZ-TB = max(idx, 6)) — used to spread a deep record
+    over more time. Without `setup`, only depth (+LA, +tb) change."""
     from mso5202d_decode import _field_off, _raw_settings
-    block = bytearray(_raw_settings(sc)[1:])           # 213-byte block (drop 0x81 echo)
+    original = bytes(_raw_settings(sc)[1:])            # 213-byte block (drop 0x81 echo)
+    block = bytearray(original)
 
     def put(name, val):
         off, w = _field_off(name)
@@ -155,7 +159,36 @@ def _prep_block(sc, depth_code, setup=True, la=False):
     elif setup:
         put('LA-SWI', 0)                                     # pure-analog capture → LA off
     put('ACQURIE-STORE-DEPTH', depth_code)
-    sc.transact(b'\x11' + bytes(block)); time.sleep(0.5)
+    if tb_idx is not None:                              # spread the record over more/less time
+        put('HORIZ-WIN-TB', int(tb_idx)); put('HORIZ-TB', max(int(tb_idx), 6))
+    # Only write if something actually changed. A 0x11 write makes the scope busy ~3.4 s
+    # while it reapplies the whole 213-byte block (the next read blocks until it's done), so
+    # skipping a no-op write is the single biggest capture speed-up — on a repeat capture the
+    # scope is already configured and prep becomes free (state-based, not a blind re-write).
+    if bytes(block) != original:
+        sc.transact(b'\x11' + bytes(block)); time.sleep(0.5)
+
+
+def _default_setup(sc, status=lambda m: None):
+    """Factory **Default Setup** (keyid 21) → reset the scope to a KNOWN state so a capture
+    never depends on how the panel was left (idempotent). Verified 2026-07-11: card-safe
+    (a Save right after DS writes a file) and it resets the CSV **Source to CH1** — so a deep
+    multi-channel save then cycles CH1→CH2 deterministically (not from an unknown Source). DS
+    also turns CH2 off / depth 4K / a default timebase, which the subsequent `_prep_block`
+    re-configures. Closed-loop: press until CONTROL-MENUID == 25 (the DefaultSetup menu),
+    then let the reset settle. Returns True if it landed."""
+    status("Default Setup — resetting the scope to a known state…")
+    ok = _press_for_menu(sc, KEY_DEFAULT_SETUP, 25, status)
+    time.sleep(1.5)                                    # let the whole reset apply
+    return ok
+
+
+# TRIG-STATE values where the scope is STOPPED with a frozen record (RUN/STOP button red):
+# 0 = STOP (manual), 5 = SINGLE (single-seq captured + stopped). **5 is NOT "armed"** — a
+# single-seq that has captured sits at 5 with the button red (verified 2026-07-11 by watching
+# the settings while saving a 512K record: state stayed SINGLE the whole time the button was
+# red and the saves succeeded). Armed-waiting is 1 (WAIT) / 6 (re-arm); running is 2/3/4.
+_STOPPED_STATES = (0, 5)
 
 
 def _trig_state(sc):
@@ -164,62 +197,123 @@ def _trig_state(sc):
     except Exception: return None
 
 
+def _is_stopped(sc):
+    st = _trig_state(sc)
+    return st is not None and st in _STOPPED_STATES
+
+
 def _run_stop(sc, want_run, tries=8):
-    """Press Run/Stop (a toggle) until the scope is running (want_run) or stopped."""
+    """Press Run/Stop (a toggle) until the scope is running (want_run) or stopped. Treats a
+    captured single-seq (state 5) as STOPPED — otherwise a stop request on a single-seq record
+    would toggle the scope back into RUN (that was the '512K scope kept running' bug)."""
     for _ in range(tries):
         st = _trig_state(sc)
-        if (st not in (0, None)) == want_run and st is not None:
+        if st is None:
+            from mso5202d_decode import _key
+            _key(sc, KEY_RUNSTOP); time.sleep(0.35); continue
+        is_running = st not in _STOPPED_STATES
+        if is_running == want_run:
             return True
         from mso5202d_decode import _key
         _key(sc, KEY_RUNSTOP); time.sleep(0.35)
-    st = _trig_state(sc)
-    return st is not None and (st not in (0, None)) == want_run
+    return _is_stopped(sc) != want_run
 
 
-def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, la=False, wait_trig=25):
-    """Capture one full-depth, trigger-aligned record via **SINGLE SEQ** — don't manually
-    stop. STOP → configure channels + trigger (Edge/CH1/Auto with the level set mid-logic
-    so the signal actually crosses it) + depth, all while stopped (a 0x11 depth write on a
-    running scope reboots it). Then arm **SINGLE** and let the scope gather data: it
-    triggers on the signal edge and stops itself with the record. Poll TRIG-STATE until it
-    reaches STOP (0); Force-Trig only as a last-resort fallback. Per hardware guidance
-    2026-07-11: a manual RUN→STOP freezes an empty screen; single-seq captures real data."""
-    from mso5202d import ACQ_DEPTH_NAMES, decode_settings
-    from mso5202d_decode import _key, _raw_settings
+def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, la=False, reset=True,
+                    auto_tb=False):
+    """**Prepare** the scope for capture — the slow, idempotent SETUP half (run once). Default
+    Setup (if `reset`) → a known state (CSV Source = CH1) → configure channels + trigger +
+    depth while STOPPED (a 0x11 depth write on a running scope reboots it) → confirm the depth
+    took. `auto_tb` (deep only) probes the live signal at 4K and picks a slower timebase so the
+    deep record spreads over many bit-periods (more frames to scroll). Leaves the scope
+    **running** (live) and ready — the depth write happens while stopped (a running-scope depth
+    write reboots it), then it's set back to Run; call `capture_prepared()` (or press Capture)
+    to grab a record instantly. Returns the chosen tb_idx (or None)."""
+    from mso5202d import ACQ_DEPTH_NAMES, TB_TO_NS, decode_settings
+    from mso5202d_decode import _raw_settings
+    if reset:
+        _default_setup(sc, status)                     # known state → idempotent capture
+    tb_idx = None
+    if auto_tb and depth_code != 0 and not la:
+        status("probing the signal to pick a timebase…")
+        pulse = _probe_pulse_ns(sc, status)
+        if pulse:
+            tb_idx = _pick_deep_tb(pulse, _DEEP_SAMPLES.get(depth_code, 40064))
+            status(f"finest pulse ≈ {pulse/1000:.1f} µs → timebase {TB_TO_NS[tb_idx]/1e3:.0f} "
+                   f"µs/div (record ≈ {19.2*TB_TO_NS[tb_idx]/1e6:.0f} ms)")
+        else:
+            status("no signal to probe — keeping the current timebase")
     status("stopping the scope…"); _run_stop(sc, False)
     status(f"configuring channels + trigger + depth {ACQ_DEPTH_NAMES.get(depth_code, depth_code)}"
            + (" + LA pod" if la else "") + "…")
-    _prep_block(sc, depth_code, setup, la)
-    # Confirm the depth actually took (poll — don't assume): LA clamps deep memory to 4K,
-    # and a bad write could silently differ. This is the "make sure the depth is set" step.
-    actual = decode_settings(_raw_settings(sc)).get('ACQURIE-STORE-DEPTH')
+    # Confirm the depth actually took (poll — don't assume): LA clamps deep memory to 4K, and a
+    # write can silently miss if the link was momentarily desynced. Re-prep until it matches.
+    expect = 0 if la else depth_code
+    actual = None
+    for _ in range(3):
+        _prep_block(sc, depth_code, setup, la, tb_idx=tb_idx)
+        actual = decode_settings(_raw_settings(sc)).get('ACQURIE-STORE-DEPTH')
+        if actual == expect:
+            break
+        status(f"depth read back as {ACQ_DEPTH_NAMES.get(actual, actual)} — re-applying…")
+        sc._resync()
     status(f"depth confirmed: {ACQ_DEPTH_NAMES.get(actual, actual)}"
            + ("  (LA clamps deep memory to 4K)" if la and actual == 0 and depth_code else ""))
-    status("arming SINGLE — letting the scope gather + trigger on the signal…")
+    # Depth had to be written while STOPPED (a 0x11 depth write on a running scope reboots it),
+    # but leave the scope RUNNING now so it shows a live signal and is ready to trigger — the
+    # Capture path (SINGLE-arm or RUN→STOP freeze) works from a running scope.
+    _run_stop(sc, True)
+    status("ready (running) — press Capture to grab a single-seq record")
+    return tb_idx
+
+
+def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
+    """Grab ONE record from an already-prepared + stopped scope (the fast half). No reset/prep.
+
+    * `use_single=True` (deep): arm **SINGLE SEQ** — the scope triggers on the signal edge and
+      stops itself with a full-depth, trigger-aligned record; Force-Trig only as a last resort.
+    * `use_single=False` (4K live serial): **RUN → STOP freeze** — fills the window with the
+      continuous stream and freezes ONE simultaneous 2-channel acquisition (aligned CH1/CH2)."""
+    from mso5202d_decode import _key
+    if not use_single:
+        status("capturing live signal (run → stop freeze)…")
+        _freeze(sc)
+        status("record captured (freeze).")
+        return
+    status("arming SINGLE — triggering on the signal…")
     _key(sc, KEY_SINGLE); time.sleep(0.5)
-    # SINGLE captures on the first signal edge; on this firmware TRIG-STATE does not
-    # always settle to exactly 0 afterwards, but the record IS captured (verified: full
-    # 40K/512K records save correctly). So wait briefly, nudge once with Force if nothing
-    # has triggered, then proceed — the acquisition memory holds the record either way.
-    t0 = time.time(); forced = False; triggered = False
+    # A single-seq captures on the first edge and **stops itself with the record** — the RUN/STOP
+    # button goes red and TRIG-STATE reads 5 (SINGLE) or 0 (STOP). Wait for one of those. If it
+    # stays armed (WAIT/re-arm) with no edge, nudge once with Force. **Do NOT press Run/Stop
+    # afterwards** — it has already stopped; a toggle would start it running (the '512K kept
+    # running / only CH1' bug). Verified against the manual save flow 2026-07-11.
+    t0 = time.time(); forced = False; captured = False
     while time.time() - t0 < wait_trig:
-        if _trig_state(sc) == 0:                        # single-seq triggered + stopped itself
-            triggered = True; break
+        st = _trig_state(sc)
+        if st in _STOPPED_STATES:                       # captured + stopped (button red)
+            captured = True; break
         if not forced and time.time() - t0 > 4:
-            _key(sc, KEY_FORCE); forced = True          # ensure a trigger even with no edge
-        time.sleep(0.6)
-    # STOP-to-freeze: single-seq gathers real data (not the empty screen a bare RUN→STOP
-    # gives), but in Auto mode the scope keeps free-running after — so freeze it now, else
-    # a later save grabs a differently-filled buffer (verified: multi-source saves drift).
-    _run_stop(sc, False)
-    status("record captured + frozen." if triggered else "record captured (forced) + frozen.")
+            _key(sc, KEY_FORCE); forced = True          # no edge yet — force one
+        time.sleep(0.4)
+    status("record captured (single-seq)." if captured
+           else "record may be incomplete (single-seq didn't confirm stop).")
+
+
+def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, la=False, wait_trig=25,
+                    use_single=True, tb_idx=None, reset=True):
+    """Backward-compatible one-shot = prepare + trigger (used by tests/headless). The GUI
+    splits these into a Prepare button and a Capture button instead."""
+    prepare_capture(sc, depth_code, status, setup=setup, la=la, reset=reset)
+    if tb_idx is not None:                               # explicit tb override (tests)
+        _prep_block(sc, depth_code, setup, la, tb_idx=tb_idx)
+    _trigger_record(sc, use_single, status, wait_trig)
 
 
 # Save/Recall → CSV softkey ids (verified 2026-07-10 by screenshotting the menu):
 # key 11 opens S/R (Ref=1, SetUp=2, CSV=3); in the CSV menu Source=1 (cycles
 # CH1→CH2→LA), Save=2, Recall=3, delete=4 (NEVER press — erases card files),
 # FileList=5, Back=6. See MSO5202D-protocol.md §9.
-FN_CSV, FN_SAVE, FN_SOURCE, FN_DELETE = 3, 2, 1, 4
+FN_CSV, FN_SAVE, FN_SOURCE, FN_DELETE, FN_BACK = 3, 2, 1, 4, 6
 
 
 def _menuid(sc):
@@ -321,6 +415,95 @@ def _wait_new_csv(sh, before, seen, status, hard_timeout):
     return target                                         # timed out; return best-effort
 
 
+# --- CSV Source selection (framebuffer-verified) ---------------------------------
+# The CSV menu's Source radio (CH1/CH2/LA) is NOT in the settings blob, so read which is
+# selected off the 0x20 framebuffer: the selected row is orange. Row y-bands + text
+# x-range calibrated from screenshots 2026-07-11 (CH1 y≈60, CH2 y≈82, LA y≈106).
+_SRC_ROWS = {0: (56, 66), 1: (78, 88), 2: (102, 112)}    # source index → (y0, y1)
+_SRC_X = (660, 725)
+_SRC_NAMES = ('CH1', 'CH2', 'LA')
+
+
+def _grab_fb(sc):
+    """Grab the 800×480 framebuffer as an (H,W,3) uint8 array, or None. Resync-retries."""
+    for _ in range(4):
+        try:
+            frame = sc.transact(b'\x20', timeout=4000)
+        except Exception:
+            sc._resync(); time.sleep(0.4); continue
+        data = bytearray()
+        for _ in range(2000):
+            st = frame[1] if len(frame) > 1 else 0xFF
+            if st == 0x01: data += frame[2:]
+            elif st == 0x02: break
+            try: frame = sc._recv(3000)
+            except Exception: break
+        if len(data) >= 800 * 480 * 2:
+            px = np.frombuffer(bytes(data[:800*480*2]), dtype='<u2').reshape(480, 800)
+            r = ((px >> 11) & 0x1f) << 3; g = ((px >> 5) & 0x3f) << 2; b = (px & 0x1f) << 3
+            sc._resync()                     # clear any framebuffer tail so the next key is clean
+            return np.dstack([r, g, b]).astype(np.uint8)
+        sc._resync(); time.sleep(0.4)
+    return None
+
+
+def _read_csv_source(sc):
+    """Which CSV Source is selected — 0=CH1, 1=CH2, 2=LA — read off the framebuffer (the
+    selected radio row is orange). None if unreadable. The CSV menu must be on screen."""
+    img = _grab_fb(sc)
+    if img is None:
+        return None
+    x0, x1 = _SRC_X
+    best, bestn = None, 3
+    for src, (y0, y1) in _SRC_ROWS.items():
+        band = img[y0:y1, x0:x1].reshape(-1, 3).astype(int)
+        og = int(((band[:, 0] > 150) & (band[:, 1] > 90) & (band[:, 2] < 90)).sum())
+        if og > bestn:
+            bestn, best = og, src
+    return best
+
+
+def _select_source(sc, target, status=lambda m: None, tries=6):
+    """Cycle the CSV Source to `target` (0/1/2), VERIFYING via the framebuffer after each
+    press (the Source key can drop). CSV menu must be on screen. Returns True on success."""
+    from mso5202d_decode import _key
+    for _ in range(tries):
+        if _read_csv_source(sc) == target:
+            return True
+        _key(sc, FN_SOURCE); time.sleep(0.6)             # cycle CH1→CH2→LA
+    ok = _read_csv_source(sc) == target
+    if not ok:
+        status(f"couldn't select Source={_SRC_NAMES[target]}")
+    return ok
+
+
+def _save_current(sc):
+    """Two-press Save of the currently-selected Source (CSV menu must be open)."""
+    from mso5202d_decode import _key
+    _key(sc, FN_SAVE); time.sleep(0.7)                   # 1st press opens the FileList
+    _key(sc, FN_SAVE); time.sleep(1.5)                   # 2nd press writes the file
+
+
+def _label_sources(saved):
+    """Tag each saved-CSV dict with r['source'] = 'CH1'/'CH2'/'LA'. Files come in the Source
+    cycle order CH1→CH2→LA; LA is unambiguous (its #threshold header → is_la). If all 3 were
+    saved, deduce CH1/CH2 from LA's index; otherwise just label the analog files in order."""
+    if not saved:
+        return
+    la_idx = next((i for i, r in enumerate(saved) if r.get('is_la')), None)
+    if len(saved) == 3 and la_idx is not None:
+        saved[(la_idx - 2) % 3]['source'] = 'CH1'        # cycle CH1(0)→CH2(1)→LA(2)
+        saved[(la_idx - 1) % 3]['source'] = 'CH2'
+        saved[la_idx]['source'] = 'LA'
+    else:
+        an = 0
+        for r in saved:
+            if r.get('is_la'):
+                r['source'] = 'LA'
+            else:
+                r['source'] = _SRC_NAMES[an] if an < 2 else f'CH{an + 1}'; an += 1
+
+
 def _clear_wavedata(sc, sh, status=lambda m: None, rounds=4):
     """Delete ALL WaveData*.csv off the SD card via the front-panel CSV delete key (F4 /
     keyid 4). Efficient (avoids an `ls` per delete): count the files with ONE `ls`, then
@@ -358,82 +541,390 @@ def clear_wavedata(sc, status=lambda m: None):
         sh.close()
 
 
+def _direct_acquire(sc, channels, status=lambda m: None):
+    """Read each analog channel (0=CH1, 1=CH2) DIRECTLY from the one frozen buffer over
+    `0x02 01 <ch>` — the two reads hit the same stopped acquisition so CH1/CH2 are
+    inter-channel **aligned** (verified: SPI clk+data decode cleanly this way). This is
+    the reliable capture path for a screen-depth (4K) record: no SD card, no CSV, no
+    fragile Source-cycling. Deep records (40K+) and LA still need the CSV route — `0x02`
+    only serves the 3840-sample screen buffer and `02 01 05` (LA) is broken. Returns
+    result dicts (`source`/`volts`/`dt_s`/`size`/`is_la=False`), same shape as the CSV path."""
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    s = decode_settings(_raw_settings(sc))
+    dt = (s.get('SAMPLE-INTERVAL-ns') or 0) * 1e-9
+    out = []
+    for ch in channels:
+        try:
+            # The 0x02 acquire is one-deep pipelined: the FIRST read after switching the
+            # channel byte returns the *previously selected* channel's buffer, the second
+            # returns this channel (verified 2026-07-11 — without this CH1/CH2 come back
+            # byte-identical). Read twice on a stopped scope, keep the second.
+            sc.read_waveform(ch)
+            w = np.frombuffer(sc.read_waveform(ch), dtype=np.uint8)
+        except Exception as e:
+            status(f"  {_SRC_NAMES[ch]}: read failed ({e})"); continue
+        if not len(w):
+            status(f"  {_SRC_NAMES[ch]}: empty read"); continue
+        pos = s.get(f'VERT-CH{ch + 1}-POS') or 0
+        vdiv_mv = s.get(f'CH{ch + 1}-VDIV-mV') or 1000
+        volts = to_divs(w, pos) * (vdiv_mv / 1000.0)       # divisions → volts
+        out.append({'source': _SRC_NAMES[ch], 'volts': volts, 'dt_s': dt or None,
+                    'size': len(w), 'is_la': False})
+        status(f"  {_SRC_NAMES[ch]}: {len(w)} samples direct"
+               + (f", {dt * 1e9:.1f} ns/sample" if dt else ""))
+    return out
+
+
+def _freeze(sc, min_fill_s=0.6):
+    """RUN → (let one full record fill) → STOP: freeze one live 2-channel acquisition. Waits
+    at least one record-window (= 19.2 × sec/div, read from HORIZ-TB) so a DEEP record at a
+    slow timebase actually fills before we stop — otherwise the freeze grabs a partial record.
+    STOP is confirmed via TRIG-STATE (in `_run_stop`). This is used for every capture (4K and
+    deep): SINGLE-SEQ stalls forever/armed at slow timebases even with Force (verified
+    2026-07-11), whereas a RUN→STOP freeze reliably reaches STOP and catches the live stream."""
+    from mso5202d import decode_settings, TB_TO_NS
+    from mso5202d_decode import _raw_settings
+    _run_stop(sc, True)
+    try:
+        tdiv_ns = TB_TO_NS.get(decode_settings(_raw_settings(sc)).get('HORIZ-TB'), 0)
+        fill = max(min_fill_s, 19.2 * tdiv_ns / 1e9 * 1.3)   # one window + 30% margin
+    except Exception:
+        fill = min_fill_s
+    time.sleep(min(fill, 6.0))                                # cap the wait at 6 s
+    _run_stop(sc, False)
+
+
+def _has_signal(results, min_edges=4):
+    """True if any analog channel carries a real toggling signal (≥ min_edges threshold
+    crossings) — used to reject an empty/desynced direct capture and re-take it. LA counts
+    as signal. A genuinely idle capture just fails this and is returned after the retries."""
+    from serial_decode import threshold_volts
+    for r in results or ():
+        if r.get('is_la'):
+            return True
+        v = np.asarray(r.get('volts', ()))
+        if len(v) and int(np.abs(np.diff(threshold_volts(v).astype(int))).sum()) >= min_edges:
+            return True
+    return False
+
+
+# deep record sample counts per depth code (verified: 40K→40064, 512K→400064; 1M inferred)
+_DEEP_SAMPLES = {0: 4064, 4: 40064, 6: 400064, 7: 4000064}
+
+
+def _probe_pulse_ns(sc, status=lambda m: None):
+    """Quick 4K freeze + direct read to measure the signal's **finest pulse** (ns). Used to
+    pick a deep timebase that spreads the record over many bit-periods. Returns None if no
+    channel carries a decodable signal."""
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    from serial_decode import threshold_volts
+    _run_stop(sc, False); _prep_block(sc, 0, setup=True); _freeze(sc)
+    si_ns = decode_settings(_raw_settings(sc)).get('SAMPLE-INTERVAL-ns') or 0
+    if not si_ns:
+        return None
+    shortest = None
+    for r in _direct_acquire(sc, [0, 1], lambda m: None):
+        d = threshold_volts(np.asarray(r['volts'])).astype(int)
+        edges = np.flatnonzero(np.diff(d))
+        if len(edges) < 4:
+            continue
+        runs = np.diff(edges)
+        if len(runs):
+            p = max(int(np.percentile(runs, 5)), 1) * si_ns   # robust shortest run → ns
+            shortest = p if shortest is None else min(shortest, p)
+    return shortest
+
+
+def _pick_deep_tb(pulse_ns, deep_samples, target_samples=15):
+    """Choose the TB index so the DEEP record puts ~target_samples on the finest pulse. The
+    deep record spans the same window as the screen (≈19.2·TDIV) but with `deep_samples`
+    points, so deep_dt = 19.2·TDIV/deep_samples; set deep_dt = pulse/target → ideal TDIV =
+    (pulse/target)·deep_samples/19.2. Pick the nearest available index (≥6)."""
+    from mso5202d import TB_TO_NS
+    ideal_tdiv = (pulse_ns / target_samples) * deep_samples / 19.2
+    cands = {i: v for i, v in TB_TO_NS.items() if i >= 6}
+    return min(cands, key=lambda i: abs(cands[i] - ideal_tdiv))
+
+
+def _same_channel(a, b):
+    """True if two parsed CSVs are the same channel (a dropped Source cycle re-saved it)."""
+    if a.get('is_la') != b.get('is_la'):
+        return False
+    if a.get('is_la'):
+        wa, wb = a.get('words') or [], b.get('words') or []
+        return len(wa) == len(wb) and wa[:200] == wb[:200]
+    va, vb = a.get('volts'), b.get('volts')
+    if va is None or vb is None:
+        return False
+    va, vb = np.asarray(va), np.asarray(vb)
+    n = min(len(va), len(vb))
+    return n > 0 and len(va) == len(vb) and np.array_equal(va[:n], vb[:n])
+
+
+def _wait_save_done(sc, status=lambda m: None, timeout=120):
+    """After a Save the scope shows an orange **"Operation is in progress! Please Wait……"**
+    banner over the FileList and IGNORES key presses until the write finalizes. For a big file
+    (512K ≈ 7.7 MB) the card `ls` sees the file ~40 s before the scope is ready, so a Source
+    cycle pressed then is silently dropped (→ the next save re-saves the same channel = "only
+    CH1"). Poll the framebuffer until that orange banner clears. Verified 2026-07-11 against the
+    on-screen state. Returns True when clear."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            fb = _grab_fb(sc)
+        except Exception:
+            time.sleep(1.0); continue
+        if fb is None:
+            time.sleep(1.0); continue
+        band = fb[230:245, 160:535].reshape(-1, 3).astype(int)   # the banner strip
+        orange = ((band[:, 0] > 160) & (band[:, 2] < 100)
+                  & (band[:, 1] > 60) & (band[:, 1] < 190))
+        if float(orange.mean()) < 0.04:                          # banner gone → scope ready
+            time.sleep(0.5)
+            return True
+        status("  save finishing (scope busy)…")
+        time.sleep(1.5)
+    return False
+
+
+def _save_file_only(sc, sh, before, seen, wait_s, status):
+    """Two-press Save on the CSV page (menuid 48), wait for the new WaveData to finish writing
+    to the card, and return its NAME. Does **not** read the file back — deferred so a big read
+    doesn't sit between Source cycles. Returns None if no file appeared (e.g. Source on LA,
+    pod off).
+
+    CRITICAL: press the two-press Save **once**, then wait **patiently**. A big write takes tens
+    of seconds and the scope writes a temp file first, exposing WaveData<n>.csv only when it
+    renames at the END (~40 s in for 512K). Re-pressing Save during that window CORRUPTS the
+    save and desyncs the Source — extra presses advanced it past CH2 (the "512K only-CH1 /
+    skips CH2" bug; the Source order is CH1→CH2→LA). So only re-press if nothing appears after a
+    long grace (a genuinely dropped press). Verified 2026-07-11."""
+    from mso5202d_decode import _key
+    name = None; t0 = time.time()
+    _key(sc, FN_SAVE); time.sleep(0.8)          # 1st press opens the FileList
+    _key(sc, FN_SAVE)                            # 2nd press writes
+    grace = min(wait_s, 45); last = time.time()  # wait ~45 s (covers a 512K write) before retry
+    while time.time() - t0 < wait_s:
+        if _list_wavedata(sh) - before - seen:
+            name = _wait_new_csv(sh, before, seen, status, wait_s); break
+        if time.time() - last > grace:           # nothing after the grace → the press dropped
+            _key(sc, FN_SAVE); time.sleep(0.8); _key(sc, FN_SAVE); last = time.time()
+        time.sleep(0.8)
+    return name
+
+
 def deep_capture(sc, depth_code, status=lambda m: None, setup=True, la=False,
-                 save_sources=(0,), wait_s=None, delete_after=False):
-    """Trigger + download one deep record. (1) `trigger_capture` freezes a full-depth
-    record (stop → prep → RUN→STOP). (2) For each entry in `save_sources` (a Source
-    cycle count from CH1: 0=CH1, 1=CH2), drive Save→CSV via the mapped softkeys and
-    read the resulting WaveData CSV back over USB (0x10). **Save needs the SD card
-    mounted at /mnt/udisk** — it is a silent no-op otherwise. Restores depth to 4K and
-    closes the menu afterwards. Returns parsed-CSV dicts in save order (index 0 = CH1).
-    Worker-thread only."""
-    from mso5202d import parse_wavedata_csv
+                 save_sources=None, wait_s=None, delete_after=False, reset=True, auto_tb=False):
+    """Trigger a record and bring **every enabled channel** back to the PC, tagged
+    `r['source']` = 'CH1'/'CH2'/'LA'. `reset` (default True) does a **Default Setup** first so
+    the capture is idempotent — a known state (incl. CSV Source = CH1), independent of how the
+    panel was left. `auto_tb` (deep only) probes the signal and picks a slower timebase so the
+    deep record spreads over many bit-periods (more frames to scroll), instead of the same ~4 ms
+    window as 4K. Two capture paths, chosen by depth:
+
+    * **4K analog** (default `save_sources=None`, no LA): a RUN→STOP **freeze** then a direct
+      `0x02` read of each enabled channel — inter-channel aligned, no SD card, no CSV, no
+      fragile Source-cycling. This is the fast, reliable path for serial decoding. NB the
+      `0x02` acquire is one-deep pipelined, so `_direct_acquire` double-reads each channel
+      (the first read returns the previously-selected channel — see it there).
+    * **Deep (40K/512K/1M) or LA**: SINGLE-SEQ trigger-aligned record → Save→CSV once per
+      enabled Source, cycling Source (keyid 1) **directly between saves — NO Back** (after a
+      Save the scope is back on the CSV page, so a plain Source press cycles it; a Back would
+      go up to the S/R base and break it). Collects DISTINCT files (a dropped cycle re-saves
+      the same channel; an LA-off slot saves nothing) until one per enabled channel is in
+      hand, then reads them back over 0x10. Labelled by order (LA by its `#threshold` header;
+      the decoder tries both CH orderings so a swap is harmless). LA forces the record to 4K
+      (deep memory is analog-only). **Needs the SD card mounted** — if a Save writes no file
+      even after cycling, the scope's card detection got disturbed and a front-panel key press
+      re-detects it. Verified end-to-end: 40K CH1+CH2 → SPI ramp decodes.
+
+    `save_sources` forces an explicit list of source indices (0=CH1,1=CH2,2=LA) via the CSV
+    route. With `delete_after`, clears the card once everything is read back. Worker-thread
+    only. This is the one-shot convenience = `prepare_capture()` then `capture_prepared()`;
+    the GUI calls those two separately (a Prepare button + a re-pressable Capture button)."""
+    prepare_capture(sc, depth_code, status, setup=setup, la=la, reset=reset, auto_tb=auto_tb)
+    return capture_prepared(sc, depth_code, status, save_sources=save_sources, la=la,
+                            wait_s=wait_s, delete_after=delete_after)
+
+
+def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, la=False,
+                     wait_s=None, delete_after=False):
+    """**Capture** one record from an already-`prepare_capture()`d scope and bring **every
+    enabled channel** back to the PC (tagged `r['source']`). Fast + re-pressable — no reset,
+    no re-configure. 4K → RUN→STOP freeze + direct `0x02` read; deep/LA → SINGLE-SEQ +
+    Save→CSV. (NB on a repeated deep capture the CSV Source starts wherever the last cycle
+    left it, so labels may swap — the decoder tries both orderings; re-Prepare for a
+    guaranteed CH1-first.)"""
+    from mso5202d import parse_wavedata_csv, decode_settings
+    from mso5202d_decode import _raw_settings
     from mso5202d_shell import Shell
 
-    # A deep CSV is generated + written to the card on-instrument; the file only appears
-    # once complete, and a 512K (~7.7 MB) / 1M (~19 MB) write takes many seconds — so the
-    # detection window scales with depth.
+    # A deep CSV is written to the card on-instrument; it only appears once complete, and a
+    # 512K (~7.7 MB) / 1M (~19 MB) write takes many seconds — detection window scales.
     if wait_s is None:
         wait_s = {0: 30, 4: 45, 6: 130, 7: 220}.get(depth_code, 60)
-    trigger_capture(sc, depth_code, status=status, setup=setup, la=la)
+    # 4K → RUN→STOP freeze + direct 0x02 read (fast, aligned, no card). Deep/LA → SINGLE-SEQ,
+    # which self-stops with a trigger-aligned full-depth record (TRIG-STATE → 5/SINGLE, button
+    # red) that Save→CSV then exports — the manual flow that works. The single-seq is left
+    # STOPPED (we don't toggle Run/Stop) so the CSV saves read a stable frozen buffer and the
+    # Source cycles cleanly across CH1/CH2.
+    direct = (depth_code == 0 and not la and save_sources is None)
+    _trigger_record(sc, use_single=not direct, status=status)
+
+    # 4K analog case: read each enabled channel DIRECTLY from the frozen buffer over 0x02 —
+    # inter-channel aligned, reliable, and completely off the SD card, so we never open the
+    # shell or `ls` the card (that alone costs ~10 s). Return before the CSV machinery; leave
+    # the scope stopped + configured (NO 0x11 restore write) so the next capture's prep also
+    # finds nothing changed and skips its write → a repeat capture is fast.
+    if direct:
+        s = decode_settings(_raw_settings(sc))
+        enabled = [c for c, f in ((0, 'VERT-CH1-DISP'), (1, 'VERT-CH2-DISP')) if s.get(f)]
+        if enabled:
+            status("bringing back: " + ", ".join(_SRC_NAMES[t] for t in enabled))
+            # Occasionally a read desyncs and returns garbage; re-freeze + re-read until every
+            # channel is non-empty and at least one carries signal (bounded — a truly idle
+            # capture just returns after the last attempt).
+            found = []
+            for attempt in range(3):
+                found = _direct_acquire(sc, enabled, status)
+                if found and all(r['size'] for r in found) and _has_signal(found):
+                    break
+                if attempt < 2:
+                    status("capture looked empty/garbled — re-capturing…")
+                    sc._resync(); _freeze(sc)
+            if found:
+                status("brought back: "
+                       + ", ".join(f"{r['source']}({r['size']})" for r in found))
+                return found
+        status("direct acquire empty — falling back to CSV route")
+
     sh = Shell(scope=sc)                                 # share our USB handle for `ls`
     found = []; seen = set()
     try:
         before = _list_wavedata(sh)
-        for cyc in save_sources:
-            status(f"Save→CSV (source {'CH1' if cyc == 0 else 'CH'+str(cyc+1)})…")
-            _save_csv(sc, cyc, status)
-            name = _wait_new_csv(sh, before, seen, status, wait_s)
-            if not name:
-                status("no CSV appeared — is the SD card inserted? Save needs a mounted disk.")
-                continue
-            status(f"reading /mnt/udisk/{name} back over USB…")
+        # which channels to bring back: explicit list, else every ENABLED channel
+        if save_sources is not None:
+            enabled = list(save_sources)
+        else:
+            s = decode_settings(_raw_settings(sc))
+            enabled = [c for c, f in ((0, 'VERT-CH1-DISP'), (1, 'VERT-CH2-DISP'), (2, 'LA-SWI'))
+                       if s.get(f)]
+        if not enabled:
+            status("no channels enabled to save"); return found
+        status("bringing back: " + ", ".join(_SRC_NAMES[t] for t in enabled))
+        # The CSV Source cycles CH1→CH2→LA and isn't in the settings blob. Save once per enabled
+        # channel, cycling Source (keyid 1) between saves — **directly, NO Back**: after a Save
+        # the scope is back on the CSV page (menuid 48), so a plain Source press cycles it (a
+        # Back would go UP to the S/R base where keyid 1 = Ref, breaking everything — verified
+        # 2026-07-11). A Source press can land on an unsaveable slot (LA with the pod off → no
+        # file) or drop (re-saves the same channel), so collect DISTINCT files and keep cycling
+        # until we have one per enabled channel. Files are labelled by collection order (LA by
+        # its #threshold header); the decoder tries both CH orderings so a swap is harmless.
+        want = len(enabled)
+        if not (_press_for_menu(sc, KEY_SR_MENU, 47, status)
+                and _press_for_menu(sc, FN_CSV, 48, status)):
+            status("couldn't open the CSV menu"); return found
+        from mso5202d_decode import _key
+        # PHASE 1 — save each Source to the card, cycling Source between saves. Read-back is
+        # DEFERRED to phase 2: a big 7.7 MB read between cycles was disrupting the FN_SOURCE key
+        # at 512K (only CH1 came back). The manual flow saves all sources to the card first,
+        # then reads them — so here we only wait for each file to finish writing (poll ls), no
+        # read, then cycle Source and save the next.
+        names = []
+        for attempt in range(want + 3):          # a few extra for dropped cycles / LA-off slots
+            if attempt > 0:
+                _key(sc, FN_SOURCE); time.sleep(0.9)     # cycle Source (stays on CSV page)
+            status(f"Save→CSV ({len(names) + 1}/{want})…")
+            name = _save_file_only(sc, sh, before, seen, wait_s, status)
+            if name is None:
+                continue                         # Source on LA-off (nothing to save) → cycle on
+            names.append(name); seen.add(name)
+            if len(names) >= want:
+                break
+            # The scope is still finalizing the write ("Operation in progress" banner) and
+            # ignores keys — wait it out before the next Source cycle, else the cycle drops and
+            # we re-save the same channel (the 512K "only CH1" bug). Then resync + settle
+            # generously: the framebuffer polls in _wait_save_done need a solid pause before the
+            # next key or the FN_SOURCE press drops too (verified: 2 s settle → cycle lands).
+            _wait_save_done(sc, status); sc._resync(); time.sleep(2.0)
+        # PHASE 2 — now read + parse the saved files and drop any duplicate channel (a dropped
+        # Source cycle re-saved the same one).
+        saved = []
+        for name in names:
             try:
-                raw = sc.read_file('/mnt/udisk/' + name, timeout=30000)
-                r = parse_wavedata_csv(raw); r['file'] = name
-                found.append(r); seen.add(name)
-                dt = r.get('dt_s')
-                status(f"{name}: {r['size']} samples" + (f", {dt*1e9:.1f} ns/sample" if dt else ""))
+                r = parse_wavedata_csv(sc.read_file('/mnt/udisk/' + name, timeout=60000))
+                r['file'] = name
             except Exception as e:
-                status(f"failed to read {name}: {e}"); seen.add(name)
+                status(f"failed to read {name}: {e}"); continue
+            if any(_same_channel(r, p) for p in saved):
+                status(f"  {name}: duplicate channel (Source didn't cycle)"); continue
+            saved.append(r)
+            dt = r.get('dt_s')
+            status(f"  {name}: {r['size']} samples, {'LA' if r['is_la'] else 'analog'}"
+                   + (f", {dt*1e9:.1f} ns/sample" if dt else ""))
+        if not saved:
+            status("no CSV saved — Source may be stuck on LA (pod off) or the card save is "
+                   "disturbed (a front-panel key press re-detects it)")
+        _label_sources(saved)                            # tag CH1/CH2/LA by order + LA header
+        found[:] = saved
+        status("brought back: " + ", ".join(f"{r.get('source')}({'LA' if r['is_la'] else r['size']})"
+                                             for r in found))
         if delete_after and found:      # all captures are on the PC now → free the card
             _clear_wavedata(sc, sh, status)
     finally:
-        try:                       # back to 4K (stopped) + close the menu (main screen)
-            _run_stop(sc, False); _prep_block(sc, 0, setup=False); _close_menu(sc)
-        except Exception: pass
+        # Leave the scope STOPPED at the prepared depth (do NOT reset to 4K) so Capture stays
+        # re-pressable without re-preparing. Just release the shell.
         sh.close()
     return found
 
 
 # --- decode + render (pure; shared by GUI and headless) --------------------------
 def decode_capture(results, params):
-    """Threshold each channel's volts (threshold_volts) and run the selected decoder.
-    `results` are parsed-CSV dicts in save order; channel index = list index (CH1=0,
-    CH2=1). Returns (events, dt_seconds_per_sample, used_channel_indices)."""
+    """Threshold each analog channel's volts and run the selected decoder. Channels are
+    matched by **`r['source']`** ('CH1'/'CH2') when present (a capture brings back every
+    enabled channel, in enable order — not necessarily [CH1, CH2]); falls back to list
+    order for CSVs loaded without a source tag. Channel index 0=CH1, 1=CH2. LA results are
+    ignored here (analog decoders). Returns (events, dt_seconds_per_sample, used_indices)."""
     from serial_decode import threshold_volts, decode_uart, decode_spi, decode_i2c
-    if not results:
-        return [], None, []
-    dt = results[0].get('dt_s')
-    digs = [threshold_volts(r['volts']) for r in results]
+    analog = [r for r in results if not r.get('is_la') and r.get('volts') is not None]
+    if not analog:
+        return [], (results[0].get('dt_s') if results else None), []
+    dt = analog[0].get('dt_s')
+    # source name → thresholded digital trace (fall back to list order if untagged)
+    by_name = {}
+    for i, r in enumerate(analog):
+        name = r.get('source') or _SRC_NAMES[i] if i < 2 else None
+        if name:
+            by_name[name] = threshold_volts(r['volts'])
 
-    def ch(i):
-        return digs[i] if 0 <= i < len(digs) else digs[0]
+    def ch(idx):                                          # 0→CH1, 1→CH2
+        name = _SRC_NAMES[idx] if idx < 2 else None
+        return by_name.get(name) if name in by_name else threshold_volts(analog[min(idx, len(analog)-1)]['volts'])
 
     proto = params.get('proto', 'none')
+    ns = dt * 1e9 if dt else None
+
+    def n_bytes(ev):
+        return sum(e['kind'] in ('byte', 'addr') for e in ev)
+
     if proto == 'uart':
         line = params.get('line', 0)
-        ev = decode_uart(ch(line), sample_interval_ns=(dt * 1e9 if dt else None),
-                         baud=params.get('baud'))
+        ev = decode_uart(ch(line), sample_interval_ns=ns, baud=params.get('baud'))
         return ev, dt, [line]
     if proto == 'spi':
         clk, data = params.get('clk', 0), params.get('data', 1)
-        ev = decode_spi(ch(clk), ch(data), cpol=params.get('cpol', 0), cpha=params.get('cpha', 0))
-        return ev, dt, [clk, data]
+        a = decode_spi(ch(clk), ch(data), cpol=params.get('cpol', 0), cpha=params.get('cpha', 0))
+        # channel labels can be imperfect (Source-cycle order) — also try swapping clk/data
+        # and keep whichever decodes more bytes, so SCLK/data can't be silently swapped.
+        b = decode_spi(ch(data), ch(clk), cpol=params.get('cpol', 0), cpha=params.get('cpha', 0))
+        return (a, dt, [clk, data]) if n_bytes(a) >= n_bytes(b) else (b, dt, [data, clk])
     if proto == 'i2c':
         scl, sda = params.get('scl', 0), params.get('sda', 1)
-        ev = decode_i2c(ch(scl), ch(sda))
-        return ev, dt, [scl, sda]
+        a = decode_i2c(ch(scl), ch(sda))
+        b = decode_i2c(ch(sda), ch(scl))
+        return (a, dt, [scl, sda]) if n_bytes(a) >= n_bytes(b) else (b, dt, [sda, scl])
     return [], dt, []
 
 
@@ -444,30 +935,60 @@ def pick_time_scale(span_s):
     return 'ns', 1e-9
 
 
+def _res_len(r):
+    v = r.get('volts'); w = r.get('words')
+    return len(v) if v is not None else (len(w) if w is not None else 0)
+
+
 def render_wave(ax, results):
-    """Plot the captured channels (volts vs time) on a dark axis. Returns
-    (x_scale_seconds, x_unit, annotation_y) for the annotation layer."""
+    """Plot the captured channels on a dark axis — analog channels as volts vs time, LA as
+    stacked digital rows (only the D-lines that toggle) below them. Handles a mix (a capture
+    can bring back CH1/CH2 and LA together). Returns (x_scale_seconds, x_unit, annotation_y)
+    for the decode-annotation layer."""
     ax.set_facecolor(BG); ax.tick_params(colors=FG, labelsize=7)
     for sp in ax.spines.values(): sp.set_color(GRID)
     ax.grid(True, color=GRID, lw=0.5)
+    if not results:
+        ax.set_title("no data captured", color=FG); return 1.0, 's', 0.0
     r0 = results[0]; dt = r0.get('dt_s') or 1e-9
-    span = (r0.get('size') or len(r0['volts'])) * dt
+    span = (r0.get('size') or _res_len(r0)) * dt
     unit, scl = pick_time_scale(span)
+
+    def times(r):
+        return (r['time_s'] if len(r.get('time_s', [])) else np.arange(_res_len(r)) * dt) / scl
+
+    analog = [r for r in results if not r.get('is_la') and r.get('volts') is not None]
+    la = [r for r in results if r.get('is_la') and r.get('words') is not None]
     vmin, vmax = 1e9, -1e9
-    for i, r in enumerate(results):
-        t = r['time_s'] if len(r.get('time_s', [])) else np.arange(len(r['volts'])) * dt
-        ax.plot(t / scl, r['volts'], lw=0.6, color=CH_COLORS[i % 2],
-                label=f"ch{i} {r.get('file', '')}")
+    for i, r in enumerate(analog):
+        ax.plot(times(r), r['volts'], lw=0.6, color=CH_COLORS[i % 2],
+                label=r.get('source') or f"ch{i}")
         if len(r['volts']):
             vmin = min(vmin, float(r['volts'].min())); vmax = max(vmax, float(r['volts'].max()))
     if vmin > vmax:
         vmin, vmax = -1.0, 1.0
     rng = max(vmax - vmin, 0.1)
-    ax.set_ylim(vmin - 0.28 * rng, vmax + 0.08 * rng)      # headroom below for decode text
+    # LA rows stacked below the analog traces: one row per toggling D-line
+    la_bottom = vmin - 0.20 * rng
+    row_h = 0.11 * rng
+    n_rows = 0
+    for r in la:
+        w = np.asarray(r['words'], dtype=np.uint16); tx = times(r)
+        toggling = [n for n in range(16) if 0 < int(((w >> n) & 1).sum()) < len(w)]
+        for n in toggling:
+            base = la_bottom - n_rows * (row_h * 1.4)
+            ax.plot(tx, base + ((w >> n) & 1) * row_h, lw=0.8, color=LA_COLOR, solid_capstyle='round')
+            ax.text(tx[0] if len(tx) else 0, base + row_h / 2, f"D{n}", color=LA_COLOR,
+                    fontsize=6, va='center', ha='right')
+            n_rows += 1
+    low = (la_bottom - n_rows * (row_h * 1.4)) if la else (vmin - 0.28 * rng)
+    ax.set_ylim(low - 0.05 * rng, vmax + 0.08 * rng)
     ax.set_xlabel(f"time ({unit})", color=FG); ax.set_ylabel("volts", color=FG)
-    leg = ax.legend(fontsize=8, facecolor=BG, edgecolor=GRID, loc='upper right')
-    for t in leg.get_texts(): t.set_color(FG)
-    return scl, unit, vmin - 0.06 * rng
+    if analog:
+        leg = ax.legend(fontsize=8, facecolor=BG, edgecolor=GRID, loc='upper right')
+        for t in leg.get_texts(): t.set_color(FG)
+    anno_y = (vmin - 0.06 * rng) if not la else (low + 0.02 * rng)
+    return scl, unit, anno_y
 
 
 def render_anno(ax, events, dt, xscale, anno_y, xlim=None, cap=400):
@@ -495,7 +1016,7 @@ def render_anno(ax, events, dt, xscale, anno_y, xlim=None, cap=400):
         x = ex(e['start'])
         col = {'start': '#2ec27e', 'stop': '#e01b24'}.get(e['kind'], '#e6b400')
         arts.append(ax.axvline(x, color=col, lw=0.4, alpha=0.35))
-        arts.append(ax.text(x, anno_y, e['text'], color=col, fontsize=7, rotation=90,
+        arts.append(ax.text(x, anno_y, e['text'], color=col, fontsize=7,
                             va='top', ha='center', clip_on=True))
     return arts
 
@@ -539,12 +1060,20 @@ class CaptureWorker(threading.Thread):
         finally:
             self.busy = False; self._emit('busy', False)
 
+    def _cmd_prepare(self, kw):
+        if not self.sc:
+            self._status("no scope connected"); return
+        prepare_capture(self.sc, kw['depth_code'], status=self._status,
+                        setup=kw.get('setup', True), reset=kw.get('reset', True),
+                        auto_tb=kw.get('auto_tb', False))
+        self._emit('prepared', kw['depth_code'])         # → enable the Capture button
+
     def _cmd_capture(self, kw):
         if not self.sc:
             self._status("no scope connected"); self._emit('capture', []); return
-        res = deep_capture(self.sc, kw['depth_code'], status=self._status,
-                           setup=kw.get('setup', True), save_sources=kw.get('save_sources', (0,)),
-                           delete_after=kw.get('delete_after', False))
+        res = capture_prepared(self.sc, kw['depth_code'], status=self._status,
+                               save_sources=kw.get('save_sources', None),
+                               delete_after=kw.get('delete_after', False))
         self._emit('capture', res)
 
     def _cmd_key(self, kw):
@@ -594,6 +1123,7 @@ class DecoderApp:
         self.events = []             # decoded events
         self.dt = None               # seconds per sample
         self.proto = 'none'
+        self.prepared_depth = None   # depth code the scope is currently prepared for (None=not)
         self._xscale = 1.0; self._xunit = 's'; self._anno_y = 0.0
         self.anno = []
         self._xlim_cid = None
@@ -633,16 +1163,25 @@ class DecoderApp:
 
         g = group("Capture")
         tk.Label(g, text="depth", bg=BG, fg=FG, font=('TkDefaultFont', 7)).pack(anchor='w')
-        self.v_depth = tk.StringVar(value='40K')
-        ttk.Combobox(g, textvariable=self.v_depth, state='readonly',
-                     values=[d[0] for d in DEEP_DEPTHS], width=12).pack(fill=tk.X)
+        self.v_depth = tk.StringVar(value='4K')
+        depth_cb = ttk.Combobox(g, textvariable=self.v_depth, state='readonly',
+                                values=[d[0] for d in DEEP_DEPTHS], width=12)
+        depth_cb.pack(fill=tk.X)
+        # Changing the depth/reset invalidates the prepared state → must Prepare again.
+        depth_cb.bind('<<ComboboxSelected>>', lambda e: self._set_prepared(False))
+        self.v_reset = tk.BooleanVar(value=True)
+        ttk.Checkbutton(g, text="reset scope first (idempotent)", variable=self.v_reset,
+                        command=lambda: self._set_prepared(False)).pack(anchor='w')
         self.v_setup = tk.BooleanVar(value=True)
         ttk.Checkbutton(g, text="prep CH1/CH2 (on, 1×, DC, 1 V/div)",
                         variable=self.v_setup).pack(anchor='w')
         self.v_delete = tk.BooleanVar(value=False)
         ttk.Checkbutton(g, text="delete CSV from card after read",
                         variable=self.v_delete).pack(anchor='w')
-        btn(g, "▶ Trigger & Capture", self._do_capture)
+        btn(g, "① Prepare (reset + configure)", self._do_prepare)
+        # Capture is enabled only after Prepare (managed separately from the busy toggle).
+        self.capture_btn = btn(g, "② Capture (single-seq)", self._do_capture)
+        self.capture_btn.configure(state='disabled')
         btn(g, "Force Trig", lambda: self.worker.submit('key', keyid=KEY_FORCE, label="Force trig"))
         btn(g, "Load CSV…", self._load_csv)
 
@@ -701,23 +1240,39 @@ class DecoderApp:
             p['scl'] = a; p['sda'] = b
         return p
 
-    def _do_capture(self):
+    def _set_prepared(self, ok, depth=None):
+        """Track whether the scope is prepared, and enable/disable the Capture button."""
+        self.prepared_depth = depth if ok else None
+        try:
+            self.capture_btn.configure(state='normal' if ok else 'disabled')
+        except Exception:
+            pass
+
+    def _do_prepare(self):
+        """① Prepare — reset (idempotent) + configure the scope for the selected depth, and
+        (auto) spread a deep record's timebase for the selected protocol. Enables Capture."""
         if not self.scope_present:
             self.status.set("no scope connected — use Load CSV instead"); return
         code = dict(DEEP_DEPTHS)[self.v_depth.get()]
-        proto = self.v_proto.get()
-        a = 0 if self.v_chA.get() == 'CH1' else 1
-        b = 0 if self.v_chB.get() == 'CH1' else 1
-        # Source-cycle counts to Save→CSV (0=CH1, 1=CH2): the channel(s) the decode needs.
-        if proto == 'uart':
-            sources = (a,)
-        elif proto in ('spi', 'i2c'):
-            sources = tuple(dict.fromkeys([a, b]))          # unique, in order
-        else:
-            sources = (0,)                                  # no protocol → just grab CH1
+        self._set_prepared(False)
+        self.status.set("preparing…")
+        # auto_tb (deep only): spread the record over more time when decoding a protocol so
+        # there are many frames to scroll through, instead of the same ~4 ms window as 4K.
+        self.worker.submit('prepare', depth_code=code, setup=self.v_setup.get(),
+                           reset=self.v_reset.get(),
+                           auto_tb=(code != 0 and self.v_proto.get() != 'none'))
+
+    def _do_capture(self):
+        """② Capture — instantly grab a single-seq record from the prepared scope. Re-pressable."""
+        if not self.scope_present:
+            self.status.set("no scope connected — use Load CSV instead"); return
+        if self.prepared_depth is None:
+            self.status.set("press ① Prepare first"); return
+        # save_sources=None → bring back EVERY enabled channel (CH1/CH2 if displayed, LA if
+        # the pod is on). The decode picks which of those it needs by channel name.
         self.status.set("capturing…")
-        self.worker.submit('capture', depth_code=code, setup=self.v_setup.get(),
-                           save_sources=sources, delete_after=self.v_delete.get())
+        self.worker.submit('capture', depth_code=self.prepared_depth,
+                           save_sources=None, delete_after=self.v_delete.get())
 
     def _load_csv(self):
         from tkinter import filedialog
@@ -768,6 +1323,11 @@ class DecoderApp:
         st = 'disabled' if busy else 'normal'
         for b in self.action_btns:
             try: b.configure(state=st)
+            except Exception: pass
+        if not busy:                     # Capture stays disabled unless the scope is prepared
+            try:
+                self.capture_btn.configure(
+                    state='normal' if self.prepared_depth is not None else 'disabled')
             except Exception: pass
 
     # -- drawing --------------------------------------------------------------
@@ -828,6 +1388,8 @@ class DecoderApp:
                     self.status.set(payload)
                 elif kind == 'busy':
                     self._set_busy(payload)
+                elif kind == 'prepared':
+                    self._set_prepared(True, payload)     # payload = prepared depth code
                 elif kind == 'capture':
                     self.results = payload or []
                     self.events = []

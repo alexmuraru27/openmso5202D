@@ -83,13 +83,22 @@ class Scope:
     def _resync(self):
         """Discard any partial/stale bytes so the next frame starts on a clean
         boundary. Called after a timeout or a bad frame — otherwise leftover
-        bytes in _rx cascade into repeated failures."""
+        bytes in _rx cascade into repeated failures. Drains in large chunks with a
+        generous cap because an interrupted big read (a file-read or framebuffer
+        grab) can leave hundreds of KB queued; keep reading until the endpoint runs
+        dry (a read timeout = empty)."""
         self._rx.clear()
-        for _ in range(8):
+        # Drain in big chunks with a short timeout so a desync costs ~1-2 s, not tens of
+        # seconds: an interrupted big read (file/framebuffer) can queue hundreds of KB, but
+        # 64 KB reads clear ~1 MB in ~16 iterations. Keep reading until the endpoint times out
+        # (empty) — don't stop on a partial read, since the scope dribbles frames and a
+        # premature stop would leave a trailing frame that re-desyncs the next transact.
+        for _ in range(64):                      # bounded (~4 s worst case) but exits when dry
             try:
-                self.dev.read(EP_IN, 512, timeout=120)
+                if not self.dev.read(EP_IN, 65536, timeout=60):
+                    break
             except usb.core.USBError:
-                break   # nothing more pending
+                break   # timeout = nothing more pending
 
     def _transact_once(self, payload: bytes, timeout) -> bytes:
         out = {}
