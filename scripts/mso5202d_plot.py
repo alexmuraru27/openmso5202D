@@ -1,131 +1,51 @@
 #!/usr/bin/env python3
 """
-MSO5202D live waveform viewer — a small standalone "scope on your PC" built on the
-reverse-engineered driver (mso5202d.py).
+MSO5202D triggered protocol decoder.
 
-Usage:
-    python3 mso5202d_plot.py                # live GUI window (needs a display; run
-                                            #   as your user with the udev rule)
-    python3 mso5202d_plot.py --png out.png  # headless: grab a few frames, save a PNG
-    python3 mso5202d_plot.py --frames 200   # live: stop after N frames
+This is **not** a live scope. You choose an acquisition depth (4K / 40K / 512K / 1M)
+and (optionally) a serial protocol, hit **Trigger & Capture**, and the tool:
 
-Rendering follows the scope's own drawing model (see docs/MSO5202D-rendering.md):
-the trace is drawn on a fixed **8×10 division graticule**, never auto-fit to the
-data. The vertical axis is in **divisions** at a fixed **25 counts/div** (each
-channel's volts/div differs, so divisions are the honest shared axis, exactly as
-on the scope face); the horizontal axis is in **divisions** at 200 samples/div
-(a 3840-sample block spans 19.2 div). Samples pinned to the rails are off-screen
-and the trace is **broken** there rather than drawn as a flat line. The title
-carries the real units (V/div, time/div, sample rate, trigger state/level/freq).
+  1. arms a **SINGLE-sequence** acquisition at that depth (one full-depth,
+     trigger-aligned record; Force-Trig if no edge arrives),
+  2. pulls the record off the scope as a front-panel **Save→CSV read back over USB**
+     — there is no deep sample stream over USB (docs/MSO5202D-protocol.md §10.7),
+  3. plots the captured waveform, and
+  4. if a protocol is selected, **thresholds + decodes** it and draws the decoded
+     bytes beneath the part of the wave you're looking at (pan/zoom to read them).
+
+No live data is involved — only the trigger, the CSV download, and offline decode.
+
+    python3 mso5202d_plot.py                       # GUI (needs display + python3-tk)
+    python3 mso5202d_plot.py --load WaveData.csv --proto uart --png out.png   # headless
+
+UART needs one channel; SPI/I²C need two (SCLK+data / SCL+SDA) — save CH1 then CH2
+from the same frozen acquisition so the two files are index-aligned. Decoders live
+in serial_decode.py; the CSV parser + deep-capture helpers in mso5202d.py / here.
 """
 import argparse
-import atexit
 import os
-import subprocess
-import tempfile
-from shutil import which
+import queue
+import threading
+import time
 import numpy as np
 import matplotlib
 from mso5202d import SAMPLES_PER_DIV, DIV_UNIT
-from mso5202d import decode_la as _decode_la
-
-
-class ScopeCapture:
-    """For testing: record scope-only USB traffic for the plot session into a
-    single git-ignored temp pcap (`<repo>/.plot_captures/scope.pcapng`),
-    overwritten on every run. Best-effort — silently disables itself if tshark /
-    usbmon access isn't available, so the viewer always still runs."""
-    def __init__(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.dir = os.path.join(root, ".plot_captures")
-        self.out = os.path.join(self.dir, "scope.pcapng")
-        self.proc = self.raw = self.addr = None
-
-    def start(self):
-        if not which("tshark"):
-            print("[capture] tshark not found — pcap disabled"); return self
-        try:
-            import usb.core
-            d = usb.core.find(idVendor=0x049F, idProduct=0x505A)
-            bus, self.addr = d.bus, d.address
-        except Exception as e:
-            print(f"[capture] scope not found for pcap: {e}"); return self
-        dev = f"/dev/usbmon{bus}"
-        if not os.path.exists(dev):
-            print(f"[capture] {dev} missing — run:  sudo modprobe usbmon   (pcap disabled)")
-            return self
-        if not os.access(dev, os.R_OK):
-            print(f"[capture] no read access to {dev} — run:  "
-                  f"sudo setfacl -m u:$USER:r {dev}   (pcap disabled)")
-            return self
-        os.makedirs(self.dir, exist_ok=True)
-        self.raw = tempfile.NamedTemporaryFile(suffix=".pcapng", delete=False).name
-        try:
-            self.proc = subprocess.Popen(
-                ["tshark", "-i", f"usbmon{bus}", "-w", self.raw],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            atexit.register(self.stop)
-            print(f"[capture] recording scope (bus {bus} dev {self.addr}) → {self.out}")
-        except Exception as e:
-            print(f"[capture] could not start: {e}"); self.proc = None
-        return self
-
-    def stop(self):
-        if not self.proc:
-            return
-        p, self.proc = self.proc, None
-        try:
-            p.terminate(); p.wait(timeout=5)
-        except Exception:
-            try: p.kill()
-            except Exception: pass
-        try:                                   # filter to scope-only, overwrite the one file
-            subprocess.run(["tshark", "-r", self.raw, "-Y",
-                            f"usb.device_address == {self.addr}", "-w", self.out],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
-            n = 0
-            if os.path.exists(self.out):
-                r = subprocess.run(["tshark", "-r", self.out, "-T", "fields", "-e", "frame.number"],
-                                   capture_output=True, text=True)
-                n = sum(1 for x in r.stdout.split() if x.strip())
-            if n:
-                print(f"[capture] saved {self.out}  ({n} scope packets)")
-            else:
-                print(f"[capture] 0 packets captured — usbmon not readable? "
-                      f"(sudo modprobe usbmon; sudo setfacl -m u:$USER:r /dev/usbmon<bus>)")
-        except Exception as e:
-            print(f"[capture] filter failed: {e}")
-        finally:
-            try: os.unlink(self.raw)
-            except OSError: pass
 
 # --- rendering model (docs/MSO5202D-rendering.md) --------------------------------
-# Measured from a CH1 position sweep with a 1-div cal signal: an on-screen trace
-# is a constant ~28 counts/div (amplitude does NOT depend on position); the rails
-# sit at ~8 (0x08) and ~242 (0xF2), and an off-screen/parked trace flat-lines
-# near mid-code (~128). Frames that come back mostly rail-pinned are screen-edge
-# transition artifacts ("hash"), not real waveforms — reject them.
-# Vertical model (measured from a POS-correlated capture): the scope encodes each
-# sample as (VERT-CHx-POS + 16 + signal) mod 256. So the raw byte both **reverses**
-# (it rises as the trace moves up) and **wraps** at the 8-bit boundary as the trace
-# nears screen centre — the cause of the "reverse movement" and the centre "hash".
-# Recover the true trace by unwrapping each sample around the POS-derived baseline.
-# DIV_UNIT (=25) is simultaneously counts-per-division and the POS unit (1/25 div).
+# to_divs/x_divs are the scope's byte→division model, kept here because
+# serial_decode.threshold() and mso5202d_decode.py import them for the 3840-sample
+# SCREEN-buffer decode path. This tool itself works on deep-capture CSVs (volts).
 BASELINE_OFFSET = 16             # byte baseline = (VERT-CHx-POS + 16) mod 256
 V_DIVS          = 8              # graticule is 8 divisions tall (-4 … +4)
 CH_COLORS = ('#e6b400', '#0a84ff')          # CH1 yellow, CH2 blue (like the scope)
 GRID, GRID_MINOR, AXIS = '#274427', '#182a19', '#3f6b3f'
 BG, FG = '#080a08', '#9fb0a0'
-# Delay between waveform polls. Each poll blocks the GUI thread while it reads
-# USB, so this gap is when the window stays responsive (drag/resize/close). Bigger
-# = smoother GUI + slower trace refresh; smaller = faster trace + laggier window.
-POLL_INTERVAL_MS = 100
 
 def to_divs(y_bytes, pos):
     """Waveform byte + the channel's VERT-POS → vertical divisions (up = positive).
-    Unwraps the sample around the POS-referenced baseline, which undoes the 8-bit
-    wrap near screen centre (fixes the centre "hash") and the reversed sense (fixes
-    the reverse movement), and places the trace at its true division."""
+    Unwraps the sample around the POS-referenced baseline (undoes the 8-bit wrap near
+    screen centre and the reversed sense). Used by serial_decode.threshold() and the
+    screen-buffer viewer in mso5202d_decode.py."""
     pos = int(pos)
     base = (pos + BASELINE_OFFSET) & 0xFF
     sig = ((y_bytes.astype(int) - base + 128) % 256) - 128   # signal AC, unwrapped
@@ -138,70 +58,10 @@ def x_divs(n):
     """Sample index → horizontal divisions (200 samples/div), block start = 0."""
     return np.arange(n) / SAMPLES_PER_DIV
 
-# --- logic analyzer (D0..D15) ----------------------------------------------------
-# LA acquires as 3840 16-bit words (02 01 05, 2 bytes/sample); bit N = channel
-# D(N). When LA is on the enabled channels are stacked as evenly spaced digital
-# rows across the graticule (lowest Dn at the bottom), overlaid on any analog.
-#
-# DISABLED BY DEFAULT: the raw `02 01 05` LA read is a half-wired firmware path.
-# It returns unreliable data (2-state garbage at most timebases; only partially
-# coherent at slow ones) AND — critically — corrupts the scope's own on-screen LA
-# display while reading. Until a safe LA readout is found (likely the 0x20
-# framebuffer, which is how the vendor's virtual panel shows LA), we do NOT poll
-# it. Flip LA_READ_ENABLED to True only for controlled RE experiments.
-LA_READ_ENABLED = False
-LA_COLOR = '#2ec27e'
-
-def la_enabled(state):
-    """Enabled digital channels from LA-CHANNEL-STATE (bit N = D(N))."""
-    return [n for n in range(16) if (int(state) >> n) & 1]
-
-def la_geometry(enabled):
-    """Place the enabled D-channels as evenly spaced rows in the graticule,
-    lowest Dn at the bottom. Returns {n: (row_center_div, amplitude_div)}."""
-    k = len(enabled)
-    if not k:
-        return {}
-    top, bot = V_DIVS / 2 - 0.25, -V_DIVS / 2 + 0.25
-    gap = (top - bot) / k
-    amp = min(gap * 0.55, 0.45)
-    return {n: (bot + (i + 0.5) * gap, amp) for i, n in enumerate(enabled)}
-
-def la_trace_y(words, n, yc, amp):
-    """0/1 trace for Dn in its row: bit N of each 16-bit word → low/high level."""
-    return yc - amp / 2 + ((words >> n) & 1) * amp
-
-def draw_la(la_lines, la_labels, s, words):
-    """Update the 16 pre-created LA row artists (line + label per Dn) from the
-    latest sample words. Enabled channels get a stacked digital trace; the rest
-    are cleared. Returns the sample count drawn (0 if LA off / no data)."""
-    if not (s.get('LA-SWI') and words):
-        for ln in la_lines: ln.set_data([], [])
-        for tx in la_labels: tx.set_text('')
-        return 0
-    w = np.asarray(words, dtype=np.uint16)
-    x = x_divs(len(w))
-    geom = la_geometry(la_enabled(s.get('LA-CHANNEL-STATE', 0)))
-    for n in range(16):
-        if n in geom:
-            yc, amp = geom[n]
-            la_lines[n].set_data(x, la_trace_y(w, n, yc, amp))
-            la_labels[n].set_position((0.1, yc)); la_labels[n].set_text(f"D{n}")
-        else:
-            la_lines[n].set_data([], []); la_labels[n].set_text('')
-    return len(w)
-
-def make_la_artists(ax):
-    """Pre-create the 16 LA line + label artists (empty)."""
-    la_lines = [ax.plot([], [], lw=1.0, color=LA_COLOR, solid_capstyle='round')[0]
-                for _ in range(16)]
-    la_labels = [ax.text(0.1, 0, '', color=LA_COLOR, fontsize=6, va='center',
-                         ha='left', clip_on=True) for _ in range(16)]
-    return la_lines, la_labels
-
 def style_scope(ax, n_div_h):
     """Draw the scope-style graticule: 8 tall × n_div_h wide divisions, with 5
-    minor subdivisions per division, a bold centre line, on a dark face."""
+    minor subdivisions per division, a bold centre line, on a dark face. Kept for
+    the screen-buffer viewer in mso5202d_decode.py."""
     ax.set_facecolor(BG)
     ax.set_xlim(0, n_div_h); ax.set_ylim(-V_DIVS / 2, V_DIVS / 2)
     ax.set_xticks(np.arange(0, n_div_h + 1e-6, 1))
@@ -217,37 +77,6 @@ def style_scope(ax, n_div_h):
     ax.set_xlabel("divisions (200 Sa/div)", color=FG, fontsize=8)
     ax.set_ylabel("divisions (25 counts/div)", color=FG, fontsize=8)
 
-# --- title / status --------------------------------------------------------------
-def fmt_vdiv(mv, vb=None):
-    if mv is None: return '?'
-    if vb == 0: return "2 mV or 10 V/div"   # VB=0 wraps: both extremes share it
-    return f"{mv/1000:g} V/div" if mv >= 1000 else f"{mv:g} mV/div"
-
-def fmt_tdiv(ns):
-    if ns is None: return '?'
-    for unit, scale in (('s', 1e9), ('ms', 1e6), ('µs', 1e3), ('ns', 1)):
-        if ns >= scale:
-            return f"{ns/scale:g} {unit}/div"
-    return f"{ns:g} ns/div"
-
-def fmt_time(ns):
-    """Plain duration (no /div), e.g. total time across the screen."""
-    if ns is None: return '?'
-    for unit, scale in (('s', 1e9), ('ms', 1e6), ('µs', 1e3), ('ns', 1)):
-        if ns >= scale:
-            return f"{ns/scale:.3g} {unit}"
-    return f"{ns:g} ns"
-
-def fmt_span(s, n):
-    """Total time drawn on screen = samples × sample-interval (the full block spans
-    n/200 divisions)."""
-    dt = s.get('SAMPLE-INTERVAL-ns')
-    return fmt_time(dt * n) if (dt and n) else '?'
-
-def fmt_level(mv):
-    if mv is None: return '?'
-    return f"{mv/1000:g} V" if abs(mv) >= 1000 else f"{mv:g} mV"
-
 def fmt_rate(hz):
     if not hz: return '?'
     for unit, scale in (('GSa/s', 1e9), ('MSa/s', 1e6), ('kSa/s', 1e3), ('Sa/s', 1)):
@@ -255,279 +84,780 @@ def fmt_rate(hz):
             return f"{hz/scale:g} {unit}"
     return f"{hz:g} Sa/s"
 
-def label(s, n=None):
-    from mso5202d import (TRIG_STATE_NAMES, TRIG_TYPE_NAMES, TRIG_SRC_NAMES,
-                          TRIG_MODE_NAMES)
-    st = TRIG_STATE_NAMES.get(s.get('TRIG-STATE'), f"?{s.get('TRIG-STATE')}")
-    ty = TRIG_TYPE_NAMES.get(s.get('TRIG-TYPE'), f"?{s.get('TRIG-TYPE')}")
-    src = TRIG_SRC_NAMES.get(s.get('TRIG-SRC'), f"?{s.get('TRIG-SRC')}")
-    mode = TRIG_MODE_NAMES.get(s.get('TRIG-MODE'), '')
-    slope = {0: '↑', 1: '↓'}.get(s.get('TRIG-EDGE-SLOPE'), '')
-    return (f"MSO5202D  |  CH1 {fmt_vdiv(s.get('CH1-VDIV-mV'), s.get('VERT-CH1-VB'))}  "
-            f"CH2 {fmt_vdiv(s.get('CH2-VDIV-mV'), s.get('VERT-CH2-VB'))}  "
-            f"|  {fmt_tdiv(s.get('TDIV-ns'))} ({fmt_rate(s.get('SAMPLERATE-HZ'))})  "
-            f"| screen {fmt_span(s, n)}  |  "
-            f"trig {st} {ty}{slope} {src} {mode} "
-            f"level={fmt_level(s.get('TRIG-LEVEL-mV'))} f={s.get('TRIG-FREQUENCY', 0)/1000:g} Hz")
+# --- deep capture (the triggered-decoder acquisition) ----------------------------
+# Front-panel key ids (0-indexed /keyprotocol.inf; MSO5202D-protocol.md §9/§10.3).
+KEY_SR_MENU = 11        # MENU-SR-KEY (Save/Recall)
+KEY_SINGLE  = 18        # CT-SINGLESEQ — arm one trigger-aligned acquisition
+KEY_RUNSTOP = 19        # CT-RS — Run/Stop toggle
+KEY_FORCE   = 47        # TG-FORCE — force trigger
+# ACQURIE-STORE-DEPTH codes (mso5202d.ACQ_DEPTH_NAMES): 0=4K 4=40K 6=512K 7=1M(1ch).
+DEEP_DEPTHS = [('4K', 0), ('40K', 4), ('512K', 6), ('1M (1-ch)', 7)]
+# 2-byte signed settings fields we write in the prep block (little-endian, signed).
+_POS_SIGNED = {'VERT-CH1-POS', 'VERT-CH2-POS', 'TRIG-VPOS'}
 
-def clip_note(s):
-    """Flag any displayed channel whose position parks it off the 8-div screen."""
-    flags = [f"CH{ch+1} off-screen" for ch in (0, 1)
-             if s.get(f'VERT-CH{ch+1}-DISP') and off_screen(s.get(f'VERT-CH{ch+1}-POS', 0))]
-    return ("  |  ⚠ " + ", ".join(flags)) if flags else ""
 
-# --- acquisition -----------------------------------------------------------------
-# Live reads fail fast: if the scope misses a response (it does so occasionally,
-# and while a front-panel knob is being turned), we skip that frame and keep the
-# last trace instead of blocking the GUI on seconds of nested timeouts/retries.
-LIVE_TIMEOUT_MS = 400
-LIVE_RETRIES = 0
+def _wavedata_num(name):
+    import re
+    m = re.search(r'(\d+)', name)
+    return int(m.group(1)) if m else -1
 
-def read_settings(scope, timeout=3000, retries=2):
+
+def _list_wavedata(sh, retries=4):
+    """Names of WaveData*.csv currently on the inserted card, via the 0x43 shell. The
+    shell `ls` occasionally returns empty/garbled (a one-behind race); since the card in
+    use always holds files, retry an empty result so callers get a reliable baseline."""
+    for _ in range(retries):
+        try:
+            out = sh.run("ls -1 /mnt/udisk 2>/dev/null")
+        except Exception:
+            time.sleep(0.3); continue
+        files = {ln.strip() for ln in out.splitlines()
+                 if ln.strip().lower().startswith('wavedata')
+                 and ln.strip().lower().endswith('.csv')}
+        if files:
+            return files
+        time.sleep(0.3)                    # empty is almost certainly a flaky read — retry
+    return set()
+
+
+def _prep_block(sc, depth_code, setup=True):
+    """ONE 0x11 settings-block write — the scope MUST be stopped first (changing store
+    depth on a running scope crashes/reboots it — verified 2026-07-10). With `setup`,
+    also configure both channels for a clean logic capture: display on, 1× probe, DC
+    coupling, invert off, full BW, **1 V/div** (3.3 V logic → ~3.3 divisions, no clip),
+    CH1 centred / CH2 −2 div (separated), and Edge/CH1/**Auto** trigger. Without
+    `setup`, only the store depth changes (e.g. restoring 4K)."""
+    from mso5202d_decode import _field_off, _raw_settings
+    block = bytearray(_raw_settings(sc)[1:])           # 213-byte block (drop 0x81 echo)
+
+    def put(name, val):
+        off, w = _field_off(name)
+        block[off:off + w] = int(val).to_bytes(w, 'little', signed=name in _POS_SIGNED)
+
+    if setup:
+        for n in (1, 2):
+            put(f'VERT-CH{n}-DISP', 1)                 # channel on
+            put(f'VERT-CH{n}-PROBE', 0)                # 1×
+            put(f'VERT-CH{n}-COUP', 0)                 # DC
+            put(f'VERT-CH{n}-RPHASE', 0)               # invert off
+            put(f'VERT-CH{n}-20MHZ', 0)                # full bandwidth
+            put(f'VERT-CH{n}-VB', 8)                   # 1 V/div
+        put('VERT-CH1-POS', 0)                         # CH1 centred
+        put('VERT-CH2-POS', -50)                       # CH2 −2 div (separated, no clip)
+        put('TRIG-TYPE', 0); put('TRIG-SRC', 0); put('TRIG-MODE', 0)   # Edge / CH1 / Auto
+        # Trigger level ≈ +1.6 V (mid of 3.3 V logic): TRIG-VPOS in 1/25-div,
+        # level_V = (VPOS−POS_src)·Vdiv/25 = 40·1000mV/25 = 1.6 V with CH1 POS=0, 1 V/div.
+        # Without a level ON the signal, SINGLE arms forever (never crosses) — verified.
+        put('TRIG-VPOS', 40)
+    put('ACQURIE-STORE-DEPTH', depth_code)
+    sc.transact(b'\x11' + bytes(block)); time.sleep(0.5)
+
+
+def _trig_state(sc):
+    from mso5202d_decode import _state
+    try: return _state(sc)['TRIG-STATE']
+    except Exception: return None
+
+
+def _run_stop(sc, want_run, tries=8):
+    """Press Run/Stop (a toggle) until the scope is running (want_run) or stopped."""
+    for _ in range(tries):
+        st = _trig_state(sc)
+        if (st not in (0, None)) == want_run and st is not None:
+            return True
+        from mso5202d_decode import _key
+        _key(sc, KEY_RUNSTOP); time.sleep(0.35)
+    st = _trig_state(sc)
+    return st is not None and (st not in (0, None)) == want_run
+
+
+def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, wait_trig=25):
+    """Capture one full-depth, trigger-aligned record via **SINGLE SEQ** — don't manually
+    stop. STOP → configure channels + trigger (Edge/CH1/Auto with the level set mid-logic
+    so the signal actually crosses it) + depth, all while stopped (a 0x11 depth write on a
+    running scope reboots it). Then arm **SINGLE** and let the scope gather data: it
+    triggers on the signal edge and stops itself with the record. Poll TRIG-STATE until it
+    reaches STOP (0); Force-Trig only as a last-resort fallback. Per hardware guidance
+    2026-07-11: a manual RUN→STOP freezes an empty screen; single-seq captures real data."""
+    from mso5202d import ACQ_DEPTH_NAMES
+    from mso5202d_decode import _key
+    status("stopping the scope…"); _run_stop(sc, False)
+    status(f"configuring channels + trigger + depth {ACQ_DEPTH_NAMES.get(depth_code, depth_code)}…")
+    _prep_block(sc, depth_code, setup)
+    status("arming SINGLE — letting the scope gather + trigger on the signal…")
+    _key(sc, KEY_SINGLE); time.sleep(0.5)
+    # SINGLE captures on the first signal edge; on this firmware TRIG-STATE does not
+    # always settle to exactly 0 afterwards, but the record IS captured (verified: full
+    # 40K/512K records save correctly). So wait briefly, nudge once with Force if nothing
+    # has triggered, then proceed — the acquisition memory holds the record either way.
+    t0 = time.time(); forced = False
+    while time.time() - t0 < wait_trig:
+        if _trig_state(sc) == 0:
+            status("triggered — full-depth record captured."); return
+        if not forced and time.time() - t0 > 4:
+            _key(sc, KEY_FORCE); forced = True          # ensure a trigger even with no edge
+        time.sleep(0.6)
+    status("record captured (single-seq).")
+
+
+# Save/Recall → CSV softkey ids (verified 2026-07-10 by screenshotting the menu):
+# key 11 opens S/R (Ref=1, SetUp=2, CSV=3); in the CSV menu Source=1 (cycles
+# CH1→CH2→LA), Save=2, Recall=3, delete=4 (NEVER press — erases card files),
+# FileList=5, Back=6. See MSO5202D-protocol.md §9.
+FN_CSV, FN_SAVE, FN_SOURCE = 3, 2, 1
+
+
+def _menuid(sc):
+    """Current CONTROL-MENUID (which on-screen menu is open), or None. Poll this between
+    key presses to see the scope's real state — the basis of closed-loop navigation."""
     from mso5202d import decode_settings
-    return decode_settings(scope.read_settings(timeout, retries))
-
-def read_waves(scope, s, timeout=2000, retries=2):
-    """One waveform block per displayed channel, using the (cached) settings to
-    know which channels are on."""
-    waves = {}
-    for ch, disp in ((0, s['VERT-CH1-DISP']), (1, s['VERT-CH2-DISP'])):
-        if disp:
-            waves[ch] = np.frombuffer(
-                scope.read_waveform(ch, retries=retries, timeout=timeout), dtype=np.uint8)
-    return waves
-
-def grab(scope):
-    """Settings + waveforms + LA block (one-shot PNG path — generous timeouts)."""
-    s = read_settings(scope)
-    la = _decode_la(scope.read_la()) if (s.get('LA-SWI') and LA_READ_ENABLED) else []
-    return read_waves(scope, s), s, la
-
-
-def _title(ax, s, n=None):
-    ax.set_title(label(s, n) + clip_note(s), fontsize=8, color=FG)
-
-# --- outputs ---------------------------------------------------------------------
-def run_png(path, frames, capture=True):
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from mso5202d import Scope
-    sc = Scope()
-    cap = ScopeCapture().start() if capture else None
+    from mso5202d_decode import _raw_settings
     try:
-        waves, s, la = grab(sc)
-        for _ in range(max(0, frames - 1)):        # warm up / latest frame
-            waves, s, la = grab(sc)
-        n = max([len(y) for y in waves.values()] + [len(la)], default=SAMPLES_PER_DIV)
-        n = n or SAMPLES_PER_DIV
-        fig, ax = plt.subplots(figsize=(11, 5)); fig.patch.set_facecolor(BG)
-        style_scope(ax, n / SAMPLES_PER_DIV)
-        for ch, y in waves.items():
-            ax.plot(x_divs(len(y)), to_divs(y, s[f'VERT-CH{ch+1}-POS']), lw=1.0,
-                    color=CH_COLORS[ch], label=f"CH{ch+1}", solid_capstyle='round')
-        la_lines, la_labels = make_la_artists(ax)
-        draw_la(la_lines, la_labels, s, la)
-        _title(ax, s, n)
-        if waves:                                     # only legend labelled analog traces
-            leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
-            for t in leg.get_texts(): t.set_color(FG)
-        fig.tight_layout(); fig.savefig(path, dpi=110, facecolor=BG)
-        for ch, y in waves.items():
-            print(f"[+] CH{ch+1}: {len(y)} samples, min={int(y.min())} max={int(y.max())}")
-        if s.get('LA-SWI') and la:
-            print(f"[+] LA: {len(la)} samples, {len(la_enabled(s.get('LA-CHANNEL-STATE',0)))} channels on")
-        print(f"[+] saved {path}")
+        return decode_settings(_raw_settings(sc)).get('CONTROL-MENUID')
+    except Exception:
+        return None
+
+
+def _press_for_menu(sc, keyid, want, status=lambda m: None, tries=4):
+    """Press `keyid`, then poll CONTROL-MENUID until it reaches `want` (int/set). Never
+    fires blind — verifies the scope actually landed on the expected menu, retrying the
+    press if not. Returns True on success."""
+    from mso5202d_decode import _key
+    wants = set(want) if isinstance(want, (set, tuple, list)) else {want}
+    for _ in range(tries):
+        _key(sc, keyid); time.sleep(0.35)
+        for _ in range(6):
+            m = _menuid(sc)
+            if m in wants:
+                return True
+            time.sleep(0.2)
+    return _menuid(sc) in wants
+
+
+def _save_csv(sc, source_cycles=0, status=lambda m: None):
+    """CLOSED-LOOP drive of S/R → CSV → (Source ×N) → Save: verify CONTROL-MENUID after
+    each menu key so a stray starting screen can't send us into the wrong menu (e.g. into
+    SETUP and bumping its Location). First close any open menu (main screen), then S/R
+    base (menuid 47) → CSV page (menuid 48) → **Save twice** (1st opens the FileList, 2nd
+    writes). `source_cycles`: 0=CH1, 1=CH2, 2=LA. Needs a mounted SD card. Returns True
+    if it reached the CSV menu and pressed Save."""
+    from mso5202d_decode import _key
+    # NOTE: no 0x11 writes here — the vendor app never issues 0x11 during a save, and a
+    # 0x11 write appears to disturb the scope's USB/card detection. Reach a clean menu with
+    # KEY presses only (MENU-SR switches to the S/R base from wherever we are).
+    if not _press_for_menu(sc, KEY_SR_MENU, 47, status):
+        status("couldn't reach S/R base (menuid 47) — aborting save"); return False
+    if not _press_for_menu(sc, FN_CSV, 48, status):
+        status("couldn't reach CSV menu (menuid 48) — aborting save"); return False
+    for _ in range(source_cycles):
+        _key(sc, FN_SOURCE); time.sleep(0.3)           # cycle Source CH1→CH2→LA
+    _key(sc, FN_SAVE); time.sleep(0.8)                 # 1st press: opens the FileList
+    _key(sc, FN_SAVE); time.sleep(1.5)                 # 2nd press: writes WaveData<n>.csv
+    return True
+
+
+def _close_menu(sc):
+    """Return to the main screen — write CONTROL-DISP-MENU=0 (verified 2026-07-10: hides
+    the open side menu, e.g. the CH1 menu the prep write pops up)."""
+    from mso5202d_decode import _field_off, _raw_settings
+    try:
+        od, _ = _field_off('CONTROL-DISP-MENU')
+        block = bytearray(_raw_settings(sc)[1:]); block[od] = 0
+        sc.transact(b'\x11' + bytes(block)); time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def _csv_size(sh, name):
+    """Byte size of /mnt/udisk/<name>, or -1 if absent/unreadable (via the 0x43 shell)."""
+    try:
+        parts = sh.run(f"ls -la /mnt/udisk/{name} 2>/dev/null").split()
+        return int(parts[4]) if len(parts) >= 5 else -1
+    except Exception:
+        return -1
+
+
+def _wait_new_csv(sh, before, seen, status, hard_timeout):
+    """Poll the card for a NEW WaveData*.csv, then wait for its size to STOP changing
+    before declaring it done. A deep CSV is generated then written to the (slow) card
+    over many seconds, and the file is visible while still growing — so first-appearance
+    is not "complete"; a stable size is. Returns the finished filename, or None."""
+    t0 = time.time(); target = None
+    while time.time() - t0 < hard_timeout:                # (1) wait for the file to appear
+        new = sorted(_list_wavedata(sh) - before - seen, key=_wavedata_num)
+        if new:
+            target = new[-1]; break
+        time.sleep(1.0)
+    if not target:
+        return None
+    last = -1; stable = 0                                 # (2) wait for the size to settle
+    while time.time() - t0 < hard_timeout:
+        sz = _csv_size(sh, target)
+        if sz > 0 and sz == last:
+            stable += 1
+            if stable >= 2:                               # unchanged twice → fully written
+                status(f"{target} written ({sz // 1024} KB)")
+                return target
+        else:
+            if sz > 0 and sz != last:
+                status(f"writing {target}… {sz // 1024} KB")
+            stable = 0; last = sz
+        time.sleep(1.0)
+    return target                                         # timed out; return best-effort
+
+
+def deep_capture(sc, depth_code, status=lambda m: None, setup=True,
+                 save_sources=(0,), wait_s=None):
+    """Trigger + download one deep record. (1) `trigger_capture` freezes a full-depth
+    record (stop → prep → RUN→STOP). (2) For each entry in `save_sources` (a Source
+    cycle count from CH1: 0=CH1, 1=CH2), drive Save→CSV via the mapped softkeys and
+    read the resulting WaveData CSV back over USB (0x10). **Save needs the SD card
+    mounted at /mnt/udisk** — it is a silent no-op otherwise. Restores depth to 4K and
+    closes the menu afterwards. Returns parsed-CSV dicts in save order (index 0 = CH1).
+    Worker-thread only."""
+    from mso5202d import parse_wavedata_csv
+    from mso5202d_shell import Shell
+
+    # A deep CSV is generated + written to the card on-instrument; the file only appears
+    # once complete, and a 512K (~7.7 MB) / 1M (~19 MB) write takes many seconds — so the
+    # detection window scales with depth.
+    if wait_s is None:
+        wait_s = {0: 30, 4: 45, 6: 130, 7: 220}.get(depth_code, 60)
+    trigger_capture(sc, depth_code, status=status, setup=setup)
+    sh = Shell(scope=sc)                                 # share our USB handle for `ls`
+    found = []; seen = set()
+    try:
+        before = _list_wavedata(sh)
+        for cyc in save_sources:
+            status(f"Save→CSV (source {'CH1' if cyc == 0 else 'CH'+str(cyc+1)})…")
+            _save_csv(sc, cyc, status)
+            name = _wait_new_csv(sh, before, seen, status, wait_s)
+            if not name:
+                status("no CSV appeared — is the SD card inserted? Save needs a mounted disk.")
+                continue
+            status(f"reading /mnt/udisk/{name} back over USB…")
+            try:
+                raw = sc.read_file('/mnt/udisk/' + name, timeout=30000)
+                r = parse_wavedata_csv(raw); r['file'] = name
+                found.append(r); seen.add(name)
+                dt = r.get('dt_s')
+                status(f"{name}: {r['size']} samples" + (f", {dt*1e9:.1f} ns/sample" if dt else ""))
+            except Exception as e:
+                status(f"failed to read {name}: {e}"); seen.add(name)
     finally:
-        if cap: cap.stop()
-        sc.close()
+        try:                       # back to 4K (stopped) + close the menu (main screen)
+            _run_stop(sc, False); _prep_block(sc, 0, setup=False); _close_menu(sc)
+        except Exception: pass
+        sh.close()
+    return found
 
-import threading, time as _time
 
-class Reader(threading.Thread):
-    """Owns all scope I/O on its own thread so the GUI never blocks on USB.
-    Continuously reads settings (throttled) and one displayed channel per cycle
-    (round-robin), publishing the latest (settings, {ch: bytes}) under a lock. The
-    GUI just snapshots this — a ~100 ms acquire or a missed frame stalls only this
-    thread, never the window."""
-    SETTINGS_TTL = 2.0
+# --- decode + render (pure; shared by GUI and headless) --------------------------
+def decode_capture(results, params):
+    """Threshold each channel's volts (threshold_volts) and run the selected decoder.
+    `results` are parsed-CSV dicts in save order; channel index = list index (CH1=0,
+    CH2=1). Returns (events, dt_seconds_per_sample, used_channel_indices)."""
+    from serial_decode import threshold_volts, decode_uart, decode_spi, decode_i2c
+    if not results:
+        return [], None, []
+    dt = results[0].get('dt_s')
+    digs = [threshold_volts(r['volts']) for r in results]
+
+    def ch(i):
+        return digs[i] if 0 <= i < len(digs) else digs[0]
+
+    proto = params.get('proto', 'none')
+    if proto == 'uart':
+        line = params.get('line', 0)
+        ev = decode_uart(ch(line), sample_interval_ns=(dt * 1e9 if dt else None),
+                         baud=params.get('baud'))
+        return ev, dt, [line]
+    if proto == 'spi':
+        clk, data = params.get('clk', 0), params.get('data', 1)
+        ev = decode_spi(ch(clk), ch(data), cpol=params.get('cpol', 0), cpha=params.get('cpha', 0))
+        return ev, dt, [clk, data]
+    if proto == 'i2c':
+        scl, sda = params.get('scl', 0), params.get('sda', 1)
+        ev = decode_i2c(ch(scl), ch(sda))
+        return ev, dt, [scl, sda]
+    return [], dt, []
+
+
+def pick_time_scale(span_s):
+    for unit, s in (('s', 1.0), ('ms', 1e-3), ('µs', 1e-6), ('ns', 1e-9)):
+        if span_s >= s:
+            return unit, s
+    return 'ns', 1e-9
+
+
+def render_wave(ax, results):
+    """Plot the captured channels (volts vs time) on a dark axis. Returns
+    (x_scale_seconds, x_unit, annotation_y) for the annotation layer."""
+    ax.set_facecolor(BG); ax.tick_params(colors=FG, labelsize=7)
+    for sp in ax.spines.values(): sp.set_color(GRID)
+    ax.grid(True, color=GRID, lw=0.5)
+    r0 = results[0]; dt = r0.get('dt_s') or 1e-9
+    span = (r0.get('size') or len(r0['volts'])) * dt
+    unit, scl = pick_time_scale(span)
+    vmin, vmax = 1e9, -1e9
+    for i, r in enumerate(results):
+        t = r['time_s'] if len(r.get('time_s', [])) else np.arange(len(r['volts'])) * dt
+        ax.plot(t / scl, r['volts'], lw=0.6, color=CH_COLORS[i % 2],
+                label=f"ch{i} {r.get('file', '')}")
+        if len(r['volts']):
+            vmin = min(vmin, float(r['volts'].min())); vmax = max(vmax, float(r['volts'].max()))
+    if vmin > vmax:
+        vmin, vmax = -1.0, 1.0
+    rng = max(vmax - vmin, 0.1)
+    ax.set_ylim(vmin - 0.28 * rng, vmax + 0.08 * rng)      # headroom below for decode text
+    ax.set_xlabel(f"time ({unit})", color=FG); ax.set_ylabel("volts", color=FG)
+    leg = ax.legend(fontsize=8, facecolor=BG, edgecolor=GRID, loc='upper right')
+    for t in leg.get_texts(): t.set_color(FG)
+    return scl, unit, vmin - 0.06 * rng
+
+
+def render_anno(ax, events, dt, xscale, anno_y, xlim=None, cap=400):
+    """Draw decode annotations (a marker + rotated byte text) for events whose start
+    falls in `xlim`. Capped at `cap` so a deep capture doesn't draw thousands of texts
+    at once — zoom in to read a region. Returns the created artists (to remove later)."""
+    arts = []
+    if not events or not dt:
+        return arts
+    if xlim is None:
+        xlim = ax.get_xlim()
+    x0, x1 = xlim
+
+    def ex(i):
+        return i * dt / xscale
+
+    vis = [e for e in events if e['kind'] in ('byte', 'addr', 'start', 'stop')
+           and x0 <= ex(e['start']) <= x1]
+    if len(vis) > cap:
+        arts.append(ax.text(0.5, 0.02, f"{len(vis)} decoded items in view — zoom in to read",
+                            transform=ax.transAxes, color='#e6b400', fontsize=9,
+                            ha='center', va='bottom'))
+        return arts
+    for e in vis:
+        x = ex(e['start'])
+        col = {'start': '#2ec27e', 'stop': '#e01b24'}.get(e['kind'], '#e6b400')
+        arts.append(ax.axvline(x, color=col, lw=0.4, alpha=0.35))
+        arts.append(ax.text(x, anno_y, e['text'], color=col, fontsize=7, rotation=90,
+                            va='top', ha='center', clip_on=True))
+    return arts
+
+
+# --- background worker (no live polling; single-threaded USB) --------------------
+class CaptureWorker(threading.Thread):
+    """Owns the Scope on its own thread. Drains a command queue — 'capture' (trigger +
+    deep CSV download), 'key' (e.g. Force-Trig), 'decode' (pure, on already-captured
+    results) — and publishes status/results through an event queue the GUI drains.
+    No continuous polling; it only runs on demand, so nothing touches USB unbidden.
+    `scope` may be None (offline: only 'decode' works)."""
 
     def __init__(self, scope):
         super().__init__(daemon=True)
         self.sc = scope
-        self._lock = threading.Lock()
+        self._cmds = queue.Queue()
+        self.events = queue.Queue()
         self._halt = threading.Event()
-        self.s = None
-        self.waves = {}
-        self.la = []                                       # latest LA sample words
-        self.reconnecting = False
+        self.busy = False
 
-    def snapshot(self):
-        with self._lock:
-            return self.s, dict(self.waves), list(self.la)
+    def submit(self, kind, **kw):
+        self._cmds.put((kind, kw))
 
     def stop(self):
         self._halt.set()
 
-    @staticmethod
-    def _dead(e):
-        """A dead handle (scope unplugged/rebooted → re-enumerated) vs a mere
-        busy-timeout: timeouts are recoverable, any other USBError means the
-        device we had is gone and we must reconnect."""
-        import usb.core
-        return isinstance(e, usb.core.USBError) and not isinstance(e, usb.core.USBTimeoutError)
+    def _emit(self, kind, payload=None):
+        self.events.put((kind, payload))
 
-    def _reconnect(self):
-        """Scope disappeared — drop the old handle and keep trying to open the
-        re-enumerated device (new USB address) until it's back or we're stopped."""
-        from mso5202d import Scope
-        self.reconnecting = True
-        try: self.sc.close()
-        except Exception: pass
-        while not self._halt.is_set():
-            try:
-                self.sc = Scope()                          # re-find + reset + claim
-                self.reconnecting = False
-                return
-            except Exception:
-                self._halt.wait(1.0)                        # scope not back yet
+    def _status(self, msg):
+        self._emit('status', msg)
+
+    def _run_cmd(self, kind, kw):
+        self.busy = True; self._emit('busy', True)
+        try:
+            getattr(self, '_cmd_' + kind)(kw)
+        except Exception as e:
+            self._status(f"{kind} failed: {e}")
+            try: self.sc and self.sc._resync()
+            except Exception: pass
+        finally:
+            self.busy = False; self._emit('busy', False)
+
+    def _cmd_capture(self, kw):
+        if not self.sc:
+            self._status("no scope connected"); self._emit('capture', []); return
+        res = deep_capture(self.sc, kw['depth_code'], status=self._status,
+                           setup=kw.get('setup', True), save_sources=kw.get('save_sources', (0,)))
+        self._emit('capture', res)
+
+    def _cmd_key(self, kw):
+        if not self.sc:
+            self._status("no scope connected"); return
+        from mso5202d_decode import _key
+        _key(self.sc, kw['keyid']); self._status(kw.get('label', 'key sent'))
+
+    def _cmd_decode(self, kw):
+        ev, dt, used = decode_capture(kw['results'], kw['params'])
+        proto = kw['params'].get('proto', 'none')
+        nb = sum(e['kind'] in ('byte', 'addr') for e in ev)
+        self._emit('decode', {'events': ev, 'dt': dt, 'used': used, 'proto': proto})
+        self._status(f"{proto.upper()}: decoded {nb} bytes" if proto != 'none' else "decode cleared")
 
     def run(self):
-        rot = 0
-        last_settings = 0.0
-        empties = 0
         while not self._halt.is_set():
-            now = _time.time()
-            # Poll settings on the TTL, or sooner if waveform reads keep coming back
-            # empty (which may mean the handle died) — a dead-handle error here
-            # triggers a reconnect; a plain timeout is just the scope being busy.
-            if self.s is None or now - last_settings > self.SETTINGS_TTL or empties >= 8:
-                try:
-                    s = read_settings(self.sc, timeout=LIVE_TIMEOUT_MS, retries=LIVE_RETRIES)
-                    with self._lock:
-                        self.s = s
-                    empties = 0
-                except Exception as e:
-                    if self._dead(e):
-                        self._reconnect(); last_settings = _time.time(); empties = 0; continue
-                last_settings = now
-            s = self.s
-            if s is None:
-                self._halt.wait(0.1); continue
-            disp = [ch for ch in (0, 1) if s[f'VERT-CH{ch+1}-DISP']]
-            la_on = bool(s.get('LA-SWI')) and LA_READ_ENABLED   # raw LA read disabled (corrupts scope)
-            with self._lock:                              # forget channels turned off
-                for c in list(self.waves):
-                    if c not in disp:
-                        self.waves.pop(c, None)
-                if not la_on:
-                    self.la = []
-            # Round-robin the enabled analog channels and (if on) the LA block, so
-            # each cycle costs one acquire and the refresh rate degrades gracefully.
-            items = list(disp) + (['LA'] if la_on else [])
-            if not items:
-                self._halt.wait(0.1); continue
-            item = items[rot % len(items)]; rot += 1
-            if item == 'LA':
-                try:
-                    words = _decode_la(self.sc.read_la(retries=LIVE_RETRIES,
-                                                        timeout=LIVE_TIMEOUT_MS))
-                except Exception:
-                    words = []
-                if words:
-                    with self._lock:
-                        self.la = words
-                    empties = 0
-                else:
-                    empties += 1
-            else:
-                try:
-                    raw = self.sc.read_waveform(item, retries=LIVE_RETRIES,
-                                                timeout=LIVE_TIMEOUT_MS)
-                except Exception:
-                    raw = b''
-                y = np.frombuffer(raw, dtype=np.uint8)
-                if len(y):
-                    with self._lock:
-                        self.waves[item] = y
-                    empties = 0
-                else:
-                    empties += 1
-            self._halt.wait(POLL_INTERVAL_MS / 1000.0)    # gentle pacing between acquires
-
-
-def run_live(max_frames, capture=True):
-    for be in ('TkAgg', 'QtAgg', 'GTK3Agg'):
-        try:
-            matplotlib.use(be); break
-        except Exception:
-            continue
-    import matplotlib.pyplot as plt
-    print(f"[+] backend: {matplotlib.get_backend()}")
-    from matplotlib.animation import FuncAnimation
-    from mso5202d import Scope
-    sc = Scope()
-    cap = ScopeCapture().start() if capture else None
-    reader = Reader(sc); reader.start()
-    fig, ax = plt.subplots(figsize=(11, 5)); fig.patch.set_facecolor(BG)
-    style_scope(ax, SAMPLES_PER_DIV and 3840 / SAMPLES_PER_DIV or 10)
-    lines = [ax.plot([], [], lw=1.0, color=CH_COLORS[ch], label=f"CH{ch+1}",
-                     solid_capstyle='round')[0] for ch in (0, 1)]
-    la_lines, la_labels = make_la_artists(ax)
-    leg = ax.legend(loc='upper right', fontsize=8, facecolor=BG, edgecolor=GRID)
-    for t in leg.get_texts(): t.set_color(FG)
-    st = {'n': 0}
-
-    def update(_):
-        # GUI-thread only: snapshot the latest data from the reader and redraw.
-        # No USB here, so this never blocks — the window stays smooth regardless of
-        # how slow the scope is.
-        if reader.reconnecting:                           # scope rebooted — waiting for it
-            ax.set_title("scope disconnected — reconnecting…",
-                         color='#e6b400', fontsize=11, pad=10)
-            return lines
-        s, waves, la = reader.snapshot()
-        if s is None:
-            return lines                                  # reader hasn't produced yet
-        nmax = 0
-        for ch, line in enumerate(lines):
-            y = waves.get(ch)
-            if y is None or not len(y):
-                if not s.get(f'VERT-CH{ch+1}-DISP'):
-                    line.set_data([], [])                 # channel off — clear it
+            try:
+                kind, kw = self._cmds.get(timeout=0.2)
+            except queue.Empty:
                 continue
-            line.set_data(x_divs(len(y)), to_divs(y, s[f'VERT-CH{ch+1}-POS']))
-            nmax = max(nmax, len(y))
-        nmax = max(nmax, draw_la(la_lines, la_labels, s, la))  # LA rows (if on)
-        if nmax:
-            ax.set_xlim(0, nmax / SAMPLES_PER_DIV)
-        _title(ax, s, nmax or None)
-        st['n'] += 1
-        if max_frames and st['n'] >= max_frames:
-            plt.close(fig)
-        return lines + la_lines
+            self._run_cmd(kind, kw)
 
-    # The GUI can refresh fast now (33 ms ≈ 30 fps) since update() does no I/O.
-    anim = FuncAnimation(fig, update, interval=33, blit=False, cache_frame_data=False)
-    try:
-        plt.show()
-    finally:
-        del anim
-        reader.stop(); reader.join(timeout=2)
-        if cap: cap.stop()
-        try: reader.sc.close()                            # current handle (may be a reconnect)
+
+# --- GUI -------------------------------------------------------------------------
+class DecoderApp:
+    """Tk app: an embedded matplotlib canvas showing the captured deep waveform with
+    the decode drawn beneath the visible region, plus a side panel (depth, Trigger &
+    Capture, protocol + channels, Decode, Load CSV, Save PNG). All scope I/O goes
+    through the CaptureWorker; the GUI only drains its event queue."""
+
+    def __init__(self, worker, scope_present):
+        import tkinter as tk
+        from tkinter import ttk
+        matplotlib.use('TkAgg')
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        self.tk, self.ttk = tk, ttk
+        self.worker = worker
+        self.scope_present = scope_present
+        self.results = []            # parsed-CSV channel dicts
+        self.events = []             # decoded events
+        self.dt = None               # seconds per sample
+        self.proto = 'none'
+        self._xscale = 1.0; self._xunit = 's'; self._anno_y = 0.0
+        self.anno = []
+        self._xlim_cid = None
+        self._in_anno = False
+
+        self.root = tk.Tk()
+        self.root.title("MSO5202D — triggered protocol decoder")
+        self.root.configure(bg=BG)
+        self.status = tk.StringVar(
+            value="ready — set depth + protocol, then Trigger & Capture"
+            if scope_present else "no scope — Load CSV to decode offline")
+
+        self.fig = Figure(figsize=(12, 5.5), facecolor=BG)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._build_panel()
+        self._build_statusbar()
+        self._plot()
+        self.root.protocol("WM_DELETE_WINDOW", self._quit)
+
+    # -- panel ----------------------------------------------------------------
+    def _build_panel(self):
+        tk, ttk = self.tk, self.ttk
+        panel = tk.Frame(self.root, bg=BG)
+        panel.pack(side=tk.RIGHT, fill=tk.Y, padx=6, pady=6)
+        self.action_btns = []
+
+        def group(title):
+            g = ttk.LabelFrame(panel, text=title); g.pack(fill=tk.X, pady=3); return g
+
+        def btn(parent, text, cmd):
+            b = ttk.Button(parent, text=text, command=cmd, width=17)
+            b.pack(side=tk.TOP, fill=tk.X, pady=1)
+            self.action_btns.append(b); return b
+
+        g = group("Capture")
+        tk.Label(g, text="depth", bg=BG, fg=FG, font=('TkDefaultFont', 7)).pack(anchor='w')
+        self.v_depth = tk.StringVar(value='40K')
+        ttk.Combobox(g, textvariable=self.v_depth, state='readonly',
+                     values=[d[0] for d in DEEP_DEPTHS], width=12).pack(fill=tk.X)
+        self.v_setup = tk.BooleanVar(value=True)
+        ttk.Checkbutton(g, text="prep CH1/CH2 (on, 1×, DC, 1 V/div)",
+                        variable=self.v_setup).pack(anchor='w')
+        btn(g, "▶ Trigger & Capture", self._do_capture)
+        btn(g, "Force Trig", lambda: self.worker.submit('key', keyid=KEY_FORCE, label="Force trig"))
+        btn(g, "Load CSV…", self._load_csv)
+
+        g = group("Decode")
+        self.v_proto = tk.StringVar(value='none')
+        cb = ttk.Combobox(g, textvariable=self.v_proto, state='readonly',
+                          values=['none', 'uart', 'spi', 'i2c'], width=12)
+        cb.pack(fill=tk.X)
+        cb.bind('<<ComboboxSelected>>', lambda e: self._do_decode())
+        row = tk.Frame(g, bg=BG); row.pack(fill=tk.X, pady=1)
+        self.v_chA = tk.StringVar(value='CH1'); self.v_chB = tk.StringVar(value='CH2')
+        tk.Label(row, text="A", bg=BG, fg=FG, font=('TkDefaultFont', 7)).pack(side=tk.LEFT)
+        ttk.Combobox(row, textvariable=self.v_chA, state='readonly',
+                     values=['CH1', 'CH2'], width=4).pack(side=tk.LEFT)
+        tk.Label(row, text="B", bg=BG, fg=FG, font=('TkDefaultFont', 7)).pack(side=tk.LEFT)
+        ttk.Combobox(row, textvariable=self.v_chB, state='readonly',
+                     values=['CH1', 'CH2'], width=4).pack(side=tk.LEFT)
+        er = tk.Frame(g, bg=BG); er.pack(fill=tk.X)
+        tk.Label(er, text="baud/mode", bg=BG, fg=FG, font=('TkDefaultFont', 7)).pack(side=tk.LEFT)
+        self.v_extra = tk.StringVar(value='')
+        ttk.Entry(er, textvariable=self.v_extra, width=8).pack(side=tk.LEFT)
+        tk.Label(g, text="A=UART line / SPI SCLK / I²C SCL\nB=SPI data / I²C SDA\n"
+                         "ch index = save order (CH1 then CH2)",
+                 bg=BG, fg=FG, font=('TkDefaultFont', 7), justify='left').pack(anchor='w')
+        btn(g, "Decode", self._do_decode)
+
+        g = group("Output")
+        btn(g, "Save PNG…", self._save_png)
+
+    def _build_statusbar(self):
+        tk = self.tk
+        from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+        bar = tk.Frame(self.root, bg=BG); bar.pack(side=tk.BOTTOM, fill=tk.X)
+        tbf = tk.Frame(bar, bg=BG); tbf.pack(side=tk.LEFT)
+        NavigationToolbar2Tk(self.canvas, tbf).update()    # pan / zoom / save
+        tk.Label(bar, textvariable=self.status, bg=BG, fg=FG, anchor='w'
+                 ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+
+    # -- handlers -------------------------------------------------------------
+    def _decode_params(self):
+        proto = self.v_proto.get()
+        a = 0 if self.v_chA.get() == 'CH1' else 1
+        b = 0 if self.v_chB.get() == 'CH1' else 1
+        extra = self.v_extra.get().strip()
+        p = {'proto': proto}
+        if proto == 'uart':
+            p['line'] = a
+            p['baud'] = float(extra) if extra else None
+        elif proto == 'spi':
+            p['clk'] = a; p['data'] = b
+            mode = extra or '00'
+            p['cpol'] = int(mode[0]) if mode[:1] in '01' else 0
+            p['cpha'] = int(mode[1]) if len(mode) > 1 and mode[1] in '01' else 0
+        elif proto == 'i2c':
+            p['scl'] = a; p['sda'] = b
+        return p
+
+    def _do_capture(self):
+        if not self.scope_present:
+            self.status.set("no scope connected — use Load CSV instead"); return
+        code = dict(DEEP_DEPTHS)[self.v_depth.get()]
+        proto = self.v_proto.get()
+        a = 0 if self.v_chA.get() == 'CH1' else 1
+        b = 0 if self.v_chB.get() == 'CH1' else 1
+        # Source-cycle counts to Save→CSV (0=CH1, 1=CH2): the channel(s) the decode needs.
+        if proto == 'uart':
+            sources = (a,)
+        elif proto in ('spi', 'i2c'):
+            sources = tuple(dict.fromkeys([a, b]))          # unique, in order
+        else:
+            sources = (0,)                                  # no protocol → just grab CH1
+        self.status.set("capturing…")
+        self.worker.submit('capture', depth_code=code, setup=self.v_setup.get(),
+                           save_sources=sources)
+
+    def _load_csv(self):
+        from tkinter import filedialog
+        from mso5202d import parse_wavedata_csv
+        paths = filedialog.askopenfilenames(
+            title="Load WaveData CSV (select CH1 first, then CH2 for SPI/I²C)",
+            filetypes=[('CSV', '*.csv'), ('all', '*')])
+        if not paths:
+            return
+        res = []
+        for p in paths:
+            try:
+                r = parse_wavedata_csv(open(p, 'rb').read()); r['file'] = os.path.basename(p); res.append(r)
+            except Exception as e:
+                self.status.set(f"failed to load {os.path.basename(p)}: {e}")
+        if res:
+            self.results = res; self.events = []; self.dt = res[0].get('dt_s')
+            self._plot()
+            self.status.set(f"loaded {len(res)} file(s), {res[0].get('size')} samples")
+            if self.v_proto.get() != 'none':
+                self._do_decode()
+
+    def _do_decode(self):
+        self.proto = self.v_proto.get()
+        if not self.results:
+            self.status.set("no capture to decode — Trigger & Capture or Load CSV"); return
+        if self.proto == 'none':
+            self.events = []; self._update_decode(); self.status.set("decode cleared"); return
+        self.status.set("decoding…")
+        self.worker.submit('decode', results=self.results, params=self._decode_params())
+
+    def _save_png(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG', '*.png')])
+        if path:
+            self.fig.savefig(path, dpi=110, facecolor=BG)
+            self.status.set(f"saved {path}")
+
+    def _set_busy(self, busy):
+        st = 'disabled' if busy else 'normal'
+        for b in self.action_btns:
+            try: b.configure(state=st)
+            except Exception: pass
+
+    # -- drawing --------------------------------------------------------------
+    def _title(self):
+        r0 = self.results[0]; dt = self.dt or r0.get('dt_s'); rate = (1 / dt) if dt else None
+        nb = sum(e['kind'] in ('byte', 'addr') for e in self.events)
+        self.ax.set_title(
+            f"{r0.get('size')} samples @ {fmt_rate(rate)}  ·  "
+            + (f"{self.proto.upper()}: {nb} bytes  (pan/zoom to read the decode)"
+               if self.events else "no decode"), color=FG, fontsize=9)
+
+    def _plot(self):
+        self.ax.clear(); self.anno = []
+        if not self.results:
+            self.ax.set_facecolor(BG); self.ax.tick_params(colors=FG, labelsize=7)
+            for sp in self.ax.spines.values(): sp.set_color(GRID)
+            self.ax.grid(True, color=GRID, lw=0.5)
+            self.ax.set_title("no capture — Trigger & Capture (or Load CSV…)", color=FG, fontsize=10)
+            self.ax.set_xlabel("time", color=FG); self.ax.set_ylabel("volts", color=FG)
+            self.canvas.draw_idle(); return
+        self._xscale, self._xunit, self._anno_y = render_wave(self.ax, self.results)
+        self._title()
+        if self._xlim_cid is not None:
+            try: self.ax.callbacks.disconnect(self._xlim_cid)
+            except Exception: pass
+        self._xlim_cid = self.ax.callbacks.connect('xlim_changed', self._on_xlim)
+        self.anno = render_anno(self.ax, self.events, self.dt, self._xscale, self._anno_y)
+        self.canvas.draw_idle()
+
+    def _redraw_anno(self):
+        for a in self.anno:
+            try: a.remove()
+            except Exception: pass
+        self.anno = render_anno(self.ax, self.events, self.dt, self._xscale,
+                                self._anno_y, self.ax.get_xlim())
+
+    def _update_decode(self):
+        """Refresh the title + annotations without re-plotting the (large) waveform."""
+        if self.results:
+            self._title()
+        self._redraw_anno(); self.canvas.draw_idle()
+
+    def _on_xlim(self, ax):
+        if self._in_anno:
+            return
+        self._in_anno = True
+        try:
+            self._redraw_anno(); self.canvas.draw_idle()
+        finally:
+            self._in_anno = False
+
+    # -- event loop -----------------------------------------------------------
+    def _drain(self):
+        try:
+            while True:
+                kind, payload = self.worker.events.get_nowait()
+                if kind == 'status':
+                    self.status.set(payload)
+                elif kind == 'busy':
+                    self._set_busy(payload)
+                elif kind == 'capture':
+                    self.results = payload or []
+                    self.events = []
+                    self.dt = self.results[0].get('dt_s') if self.results else None
+                    self._plot()
+                    if self.results and self.v_proto.get() != 'none':
+                        self._do_decode()
+                    elif not self.results:
+                        self.status.set("capture: no CSV retrieved — save Save→CSV on the scope, retry")
+                elif kind == 'decode':
+                    self.events = payload['events']; self.dt = payload['dt']; self.proto = payload['proto']
+                    self._update_decode()
+        except queue.Empty:
+            pass
+
+    def _tick(self):
+        self._drain()
+        self.root.after(120, self._tick)
+
+    def run(self):
+        self.root.after(50, self._tick)
+        self.root.mainloop()
+
+    def _quit(self):
+        try: self.root.quit(); self.root.destroy()
         except Exception: pass
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--png', metavar='PATH', help="headless: save a PNG instead of live GUI")
-    ap.add_argument('--frames', type=int, default=0, help="stop after N frames (0=infinite)")
-    ap.add_argument('--no-capture', action='store_true',
-                    help="don't record the scope-only pcap to .plot_captures/scope.pcapng")
-    a = ap.parse_args()
-    if a.png:
-        run_png(a.png, a.frames or 4, capture=not a.no_capture)
+
+def run_gui():
+    from mso5202d import Scope
+    try:
+        # reset=False is CRITICAL for deep capture: a USB dev.reset() disturbs the
+        # scope's USB host controller (which also hosts the SD card), dropping the card
+        # so Save→CSV fails with "USB device undetected" (verified 2026-07-10 against the
+        # vendor app, which never resets). No reset → the card stays detected.
+        sc = Scope(reset=False); present = True
+    except Exception as e:
+        print(f"[!] no scope ({e}) — offline mode: Load CSV to decode.")
+        sc = None; present = False
+    worker = CaptureWorker(sc); worker.start()
+    try:
+        DecoderApp(worker, present).run()
+    finally:
+        worker.stop()
+        try: worker.join(timeout=2)
+        except Exception: pass
+        if sc:
+            try: sc.close()
+            except Exception: pass
+
+
+def run_headless(paths, params, png):
+    """Load WaveData CSV file(s), decode, and save a labelled PNG — no scope needed.
+    Great for testing against scope_dump/WaveData*.csv."""
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from mso5202d import parse_wavedata_csv
+    results = []
+    for p in paths:
+        r = parse_wavedata_csv(open(p, 'rb').read()); r['file'] = os.path.basename(p); results.append(r)
+    if params.get('proto', 'none') != 'none':
+        events, dt, _ = decode_capture(results, params)
     else:
-        run_live(a.frames, capture=not a.no_capture)
+        events, dt = [], results[0].get('dt_s')
+    fig, ax = plt.subplots(figsize=(12, 5.5)); fig.patch.set_facecolor(BG)
+    scl, unit, anno_y = render_wave(ax, results)
+    render_anno(ax, events, dt, scl, anno_y, xlim=ax.get_xlim(), cap=100000)
+    nb = sum(e['kind'] in ('byte', 'addr') for e in events)
+    r0 = results[0]; rate = (1 / dt) if dt else None
+    ax.set_title(f"{r0.get('size')} samples @ {fmt_rate(rate)}  ·  "
+                 + (f"{params['proto'].upper()}: {nb} bytes" if events else "no decode"),
+                 color=FG, fontsize=9)
+    fig.tight_layout(); fig.savefig(png, dpi=110, facecolor=BG)
+    print(f"[+] {len(results)} channel(s), {r0.get('size')} samples; "
+          f"{params.get('proto', 'none').upper()} → {nb} bytes; saved {png}")
+    if events:
+        vals = [e['text'] for e in events if e['kind'] in ('byte', 'addr')]
+        print("    " + ' '.join(vals[:64]) + (" …" if len(vals) > 64 else ""))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="MSO5202D triggered protocol decoder")
+    ap.add_argument('--load', nargs='+', metavar='CSV',
+                    help="headless: decode WaveData CSV file(s) (CH1 [CH2]) → PNG")
+    ap.add_argument('--proto', choices=['none', 'uart', 'spi', 'i2c'], default='none')
+    ap.add_argument('--baud', type=float, default=None, help="UART baud (default auto)")
+    ap.add_argument('--mode', default='00', help="SPI cpol/cpha, e.g. 00")
+    ap.add_argument('--png', metavar='PATH', help="output PNG for --load (default decode.png)")
+    a = ap.parse_args()
+    if a.load:
+        params = {'proto': a.proto}
+        if a.proto == 'uart':
+            params.update(line=0, baud=a.baud)
+        elif a.proto == 'spi':
+            params.update(clk=0, data=1, cpol=int(a.mode[0]),
+                          cpha=int(a.mode[1]) if len(a.mode) > 1 else 0)
+        elif a.proto == 'i2c':
+            params.update(scl=0, sda=1)
+        run_headless(a.load, params, a.png or 'decode.png')
+    else:
+        run_gui()
+
 
 if __name__ == '__main__':
     main()

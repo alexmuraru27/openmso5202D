@@ -953,6 +953,14 @@ IN   43 <len> 81 <samples…> <ck>
 
 Use `0x53/0x02` (Section 4) for real acquisition; `0x01` is only an engine sanity tap.
 
+> ⚠ **The count arg is mandatory.** Sending a **bare `0x43 0x01`** with no 2-byte LE
+> count (payload just `01`) makes the firmware run `LE16()` on missing bytes → a
+> garbage/huge sample count → it overruns the acquisition engine and the scope
+> **crash-reboots** (USB I/O-error → re-enumeration; observed 2026-07-10, LA on). Always
+> send the full `43 04 00 01 <n_LE16> ck`. And note this is the **same acquisition engine
+> as `02 01 <ch>`** — it is *not* a separate LA-FPGA tap, so it is no route to a
+> non-corrupting LA readout. `[verified]`
+
 ### 5.4 `0x02` / `0x03` — fixed region dumps
 
 Two constant-size snapshots of the FPGA configuration/coefficient RAM. **Read-only, no
@@ -1982,13 +1990,29 @@ and as the transient temp files) is:
 | **Setup** | Save/Recall → SETUP (menu 18) | `/dsosetup.tmp` → `mv` to destination | on-device recall / read back |
 | **Reference** | Save/Recall → REF (menu 19) | `/ref.dat.tmp` → `mv`; refs live under `/param/sav/` (`refa`,`refa.dat`,…) | read back over `0x10` |
 
-Reproducing a save from the host is therefore: **(1)** press `MENU-SR` (keyid 11) or
-`MENU-UTILITY` (keyid 14); **(2)** press the `FN-n` softkey that the on-screen menu
-labels "Save"; **(3)** wait for the write to complete; **(4)**
-`read_file("/mnt/udisk/WaveData<n><n>.csv")` over `0x10`. [verified: files appear on
-the stick and are retrievable over `0x10`; [gap]: which exact `FN-n` ordinal is
-"Save" on each page, and the `<n><n>` numbering scheme — date vs. sequence — need a
-live save to pin down.]
+Reproducing a save from the host is therefore: **(1)** press `MENU-SR` (keyid 11);
+**(2)** drive the CSV softkeys; **(3)** wait for the write; **(4)**
+`read_file("/mnt/udisk/WaveData<n><n>.csv")` over `0x10`.
+
+**Save→CSV softkey map `[verified 2026-07-10` by screenshotting each menu (`0x20`)]:**
+the bezel softkeys map top-to-bottom to **`FN-1 … FN-6` (keyids 1–6)**, not `FN-0`.
+
+| Menu | keyid 1 | keyid 2 | keyid 3 | keyid 4 | keyid 5 | keyid 6 |
+|---|---|---|---|---|---|---|
+| **S/R** (menu 47) | Ref | SetUp | **CSV** | — | — | — |
+| **CSV** (menu 48) | **Source** (cycles CH1→CH2→**LA**) | **Save** | Recall | **delete ⚠** | FileList | Back |
+
+So a CSV save is **`key 11 → keyid 3 → (keyid 1 ×N to pick Source) → keyid 2`**. `keyid 4`
+is **delete** — never issue it blind (it erases card files). The **Source** selector
+means a save can export **CH1, CH2, or the LA pod** — the LA path is a way to get the
+16 digital channels out as a file (the live `02 01 05` read being unusable).
+
+**The save needs the SD card mounted at `/mnt/udisk`.** `[verified 2026-07-10]` With no
+card (`df /mnt/udisk` → `ubi0:rootfs`), pressing Save is a **silent no-op** — **no
+`/dsocsv.tmp` is written** and no file appears (the save aborts at the USB-disk check
+*before* creating the temp). So the internal temp is **not** a card-free path; with a
+card it exists only transiently (created → `mv`'d in ms), so the read target is the
+final `/mnt/udisk/WaveData<n><n>.csv`. `<n><n>` is a running sequence number.
 
 Exported-file details cross-referenced elsewhere: a front-panel CSV/Ref record is
 **4064 samples** (20.32 div), distinct from the 3840/3200-sample USB screen block;
@@ -2132,7 +2156,15 @@ traffic, whose largest single transfer is the 3847-byte screen block). Deep reco
 only in the on-instrument **Save-waveform** flow. To retrieve a deep capture on a host
 *without* a USB stick:
 
-1. Set the desired memory depth (`ACQURIE-STORE-DEPTH`, Section 8) and STOP.
+1. Set the desired memory depth (`ACQURIE-STORE-DEPTH`, Section 8), then **arm SINGLE**
+   (key 18, recipe 10.3). Single-sequence captures **one full-depth, trigger-aligned
+   record** into acquisition memory and lands in STOP — cleaner than a plain Run→Stop
+   freeze (which grabs whatever was mid-flight). In **Normal** trigger mode a mis-set
+   level leaves SINGLE armed forever, so **Force-Trig** (key 47) if `TRIG-STATE` has not
+   reached STOP after a short wait. `[inferred]` (SINGLE + Force are each `[verified]`;
+   their use as the deep-capture trigger is the natural composition.) Note SINGLE only
+   changes *what is captured* — it does **not** open a deep USB stream; the readout is
+   still the CSV below.
 2. Drive the **Save → CSV** front-panel sequence with key presses (recipe 10.3;
    the Save/Storage menu is action-only — it writes the CSV internally, no dedicated USB
    selector). The scope writes `/mnt/udisk/WaveData<N>.csv`.

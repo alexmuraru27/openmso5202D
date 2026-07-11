@@ -72,8 +72,13 @@ def unsafe_reason(cmd: str):
 
 
 class Shell:
-    def __init__(self):
-        self.sc = Scope()
+    def __init__(self, scope=None):
+        """Wrap the 0x43 shell channel. Pass an already-open `scope` to share it
+        (e.g. the live plotter's reader thread running `ls /mnt/udisk` to find a
+        deep-capture CSV on the same USB handle) — in that case close() is a no-op
+        and the caller owns the Scope. With scope=None we open (and own) our own."""
+        self._own = scope is None
+        self.sc = Scope() if self._own else scope
         self.cwd = '/'
         self._seq = 0
 
@@ -182,6 +187,8 @@ class Shell:
         return None
 
     def close(self):
+        if not self._own:          # shared Scope — the caller closes it
+            return
         try:
             self.sc.close()
         except Exception:

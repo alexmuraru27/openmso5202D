@@ -45,23 +45,44 @@ def _schmitt(sig, lo_th, hi_th, start_high=None):
     return out
 
 
+def _schmitt_auto(sig, frac=0.5, hysteresis=0.3):
+    """Schmitt-trigger an arbitrary-unit analog array into a boolean logic trace,
+    picking the thresholds automatically. Estimates the low/high rails robustly
+    with 5th/95th percentiles, then triggers at `frac` of the way between them with
+    a `hysteresis` band (fraction of the swing). `hysteresis=0` gives a plain
+    comparator. Returns a flat False trace for an empty or flat-line input."""
+    sig = np.asarray(sig, dtype=float)
+    if not len(sig):
+        return np.zeros(0, dtype=bool)
+    lo, hi = np.percentile(sig, 5), np.percentile(sig, 95)
+    if hi - lo < 1e-12:                   # flat line — no signal
+        return np.zeros(len(sig), dtype=bool)
+    mid = lo + (hi - lo) * frac
+    band = (hi - lo) * hysteresis / 2
+    return _schmitt(sig, mid - band, mid + band)
+
+
 def threshold(y_bytes, pos, frac=0.5, hysteresis=0.3):
     """Raw waveform bytes + the channel's VERT-POS → boolean logic trace.
 
-    Unwraps to divisions (to_divs), estimates the low/high rails robustly with
-    5th/95th percentiles, then Schmitt-triggers at `frac` of the way between them
-    with a `hysteresis` band (fraction of the swing). Returns a bool ndarray
-    (True = logic high). `hysteresis=0` gives a plain comparator."""
+    Unwraps to divisions (to_divs), so the threshold sees the same "up = higher
+    voltage" trace the plotter draws, then Schmitt-triggers at the auto-picked
+    midpoint of the detected low/high rails. Returns a bool ndarray (True = high).
+    For a capture that is already in volts (a deep-capture CSV column), use
+    threshold_volts() instead."""
     y_bytes = np.asarray(y_bytes, dtype=np.uint8)
     if not len(y_bytes):
         return np.zeros(0, dtype=bool)
-    d = to_divs(y_bytes, pos)
-    lo, hi = np.percentile(d, 5), np.percentile(d, 95)
-    if hi - lo < 1e-9:                    # flat line — no signal
-        return np.zeros(len(d), dtype=bool)
-    mid = lo + (hi - lo) * frac
-    band = (hi - lo) * hysteresis / 2
-    return _schmitt(d, mid - band, mid + band)
+    return _schmitt_auto(to_divs(y_bytes, pos), frac, hysteresis)
+
+
+def threshold_volts(volts, frac=0.5, hysteresis=0.3):
+    """Threshold an already-in-volts analog array (a front-panel Save→CSV deep
+    capture, whose value column is volts — MSO5202D-protocol.md §7.5) into a
+    boolean logic trace. Same auto-Schmitt estimator as threshold(), minus the
+    byte→divisions unwrap (the CSV is already scope-calibrated volts). Lets the
+    UART/SPI/I²C decoders run on deep captures, not just the 3840-sample screen."""
+    return _schmitt_auto(volts, frac, hysteresis)
 
 
 def _edges(d):

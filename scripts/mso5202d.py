@@ -475,6 +475,48 @@ def decode_la(raw: bytes) -> list:
     return list(struct.unpack(f'<{n}H', raw[:2 * n])) if n else []
 
 
+def parse_wavedata_csv(text) -> dict:
+    """Parse a front-panel Save→CSV deep-capture export (MSO5202D-protocol.md §7.5).
+
+    These are the files the instrument writes to /mnt/udisk/WaveData<n>.csv when you
+    Save/Recall → CSV; reading one back over USB (read_file, selector 0x10) is the ONLY
+    route to the deep 40K/512K record — the acquire command only ever serves the
+    ≤3840-sample screen block. One channel per file. Layout:
+
+        #timebase=<n>(ns)          screen-timebase tag (NOT the sample step)
+        ,#voltbase=<n>(mv/100)     actually µV/div → V/div = voltbase/1e6
+        #size=<N>                  number of data rows
+        <time_seconds>,<volts>     N rows, %0.5E,%0.3f — the value column is VOLTS
+
+    Returns {'volts', 'time_s' (np arrays), 'dt_s' (median step, depth-driven),
+    'size', 'vdiv_mV', 'timebase_ns'}. Accepts str or bytes. Verified against
+    scope_dump/WaveData141{0,1,2}.csv (4064/40064/400064 rows)."""
+    import io, re
+    import numpy as np
+    if isinstance(text, (bytes, bytearray)):
+        text = text.decode('latin1', 'replace')
+    hdr, last = {}, -1
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        m = re.search(r'#\s*(timebase|voltbase|size)\s*=\s*(-?\d+)', ln)
+        if m:
+            hdr[m.group(1)] = int(m.group(2))
+            last = i
+    body = '\n'.join(lines[last + 1:]).strip() if last >= 0 else text.strip()
+    if body:
+        flat = np.fromstring(body.replace('\n', ','), sep=',')
+        n = flat.size - (flat.size % 2)
+        arr = flat[:n].reshape(-1, 2)
+    else:
+        arr = np.empty((0, 2))
+    time_s, volts = arr[:, 0], arr[:, 1]
+    dt = float(np.median(np.diff(time_s))) if len(time_s) > 1 else None
+    return {'volts': volts, 'time_s': time_s, 'dt_s': dt,
+            'size': hdr.get('size', len(volts)),
+            'vdiv_mV': (hdr['voltbase'] / 1000.0) if 'voltbase' in hdr else None,
+            'timebase_ns': hdr.get('timebase')}
+
+
 def decode_settings(payload: bytes) -> dict:
     """Decode a settings payload from read_settings() (0x81 echo + 213 param
     bytes) into named /protocol.inf fields, plus derived 'CH1-VDIV-mV' /

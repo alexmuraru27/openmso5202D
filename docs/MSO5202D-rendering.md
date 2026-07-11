@@ -115,34 +115,35 @@ The coordinate mapping (§2–§4) is shared. The difference is layout:
 - **Logic analyzer (D0–D15)** — the *same* index→x mapping, but each digital
   channel is drawn in **its own horizontal row**: a 0/1 value scaled to a small
   fixed row height and offset to that channel's baseline, with the channel label
-  (D0…D15) beside it. The row-rendering code exists (`draw_la` in
-  `mso5202d_plot.py`: enabled channels from `LA-CHANNEL-STATE` stacked lowest-Dn-
-  at-bottom, green, `y = row_center − amp/2 + bit·amp`), but it is **disabled by
-  default** (`LA_READ_ENABLED = False`).
-  - **Why disabled:** the only raw LA read (`02 01 05`) is a non-functional
-    firmware path — it returns unreliable 2-state data and **corrupts the scope's
-    own LA display** while reading (see MSO5202D-protocol.md §5). So there is no
-    safe raw LA sample source to render.
-  - **The right way to show LA** is the scope's **`0x20` framebuffer** — its
-    rendered screen already contains the firmware-drawn D0–D15 rows (this is how
-    the vendor's virtual panel does it). A framebuffer/screen-mirror view is the
-    intended path for LA in the viewer; the vector row-renderer above is kept for
-    if/when a safe raw LA readout is ever found.
+  (D0…D15) beside it (`draw_la` in `mso5202d_plot.py`: enabled channels from
+  `LA-CHANNEL-STATE` stacked lowest-Dn-at-bottom, green,
+  `y = row_center − amp/2 + bit·amp`).
+  - **The live viewer never reads LA.** The only raw LA read (`02 01 05`) is a
+    broken firmware path — unreliable data AND it **corrupts the scope itself**
+    while reading (confirmed on hardware; see MSO5202D-protocol.md §5). So no LA
+    acquire is ever issued live; the digital pod is not shown in the live view.
+  - **`draw_la` is kept for LA from a saved waveform** — if/when a file format that
+    carries the digital channels is found, the row-renderer can draw it offline
+    (the same way deep analog captures come from Save→CSV, §7.5). The scope's
+    **`0x20` framebuffer** (its rendered screen, with firmware-drawn D-rows) remains
+    the only way to *see* LA over USB today.
 
-## 7. What our viewer implements (`scripts/mso5202d_plot.py`)
+## 7. Where this rendering model is used
 
-- `to_divs(bytes, pos)` — the §2 unwrap: baseline `(POS+16)&0xFF`, unwrap the
-  signal, `y_div = (POS + signal)/25` (fixes the reverse movement and the centre
-  hash in one step).
-- `x_divs(n)` — §3 mapping.
-- `style_scope(ax, width_div)` — the fixed 8×N graticule (§1), dark theme,
-  minor subdivisions, centre line.
-- Fixed axes (`ylim = ±4 div`), colours per channel, a title with the real units
-  (V/div, time/div, sample rate, trigger state/level/frequency) and an
-  off-screen warning.
+The byte→division model above (`to_divs`/`x_divs`/`style_scope`, all in
+`scripts/mso5202d_plot.py`) applies to the **3840-sample screen block** returned by
+the USB acquire (`02 01 <ch>`). It is what the screen-buffer decode CLI
+(`scripts/mso5202d_decode.py`) draws.
 
-Run `python3 mso5202d_plot.py --png out.png` for a headless frame, or with no
-arguments for the live view.
+The main GUI (`scripts/mso5202d_plot.py`) is a **triggered protocol decoder**, not a
+live scope: it captures a **deep record** (arm SINGLE at 4K/40K/512K/1M → front-panel
+Save→CSV → read the `WaveData*.csv` back over USB, protocol.md §10.7), whose value
+column is **already scope-calibrated volts** (protocol.md §7.5). So that path does
+**not** use the byte model at all — it plots volts vs time directly and, if a protocol
+is selected, thresholds the volts (`serial_decode.threshold_volts`) and draws the
+decoded bytes beneath the visible part of the wave. All scope I/O runs on a single
+worker thread; the GUI only drains its event queue. `python3 mso5202d_plot.py --load
+WaveData*.csv --proto uart --png out.png` runs the decode headless.
 
 ## 8. Known limits carried over from the protocol
 
