@@ -88,12 +88,21 @@ def fmt_rate(hz):
 # --- deep capture (the triggered-decoder acquisition) ----------------------------
 # Front-panel key ids (0-indexed /keyprotocol.inf; MSO5202D-protocol.md §9/§10.3).
 KEY_SR_MENU = 11        # MENU-SR-KEY (Save/Recall)
+KEY_ACQUIRE = 13        # MENU-ACQU — Acquire menu (menuid 17; F5 cycles LongMem depth)
+KEY_CH1_MENU = 24       # VT-CH1-MENU — CH1 button (toggles CH1 on/off + lights its LED)
+KEY_CH2_MENU = 30       # VT-CH2-MENU — CH2 button (toggles CH2 on/off + lights its LED)
 KEY_SINGLE  = 18        # CT-SINGLESEQ — arm one trigger-aligned acquisition
 KEY_RUNSTOP = 19        # CT-RS — Run/Stop toggle
 KEY_DEFAULT_SETUP = 21  # CT-DS — factory Default Setup (idempotent known state)
 KEY_FORCE   = 47        # TG-FORCE — force trigger
+MENU_ACQUIRE = 17       # CONTROL-MENUID when the Acquire menu is open
+FN_LONGMEM = 5          # Acquire-menu softkey F5 — cycles store depth 4K→40K→512K→1M→(4K)
 # ACQURIE-STORE-DEPTH codes (mso5202d.ACQ_DEPTH_NAMES): 0=4K 4=40K 6=512K 7=1M(1ch).
 DEEP_DEPTHS = [('4K', 0), ('40K', 4), ('512K', 6), ('1M (1-ch)', 7)]
+# Store-depth ring the Acquire-menu F5 softkey walks, in cycle order (codes 0→4→6→7→0). F5
+# advances one step per key EDGE (press and release each advance) — driven via single alternating
+# edges + poll-until-change in `_set_depth_via_keys`, no render delay needed.
+_DEPTH_RING = [0, 4, 6, 7]
 # 2-byte signed settings fields we write in the prep block (little-endian, signed).
 _POS_SIGNED = {'VERT-CH1-POS', 'VERT-CH2-POS', 'TRIG-VPOS'}
 
@@ -122,16 +131,21 @@ def _list_wavedata(sh, retries=4):
     return set()
 
 
-def _prep_block(sc, depth_code, setup=True, la=False, tb_idx=None):
+def _prep_block(sc, depth_code, setup=True, la=False, tb_idx=None, set_depth=True):
     """ONE 0x11 settings-block write — the scope MUST be stopped first (changing store
     depth on a running scope crashes/reboots it — verified 2026-07-10). With `setup`,
-    also configure both channels for a clean logic capture: display on, 1× probe, DC
+    configure both channels' vertical params for a clean logic capture: 1× probe, DC
     coupling, invert off, full BW, **1 V/div** (3.3 V logic → ~3.3 divisions, no clip),
-    CH1 centred / CH2 −2 div (separated), and Edge/CH1/**Auto** trigger. `la` turns the
-    logic pod on (all 16 channels) — but **LA forces the depth to 4K** (deep memory is
-    not available with LA, verified 2026-07-11). `tb_idx` (0..31) sets the horizontal
-    timebase (HORIZ-WIN-TB = idx, HORIZ-TB = max(idx, 6)) — used to spread a deep record
-    over more time. Without `setup`, only depth (+LA, +tb) change."""
+    CH1 centred / CH2 −2 div (separated), and Edge/CH1/**Auto** trigger. **Channel on/off
+    (VERT-CHx-DISP) is NOT set here** — a 0x11 DISP write changes the field but does not light
+    the channel's front-panel LED, so `prepare_capture` turns CH1/CH2 on/off via their MENU
+    buttons instead (`_set_channels_via_keys`). `la` turns the logic pod on (all 16 channels) —
+    but **LA forces the depth to 4K** (deep memory is not available with LA, verified 2026-07-11).
+    `tb_idx` (0..31) sets the horizontal timebase (HORIZ-WIN-TB = idx, HORIZ-TB = max(idx, 6)) —
+    used to spread a deep record over more time. Without `setup`, only depth (+LA, +tb) change.
+    `set_depth=False` leaves the store-depth byte untouched — used when the depth is set via the
+    Acquire-menu F5 key instead (which also updates the on-screen LongMem radio; a bare 0x11
+    depth write does not)."""
     from mso5202d_decode import _field_off, _raw_settings
     original = bytes(_raw_settings(sc)[1:])            # 213-byte block (drop 0x81 echo)
     block = bytearray(original)
@@ -141,8 +155,7 @@ def _prep_block(sc, depth_code, setup=True, la=False, tb_idx=None):
         block[off:off + w] = int(val).to_bytes(w, 'little', signed=name in _POS_SIGNED)
 
     if setup:
-        for n in (1, 2):
-            put(f'VERT-CH{n}-DISP', 1)                 # channel on
+        for n in (1, 2):                               # configure both channels' vertical params
             put(f'VERT-CH{n}-PROBE', 0)                # 1×
             put(f'VERT-CH{n}-COUP', 0)                 # DC
             put(f'VERT-CH{n}-RPHASE', 0)               # invert off
@@ -150,16 +163,18 @@ def _prep_block(sc, depth_code, setup=True, la=False, tb_idx=None):
             put(f'VERT-CH{n}-VB', 8)                   # 1 V/div
         put('VERT-CH1-POS', 0)                         # CH1 centred
         put('VERT-CH2-POS', -50)                       # CH2 −2 div (separated, no clip)
-        put('TRIG-TYPE', 0); put('TRIG-SRC', 0); put('TRIG-MODE', 0)   # Edge / CH1 / Auto
-        # Trigger level ≈ +1.6 V (mid of 3.3 V logic): TRIG-VPOS in 1/25-div,
-        # level_V = (VPOS−POS_src)·Vdiv/25 = 40·1000mV/25 = 1.6 V with CH1 POS=0, 1 V/div.
-        # Without a level ON the signal, SINGLE arms forever (never crosses) — verified.
+        # Edge trigger on CH1, Auto. Trigger level ≈ +1.6 V (mid of 3.3 V logic): TRIG-VPOS in
+        # 1/25-div, level_V = (VPOS−POS_src)·Vdiv/25 = 40·1000mV/25 = 1.6 V with CH1 POS=0. Without
+        # a level ON the signal, SINGLE arms forever (never crosses) — verified. (TRIG-SRC is not
+        # writable via 0x11 anyway — verified 2026-07-11 — so it stays on CH1/the DS default.)
+        put('TRIG-TYPE', 0); put('TRIG-SRC', 0); put('TRIG-MODE', 0)
         put('TRIG-VPOS', 40)
     if la:
         put('LA-SWI', 1); put('LA-CHANNEL-STATE', 0xFFFF)   # pod on, all 16 channels
     elif setup:
         put('LA-SWI', 0)                                     # pure-analog capture → LA off
-    put('ACQURIE-STORE-DEPTH', depth_code)
+    if set_depth:
+        put('ACQURIE-STORE-DEPTH', depth_code)
     if tb_idx is not None:                              # spread the record over more/less time
         put('HORIZ-WIN-TB', int(tb_idx)); put('HORIZ-TB', max(int(tb_idx), 6))
     # Only write if something actually changed. A 0x11 write makes the scope busy ~3.4 s
@@ -182,6 +197,108 @@ def _default_setup(sc, status=lambda m: None):
     ok = _press_for_menu(sc, KEY_DEFAULT_SETUP, 25, status)
     time.sleep(1.5)                                    # let the whole reset apply
     return ok
+
+
+def _key_tap(sc, keyid, hold=0.1):
+    """Tap a front-panel key: press (`0x13 keyid 0x01`), hold ~100 ms, then release (`0x13 keyid
+    0x00`). An instrumented count proved one tap advances the LongMem depth exactly one step — the
+    apparent 'doubling' was never a double key event, it was tapping again before the wave rendered
+    (see `_set_depth_via_keys`) plus an unreliable depth-field readback at deep depths."""
+    sc.transact(bytes([0x13, keyid, 0x01])); time.sleep(hold)
+    sc.transact(bytes([0x13, keyid, 0x00]))
+
+
+def _depth_now(sc):
+    """Read ACQURIE-STORE-DEPTH. **Reliable only at 4K/40K** — at 512K/1M the field lies while the
+    deep record loads (it reads transient 4K / wrong codes), so the depth-set walk does NOT trust it
+    at deep; it's informational there."""
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    try: return decode_settings(_raw_settings(sc)).get('ACQURIE-STORE-DEPTH')
+    except Exception:
+        sc._resync(); return None
+
+
+def _set_depth_via_keys(sc, depth_code, status=lambda m: None, timeout=10):
+    """Set the store depth via the Acquire-menu F5 softkey (keyid 5) — the scope stays **running
+    the whole time** (we never stop; the only stop is the capture single-seq). Why the menu key,
+    not a 0x11 depth write: a 0x11 write updates the field + acquisition but NOT the on-screen
+    LongMem radio (stays stale at 4K), and a 0x11 depth change on a *running* scope reboots it. F5
+    walks the same visible menu, so the display matches, and it's safe while running.
+
+    F5 advances the ring 4K→40K→512K→1M→(4K) (codes 0→4→6→7) **one step per key EDGE** — the press
+    (`0x13 05 01`) and the release (`0x13 05 00`) EACH advance one step (verified 2026-07-11; a
+    press+release tap 100 ms apart merges into one click/one step, but if the two edges get
+    stretched apart in time they count as two → the old intermittent 'depth skip'). So drive it with
+    **single alternating edges** and, after each, **poll `ACQURIE-STORE-DEPTH` until it reaches the
+    next step** — no fixed render delay; the field settles to the new value within ~1–2 s and the
+    poll catches it (4K→40K→512K→1M in ~4 s total). **Self-correcting**: if an edge causes no change
+    (F5 was already at that level from a prior call), flip the edge and resend. From the DS-known 4K
+    start it takes exactly the ring distance. Returns True once the field reaches the target. 1M is
+    single-channel (the DS baseline CH1-only satisfies that)."""
+    from mso5202d import ACQ_DEPTH_NAMES
+    if depth_code not in _DEPTH_RING:
+        status(f"  depth {depth_code} not on the F5 ring — leaving depth as-is"); return False
+    _key_tap(sc, KEY_ACQUIRE); time.sleep(0.8)             # open Acquire (a normal click opens it)
+    if _menuid(sc) != MENU_ACQUIRE:
+        _key_tap(sc, KEY_ACQUIRE); time.sleep(0.8)         # one retry
+    cur = _depth_now(sc)
+    at = _DEPTH_RING.index(cur) if cur in _DEPTH_RING else 0
+    edge = 0x01                                            # first F5 edge = press; then alternate
+    while _DEPTH_RING[at] != depth_code:
+        nxt = _DEPTH_RING[(at + 1) % len(_DEPTH_RING)]
+        landed = False
+        for _ in range(2):                                 # self-correct the level if an edge no-ops
+            sc.transact(bytes([0x13, FN_LONGMEM, edge]))
+            t0 = time.time()
+            while time.time() - t0 < timeout:              # poll until the depth advances one step
+                if _depth_now(sc) == nxt:
+                    landed = True; break
+                time.sleep(0.2)
+            edge ^= 0x01                                    # the next edge is the opposite level
+            if landed:
+                break
+        status(f"  F5 → {ACQ_DEPTH_NAMES.get(nxt)}{'' if landed else ' (timeout)'}")
+        if not landed:
+            return False
+        at = (at + 1) % len(_DEPTH_RING)
+    return True
+
+
+def _channel_enabled(sc, ch):
+    """True if analog channel `ch` (0=CH1, 1=CH2) is enabled, checked the only reliable way — its
+    **4K wave data** (the user's method; `VERT-CHx-DISP` is decoupled and can't be trusted). A
+    disabled channel's `0x02` acquire returns EMPTY; an enabled one returns ~3200 samples. Double-
+    read to defeat the one-deep `0x02` channel pipeline (the first read after a channel switch
+    returns the PREVIOUS channel). None on error. Only meaningful at 4K with the scope running."""
+    try:
+        sc.read_waveform(ch, retries=1, timeout=1500)      # discard — pipeline returns prev channel
+        return bool(sc.read_waveform(ch, retries=1, timeout=1500))
+    except Exception:
+        sc._resync(); return None
+
+
+def _set_channels_via_keys(sc, channels, status=lambda m: None, tries=3):
+    """Enable/disable CH1/CH2 via their front-panel MENU buttons (keyid 24/30). These buttons are
+    **direct, not toggles**: a PRESS event (`0x13 keyid 0x01`) turns the channel **ON**, a RELEASE
+    (`0x13 keyid 0x00`) turns it **OFF** (verified by 4K wave data 2026-07-11 — press+release =
+    on-then-off = net off, which is why a plain tap never enabled a channel). Buttons, not a 0x11
+    `VERT-CHx-DISP` write, so the LED lights *and* the acquisition actually serves the channel.
+    **Closed-loop on 4K wave data** (`_channel_enabled`) — the DISP field is decoupled and useless —
+    with ~1 s settle for the button-to-state latency. Run at 4K, scope running, before the depth
+    walk (1M needs CH2 off first)."""
+    keys = {1: KEY_CH1_MENU, 2: KEY_CH2_MENU}
+    want = set(channels)
+    for n in (1, 2):
+        want_on = n in want
+        for _ in range(tries):
+            if _channel_enabled(sc, n - 1) == want_on:
+                break
+            sc.transact(bytes([0x13, keys[n], 0x01 if want_on else 0x00]))   # press=on / release=off
+            time.sleep(1.0)                                # button-to-state latency ~0.5–1 s
+        state = _channel_enabled(sc, n - 1)
+        status(f"  CH{n} {'on' if want_on else 'off'}"
+               + ("" if state == want_on else " (UNVERIFIED — no wave-data match)"))
 
 
 # TRIG-STATE values where the scope is STOPPED with a frozen record (RUN/STOP button red):
@@ -220,50 +337,63 @@ def _run_stop(sc, want_run, tries=8):
     return _is_stopped(sc) != want_run
 
 
-def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, la=False, reset=True,
-                    auto_tb=False):
-    """**Prepare** the scope for capture — the slow, idempotent SETUP half (run once). Default
-    Setup (if `reset`) → a known state (CSV Source = CH1) → configure channels + trigger +
-    depth while STOPPED (a 0x11 depth write on a running scope reboots it) → confirm the depth
-    took. `auto_tb` (deep only) probes the live signal at 4K and picks a slower timebase so the
-    deep record spreads over many bit-periods (more frames to scroll). Leaves the scope
-    **running** (live) and ready — the depth write happens while stopped (a running-scope depth
-    write reboots it), then it's set back to Run; call `capture_prepared()` (or press Capture)
-    to grab a record instantly. Returns the chosen tb_idx (or None)."""
-    from mso5202d import ACQ_DEPTH_NAMES, TB_TO_NS, decode_settings
-    from mso5202d_decode import _raw_settings
+def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
+                    reset=True, auto_tb=False):
+    """**Prepare** the scope for capture — the slow, idempotent SETUP half (run once). The scope
+    stays **RUNNING the whole time** — we never stop it here; the only stop is the capture
+    single-seq. Default Setup (if `reset`) → a known state (CSV Source = CH1, depth 4K) →
+    configure channels + trigger + timebase (one 0x11 write, depth byte left alone so it can't
+    reboot a running scope) → set the store depth by walking the Acquire-menu F5 softkey (which
+    the scope handles cleanly while running, and which updates the on-screen LongMem radio too).
+    `auto_tb` (deep only) briefly freezes the live signal at 4K to measure it and pick a slower
+    timebase (more bit-periods per deep record), then resumes running. Leaves the scope running
+    and ready; call `capture_prepared()` (or press Capture). Returns the chosen tb_idx (or None)."""
+    from mso5202d import ACQ_DEPTH_NAMES, TB_TO_NS
     if reset:
-        _default_setup(sc, status)                     # known state → idempotent capture
+        _default_setup(sc, status)                     # known state → idempotent capture (4K)
     tb_idx = None
     if auto_tb and depth_code != 0 and not la:
         status("probing the signal to pick a timebase…")
-        pulse = _probe_pulse_ns(sc, status)
+        pulse = _probe_pulse_ns(sc, status)            # transient 4K freeze to measure, then resumes
         if pulse:
             tb_idx = _pick_deep_tb(pulse, _DEEP_SAMPLES.get(depth_code, 40064))
             status(f"finest pulse ≈ {pulse/1000:.1f} µs → timebase {TB_TO_NS[tb_idx]/1e3:.0f} "
                    f"µs/div (record ≈ {19.2*TB_TO_NS[tb_idx]/1e6:.0f} ms)")
         else:
             status("no signal to probe — keeping the current timebase")
-    status("stopping the scope…"); _run_stop(sc, False)
+        _run_stop(sc, True)                            # the probe froze the scope — resume RUN
     status(f"configuring channels + trigger + depth {ACQ_DEPTH_NAMES.get(depth_code, depth_code)}"
            + (" + LA pod" if la else "") + "…")
-    # Confirm the depth actually took (poll — don't assume): LA clamps deep memory to 4K, and a
-    # write can silently miss if the link was momentarily desynced. Re-prep until it matches.
-    expect = 0 if la else depth_code
-    actual = None
-    for _ in range(3):
-        _prep_block(sc, depth_code, setup, la, tb_idx=tb_idx)
-        actual = decode_settings(_raw_settings(sc)).get('ACQURIE-STORE-DEPTH')
-        if actual == expect:
-            break
-        status(f"depth read back as {ACQ_DEPTH_NAMES.get(actual, actual)} — re-applying…")
-        sc._resync()
-    status(f"depth confirmed: {ACQ_DEPTH_NAMES.get(actual, actual)}"
-           + ("  (LA clamps deep memory to 4K)" if la and actual == 0 and depth_code else ""))
-    # Depth had to be written while STOPPED (a 0x11 depth write on a running scope reboots it),
-    # but leave the scope RUNNING now so it shows a live signal and is ready to trigger — the
-    # Capture path (SINGLE-arm or RUN→STOP freeze) works from a running scope.
-    _run_stop(sc, True)
+    # Configure channels/trigger/timebase with ONE 0x11 block write, **set_depth=False so the depth
+    # byte is untouched** — a 0x11 depth *change* on a running scope reboots it, but a write that
+    # leaves the depth alone is safe while running (verified 2026-07-11). The store depth is then
+    # set below by cycling the Acquire-menu F5 softkey: it's safe while running, and unlike a 0x11
+    # depth write it also updates the on-screen LongMem radio (a 0x11 write leaves it stale at 4K).
+    # LA forces the depth to 4K (the pod clamps deep memory), so LA needs no F5 cycling — after DS
+    # the depth is already 4K and the pod holds it there.
+    _prep_block(sc, depth_code, setup, la=la, tb_idx=tb_idx, set_depth=False)
+    # Channel ON/OFF via the CH1/CH2 buttons (LED-accurate, unlike a 0x11 DISP write), starting from
+    # the Default-Setup baseline (CH1 on, CH2 off). Must come BEFORE the depth F5 walk: 1M is
+    # single-channel-only, so CH2 has to be off before 1M is even reachable. Needs `reset` (the DS
+    # gives the known baseline); without it we leave the channels as the panel had them.
+    if setup and not la and reset:
+        status("setting channels via the CH1/CH2 buttons…")
+        _set_channels_via_keys(sc, channels, status)
+    ok = True
+    if not la and depth_code != 0:
+        status(f"setting store depth {ACQ_DEPTH_NAMES.get(depth_code)} via the Acquire menu (F5)…")
+        ok = False
+        for _ in range(3):                             # retry the whole menu walk if it can't land
+            if _set_depth_via_keys(sc, depth_code, status):
+                ok = True; break
+            sc._resync()
+    # Trust the F5 walk's own post-tap confirmation — do NOT re-poll the depth here: a deep record
+    # is still populating and the field reads a transient 4K the whole time it loads (re-reading it
+    # would falsely report '4K'). `_set_depth_via_keys` already verified the target in the reliable
+    # window right after the tap.
+    status(f"depth {'confirmed' if ok else 'NOT confirmed'}: "
+           f"{ACQ_DEPTH_NAMES.get(0 if la else depth_code)}"
+           + ("  (LA clamps deep memory to 4K)" if la and depth_code else ""))
     status("ready (running) — press Capture to grab a single-seq record")
     return tb_idx
 
@@ -300,13 +430,13 @@ def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
            else "record may be incomplete (single-seq didn't confirm stop).")
 
 
-def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, la=False, wait_trig=25,
-                    use_single=True, tb_idx=None, reset=True):
+def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
+                    wait_trig=25, use_single=True, tb_idx=None, reset=True):
     """Backward-compatible one-shot = prepare + trigger (used by tests/headless). The GUI
     splits these into a Prepare button and a Capture button instead."""
-    prepare_capture(sc, depth_code, status, setup=setup, la=la, reset=reset)
+    prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset)
     if tb_idx is not None:                               # explicit tb override (tests)
-        _prep_block(sc, depth_code, setup, la, tb_idx=tb_idx)
+        _prep_block(sc, depth_code, setup, la=la, tb_idx=tb_idx)
     _trigger_record(sc, use_single, status, wait_trig)
 
 
@@ -652,7 +782,7 @@ def _save_file_only(sc, sh, before, seen, wait_s, status, filelist_open=False):
     return name
 
 
-def deep_capture(sc, depth_code, status=lambda m: None, setup=True, la=False,
+def deep_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
                  save_sources=None, wait_s=None, delete_after=False, reset=True, auto_tb=False):
     """One-shot capture = `prepare_capture()` then `capture_prepared()` (the GUI calls those
     two separately — a Prepare button + a re-pressable Capture button). Brings **every enabled
@@ -665,7 +795,8 @@ def deep_capture(sc, depth_code, status=lambda m: None, setup=True, la=False,
     scroll). `save_sources` forces an explicit list of source indices (0=CH1,1=CH2,2=LA); with
     `delete_after`, clears the card once everything is read back. **Needs the SD card mounted.**
     Worker-thread only."""
-    prepare_capture(sc, depth_code, status, setup=setup, la=la, reset=reset, auto_tb=auto_tb)
+    prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset,
+                    auto_tb=auto_tb)
     return capture_prepared(sc, depth_code, status, save_sources=save_sources, la=la,
                             wait_s=wait_s, delete_after=delete_after)
 
@@ -953,8 +1084,8 @@ class CaptureWorker(threading.Thread):
         if not self.sc:
             self._status("no scope connected"); return
         prepare_capture(self.sc, kw['depth_code'], status=self._status,
-                        setup=kw.get('setup', True), reset=kw.get('reset', True),
-                        auto_tb=kw.get('auto_tb', False))
+                        setup=kw.get('setup', True), channels=kw.get('channels', (1, 2)),
+                        reset=kw.get('reset', True), auto_tb=kw.get('auto_tb', False))
         self._emit('prepared', kw['depth_code'])         # → enable the Capture button
 
     def _cmd_capture(self, kw):
@@ -1061,9 +1192,17 @@ class DecoderApp:
         self.v_reset = tk.BooleanVar(value=True)
         ttk.Checkbutton(g, text="reset scope first (idempotent)", variable=self.v_reset,
                         command=lambda: self._set_prepared(False)).pack(anchor='w')
-        self.v_setup = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g, text="prep CH1/CH2 (on, 1×, DC, 1 V/div)",
-                        variable=self.v_setup).pack(anchor='w')
+        # Which channels to prepare + capture (on, 1×, DC, 1 V/div). Untick to leave a channel off.
+        self.v_setup = tk.BooleanVar(value=True)          # configure channels at all (kept for API)
+        ttk.Label(g, text="prepare channels (on, 1×, DC, 1 V/div):").pack(anchor='w')
+        chrow = ttk.Frame(g); chrow.pack(anchor='w')
+        self.v_ch1 = tk.BooleanVar(value=True)
+        self.v_ch2 = tk.BooleanVar(value=True)
+        # 1M store depth is single-channel only → re-Prepare when the ticks change.
+        ttk.Checkbutton(chrow, text="CH1", variable=self.v_ch1,
+                        command=lambda: self._set_prepared(False)).pack(side=tk.LEFT)
+        ttk.Checkbutton(chrow, text="CH2", variable=self.v_ch2,
+                        command=lambda: self._set_prepared(False)).pack(side=tk.LEFT, padx=(10, 0))
         self.v_delete = tk.BooleanVar(value=False)
         ttk.Checkbutton(g, text="delete CSV from card after read",
                         variable=self.v_delete).pack(anchor='w')
@@ -1142,11 +1281,16 @@ class DecoderApp:
         if not self.scope_present:
             self.status.set("no scope connected — use Load CSV instead"); return
         code = dict(DEEP_DEPTHS)[self.v_depth.get()]
+        channels = tuple(n for n, v in ((1, self.v_ch1), (2, self.v_ch2)) if v.get())
+        if not channels:
+            self.status.set("tick at least one channel (CH1/CH2) to prepare"); return
+        if code == 7 and len(channels) > 1:              # 1M store depth is single-channel only
+            self.status.set("1M is single-channel only — untick CH1 or CH2 (or pick 512K)"); return
         self._set_prepared(False)
         self.status.set("preparing…")
         # auto_tb (deep only): spread the record over more time when decoding a protocol so
         # there are many frames to scroll through, instead of the same ~4 ms window as 4K.
-        self.worker.submit('prepare', depth_code=code, setup=self.v_setup.get(),
+        self.worker.submit('prepare', depth_code=code, setup=self.v_setup.get(), channels=channels,
                            reset=self.v_reset.get(),
                            auto_tb=(code != 0 and self.v_proto.get() != 'none'))
 

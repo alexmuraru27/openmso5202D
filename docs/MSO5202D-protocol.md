@@ -1588,7 +1588,7 @@ capture or panel label, not exercised over USB) · `G` = [gap] (function/units u
 
 | field | blk | frm | w | type | units | enum (code → meaning) | range / observed | tag |
 |---|--:|--:|--:|---|---|---|---|:--:|
-| **VERT-CH1-DISP** | 0 | 4 | 1 | u8 | — | 0=hidden 1=shown | {0,1} | V |
+| **VERT-CH1-DISP** | 0 | 4 | 1 | u8 | — | 0=hidden 1=shown. **A `0x11` write to this byte is ignored** — it does not enable/disable the channel or light its LED, and the field keeps its prior value. The channel is turned on/off only by the **CH1 button key event `0x13 18 <state>`**: `state=0x01` (press) = channel **ON**, `0x00` (release) = **OFF** — a direct, idempotent on/off, NOT a toggle (so a press+release pair = on-then-off = net off). [verified 2026-07-11] | {0,1} | V |
 | **VERT-CH1-VB** | 1 | 5 | 1 | u8 | V/div idx | → `VB_TO_MV` (§8.4) | 0…10 | V |
 | **VERT-CH1-COUP** | 2 | 6 | 1 | u8 | — | 0=DC 1=AC 2=GND | {0,1,2} | V |
 | **VERT-CH1-20MHZ** | 3 | 7 | 1 | u8 | — | 0=Full 1=20 MHz BW-limit | {0,1} | V |
@@ -1608,7 +1608,7 @@ capture or panel label, not exercised over USB) · `G` = [gap] (function/units u
 | **VERT-CH2-POS** | 18 | 22 | 2 | i16 | 1/25 div | signed vertical position | −97…50 | V |
 | **TRIG-STATE** | 20 | 24 | 1 | u8 | — | 0=STOP 1=WAIT/Ready 2=AUTO(untrig) 3=TRIG'D 4=SCAN/roll **5=SINGLE-CAPTURED(stopped, button red)** 6=re-arm | {0,1,2,3,5} seen; **4,6 = I** | V/I |
 | **TRIG-TYPE** | 21 | 25 | 1 | u8 | — | 0=Edge 1=Video 2=Pulse 3=Slope 4=Overtime 5=Alter | {0…5} | V |
-| **TRIG-SRC** | 22 | 26 | 1 | u8 | — | 0=CH1 1=CH2 2=EXT 3=EXT/5 4=AC-line | {0…4}; set restricted per type (§8.5) | V |
+| **TRIG-SRC** | 22 | 26 | 1 | u8 | — | 0=CH1 1=CH2 2=EXT 3=EXT/5 4=AC-line. **Not writable via `0x11`** — a write is ignored and the source stays put (verified 2026-07-11); change it via the trigger menu keys instead. | {0…4}; set restricted per type (§8.5) | V |
 | **TRIG-MODE** | 23 | 27 | 1 | u8 | — | 0=Auto 1=Normal | {0,1}; write mirrors to both `SWAP-CHx-MODE` | V |
 | **TRIG-COUP** | 24 | 28 | 1 | u8 | — | 0=DC 1=AC 2=NoiseRej 3=HFRej 4=LFRej | {0…4} | V |
 | **TRIG-VPOS** | 25 | 29 | 2 | i16 | 1/25 div of source | trigger LEVEL; volts = (VPOS−POS_src)·Vdiv/25 | −200…31000 (scales w/ V/div, §8.5) | V |
@@ -1679,7 +1679,7 @@ capture or panel label, not exercised over USB) · `G` = [gap] (function/units u
 | **ACQURIE-MODE** | 180 | 184 | 1 | u8 | — | 0=Normal 1=Peak 2=Average | {0,1,2} | V |
 | **ACQURIE-AVG-CNT** | 181 | 185 | 1 | u8 | avg idx | → `ACQ_AVG_COUNTS` (0…5 = 4/8/16/32/64/128) | {0…5} | V |
 | **ACQURIE-TYPE** | 182 | 186 | 1 | u8 | — | 0=Realtime 1=Equ-time | {0,1} | V |
-| **ACQURIE-STORE-DEPTH** | 183 | 187 | 1 | u8 | — | 0=4K 4=40K 6=512K 7=1M (gaps 1/2/3/5 = greyed depths) | {0,4,6,7} | V |
+| **ACQURIE-STORE-DEPTH** | 183 | 187 | 1 | u8 | — | 0=4K 4=40K 6=512K 7=1M (gaps 1/2/3/5 = greyed depths). Writing this via `0x11` changes the acquisition but **not** the Acquire-menu LongMem radio display (stays stale at 4K); the Acquire-menu **F5 softkey** (keyid 5) cycles it `4K→40K→512K→1M→(4K)` and *does* update the display. F5 advances **one step per key EDGE** (press `13 05 01` and release `13 05 00` each advance one, so two edges stretched apart in time double-count) — drive with single alternating edges + poll this field until it reaches the next step; set depth this way to keep the on-screen LongMem radio truthful | {0,4,6,7} | V |
 | **MEASURE-ITEM1-SRC** | 184 | 188 | 1 | u8 | — | 0=CH1 1=CH2 3=LA (2 unused, no Math src) | {0,1,3} | V |
 | **MEASURE-ITEM1** | 185 | 189 | 1 | u8 | — | measure type → §8.4 enum (0=Off) | {0…19 on wire} | V |
 | **MEASURE-ITEM2-SRC** | 186 | 190 | 1 | u8 | — | 0=CH1 1=CH2 3=LA | {0,1,3} | V |
@@ -1950,13 +1950,13 @@ list (byte-exact from the on-device file):
 | 21 | CT-DS-KEY | **Default Setup** (factory reset) |
 | 22 | CT-STU-KEY | Setup ("STU") key |
 | 23 | VT-MATH-MENU-KEY | Math menu |
-| 24 | VT-CH1-MENU-KEY | CH1 menu |
+| 24 | VT-CH1-MENU-KEY | CH1 menu / on-off — **direct on/off, not a toggle**: press (`13 18 01`) = CH1 **ON**, release (`13 18 00`) = **OFF** (idempotent). A normal press+release tap = on-then-off = net off. The `VERT-CH1-DISP` settings byte (§8) does not track this and is not settable via `0x11`. [verified 2026-07-11] |
 | 25 | VT-CH1-PSUB-KEY | CH1 vertical position − |
 | 26 | VT-CH1-PADD-KEY | CH1 vertical position + |
 | 27 | VT-CH1-PZERO-KEY | CH1 position knob push (`VERT-CH1-POS := 0`) |
 | 28 | VT-CH1-VBSUB-KEY | CH1 V/div − |
 | 29 | VT-CH1-VBADD-KEY | CH1 V/div + |
-| 30 | VT-CH2-MENU-KEY | CH2 menu |
+| 30 | VT-CH2-MENU-KEY | CH2 menu / on-off — same **direct** press=ON / release=OFF as CH1 (`13 1e 01`=on, `13 1e 00`=off; idempotent). Default Setup baseline = CH1 on, CH2 off. [verified 2026-07-11] |
 | 31 | VT-CH2-PSUB-KEY | CH2 vertical position − |
 | 32 | VT-CH2-PADD-KEY | CH2 vertical position + |
 | 33 | VT-CH2-PZERO-KEY | CH2 position knob push (`VERT-CH2-POS := 0`) |
