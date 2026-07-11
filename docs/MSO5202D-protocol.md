@@ -1445,15 +1445,35 @@ mistake it for a deep-waveform readout. `[verified]`
 
 Because the USB acquire cannot serve deep memory (§6.8), the route to a long contiguous
 record is: set the store depth, have the instrument save a CSV to its (internal) storage,
-and read that file back over USB. The file is one channel of `time, volts`:
+and read that file back over USB. One **Source** per file — the CSV menu Source selector
+is CH1 / CH2 / **LA**, giving two file layouts:
+
+**Analog (Source = CH1 / CH2)** — `time, volts`:
 
 ```
 #timebase=<n>(ns)
-,#voltbase=<n>(mv/100)
+,#voltbase=<n>(mv/100)      µV/div
 #size=<N>
-<time_s>,<volts>            ; N data rows: printf "%0.5E,%0.3f"
-...
+<time_s>,<volts>           ; N data rows: printf "%0.5E,%0.3f"
 ```
+
+**Logic analyzer (Source = LA)** `[verified 2026-07-11]` — `time, word`:
+
+```
+#timebase=<n>(ns)
+,#threshold=<n>(mv)        LA logic threshold, mV (e.g. 5482 = 5.482 V)
+#size=<N>
+<time_s>,<word>            ; word = the 16-bit LA sample, bit N = channel D(N)
+```
+
+The LA value column is the digital pod word (integer), **not** volts — bit N is channel
+D(N). This is a **working route to real 16-channel LA data**, bypassing the broken live
+`02 01 05` read (§5): capture with the pod on, Save→CSV with Source=LA, read the file
+back. Confirmed genuine on hardware — per-bit toggle rates over one record match the
+test-signal frequency ladder (D0 fastest → D15 slowest) exactly. **Caveat: enabling LA
+forces the store depth to 4K** — deep memory (40K/512K/1M) is analog-only; with the pod
+on, every depth clamps to 4K (verified by reading `ACQURIE-STORE-DEPTH` back). So LA CSV =
+4064 samples; deep records are CH1/CH2 only.
 
 Header decode (two of the labels are misleading — believe the numbers, not the units in
 parentheses):

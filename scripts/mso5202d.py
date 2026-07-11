@@ -481,24 +481,28 @@ def parse_wavedata_csv(text) -> dict:
     These are the files the instrument writes to /mnt/udisk/WaveData<n>.csv when you
     Save/Recall → CSV; reading one back over USB (read_file, selector 0x10) is the ONLY
     route to the deep 40K/512K record — the acquire command only ever serves the
-    ≤3840-sample screen block. One channel per file. Layout:
+    ≤3840-sample screen block. One Source per file (CH1/CH2/**LA**). Two layouts:
 
-        #timebase=<n>(ns)          screen-timebase tag (NOT the sample step)
-        ,#voltbase=<n>(mv/100)     actually µV/div → V/div = voltbase/1e6
-        #size=<N>                  number of data rows
-        <time_seconds>,<volts>     N rows, %0.5E,%0.3f — the value column is VOLTS
+    ANALOG (Source=CH1/CH2):                LOGIC ANALYZER (Source=LA):
+        #timebase=<n>(ns)                       #timebase=<n>(ns)
+        ,#voltbase=<n>(mv/100)  µV/div          ,#threshold=<n>(mv)   LA threshold, mV
+        #size=<N>                               #size=<N>
+        <t_s>,<volts>   value = VOLTS           <t_s>,<word>   value = 16-bit LA word,
+                                                               bit N = channel D(N)
 
-    Returns {'volts', 'time_s' (np arrays), 'dt_s' (median step, depth-driven),
-    'size', 'vdiv_mV', 'timebase_ns'}. Accepts str or bytes. Verified against
-    scope_dump/WaveData141{0,1,2}.csv (4064/40064/400064 rows)."""
-    import io, re
+    Returns {'is_la', 'time_s', 'dt_s', 'size', 'timebase_ns'} plus, for analog,
+    {'volts', 'vdiv_mV'} and for LA {'words' (uint16 array), 'threshold_mV'} (the analog
+    keys are None for LA and vice-versa). Accepts str or bytes. The LA value column is
+    the digital pod word — verified as real 16-ch data (per-bit toggle rates match the
+    ESP frequency ladder D0→D15, 2026-07-11). Analog verified vs WaveData141{0,1,2}.csv."""
+    import re
     import numpy as np
     if isinstance(text, (bytes, bytearray)):
         text = text.decode('latin1', 'replace')
     hdr, last = {}, -1
     lines = text.splitlines()
     for i, ln in enumerate(lines):
-        m = re.search(r'#\s*(timebase|voltbase|size)\s*=\s*(-?\d+)', ln)
+        m = re.search(r'#\s*(timebase|voltbase|threshold|size)\s*=\s*(-?\d+)', ln)
         if m:
             hdr[m.group(1)] = int(m.group(2))
             last = i
@@ -509,12 +513,19 @@ def parse_wavedata_csv(text) -> dict:
         arr = flat[:n].reshape(-1, 2)
     else:
         arr = np.empty((0, 2))
-    time_s, volts = arr[:, 0], arr[:, 1]
+    time_s, value = arr[:, 0], arr[:, 1]
     dt = float(np.median(np.diff(time_s))) if len(time_s) > 1 else None
-    return {'volts': volts, 'time_s': time_s, 'dt_s': dt,
-            'size': hdr.get('size', len(volts)),
-            'vdiv_mV': (hdr['voltbase'] / 1000.0) if 'voltbase' in hdr else None,
-            'timebase_ns': hdr.get('timebase')}
+    is_la = 'threshold' in hdr
+    out = {'is_la': is_la, 'time_s': time_s, 'dt_s': dt,
+           'size': hdr.get('size', len(arr)), 'timebase_ns': hdr.get('timebase'),
+           'volts': None, 'vdiv_mV': None, 'words': None, 'threshold_mV': None}
+    if is_la:
+        out['words'] = np.clip(np.round(value), 0, 0xFFFF).astype(np.uint16)  # 16-bit LA word
+        out['threshold_mV'] = hdr['threshold']
+    else:
+        out['volts'] = value
+        out['vdiv_mV'] = (hdr['voltbase'] / 1000.0) if 'voltbase' in hdr else None
+    return out
 
 
 def decode_settings(payload: bytes) -> dict:

@@ -151,7 +151,19 @@ Verified by screenshotting each menu (`0x20`):
 
 - **Save is two presses** — 1st opens the FileList (destination browser), 2nd writes.
   A single press is a no-op. `[verified]`
-- **`keyid 4 = delete`** — never issue it blind; it erases card files.
+- **`keyid 4 = delete`** — deletes card files. Its 1st press opens the FileList (first
+  file selected); each further press deletes the **selected** file — **no confirm dialog**.
+  `[verified 2026-07-11]`
+
+### 4.1 Clearing the card (front-panel delete, no `rm`)
+
+Deep CSVs are big (512K ≈ 7.7 MB, 1M ≈ 19 MB), so the card fills fast. Delete them with
+the scope's own delete key — **never** a shell `rm`. Efficient loop (`_clear_wavedata` /
+`clear_wavedata` in `mso5202d_plot.py`): count with **one** `ls`, press **delete `N+1`
+times** (1 opens the FileList, `N` delete), then **one** `ls` to verify — repeat a couple
+of rounds only if the single-slot key mailbox dropped a press. `deep_capture(delete_after=
+True)` runs this after the captures are read back to the PC; there's also a "Clear card
+CSVs" button in the GUI. Uses only front-panel keys + read-only `ls` (no `rm`).
 - The vendor's real save is just `MENU-SR(11) → CSV(3) → Save(2)` (its FN0/Back
   presses in captures are the operator escaping the slow, stuck app — not part of
   saving). `[verified from the virtual-panel pcap]`

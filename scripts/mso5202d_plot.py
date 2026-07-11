@@ -120,13 +120,14 @@ def _list_wavedata(sh, retries=4):
     return set()
 
 
-def _prep_block(sc, depth_code, setup=True):
+def _prep_block(sc, depth_code, setup=True, la=False):
     """ONE 0x11 settings-block write — the scope MUST be stopped first (changing store
     depth on a running scope crashes/reboots it — verified 2026-07-10). With `setup`,
     also configure both channels for a clean logic capture: display on, 1× probe, DC
     coupling, invert off, full BW, **1 V/div** (3.3 V logic → ~3.3 divisions, no clip),
-    CH1 centred / CH2 −2 div (separated), and Edge/CH1/**Auto** trigger. Without
-    `setup`, only the store depth changes (e.g. restoring 4K)."""
+    CH1 centred / CH2 −2 div (separated), and Edge/CH1/**Auto** trigger. `la` turns the
+    logic pod on (all 16 channels) — but **LA forces the depth to 4K** (deep memory is
+    not available with LA, verified 2026-07-11). Without `setup`, only depth (+LA) change."""
     from mso5202d_decode import _field_off, _raw_settings
     block = bytearray(_raw_settings(sc)[1:])           # 213-byte block (drop 0x81 echo)
 
@@ -149,6 +150,10 @@ def _prep_block(sc, depth_code, setup=True):
         # level_V = (VPOS−POS_src)·Vdiv/25 = 40·1000mV/25 = 1.6 V with CH1 POS=0, 1 V/div.
         # Without a level ON the signal, SINGLE arms forever (never crosses) — verified.
         put('TRIG-VPOS', 40)
+    if la:
+        put('LA-SWI', 1); put('LA-CHANNEL-STATE', 0xFFFF)   # pod on, all 16 channels
+    elif setup:
+        put('LA-SWI', 0)                                     # pure-analog capture → LA off
     put('ACQURIE-STORE-DEPTH', depth_code)
     sc.transact(b'\x11' + bytes(block)); time.sleep(0.5)
 
@@ -171,7 +176,7 @@ def _run_stop(sc, want_run, tries=8):
     return st is not None and (st not in (0, None)) == want_run
 
 
-def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, wait_trig=25):
+def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, la=False, wait_trig=25):
     """Capture one full-depth, trigger-aligned record via **SINGLE SEQ** — don't manually
     stop. STOP → configure channels + trigger (Edge/CH1/Auto with the level set mid-logic
     so the signal actually crosses it) + depth, all while stopped (a 0x11 depth write on a
@@ -179,32 +184,42 @@ def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, wait_trig
     triggers on the signal edge and stops itself with the record. Poll TRIG-STATE until it
     reaches STOP (0); Force-Trig only as a last-resort fallback. Per hardware guidance
     2026-07-11: a manual RUN→STOP freezes an empty screen; single-seq captures real data."""
-    from mso5202d import ACQ_DEPTH_NAMES
-    from mso5202d_decode import _key
+    from mso5202d import ACQ_DEPTH_NAMES, decode_settings
+    from mso5202d_decode import _key, _raw_settings
     status("stopping the scope…"); _run_stop(sc, False)
-    status(f"configuring channels + trigger + depth {ACQ_DEPTH_NAMES.get(depth_code, depth_code)}…")
-    _prep_block(sc, depth_code, setup)
+    status(f"configuring channels + trigger + depth {ACQ_DEPTH_NAMES.get(depth_code, depth_code)}"
+           + (" + LA pod" if la else "") + "…")
+    _prep_block(sc, depth_code, setup, la)
+    # Confirm the depth actually took (poll — don't assume): LA clamps deep memory to 4K,
+    # and a bad write could silently differ. This is the "make sure the depth is set" step.
+    actual = decode_settings(_raw_settings(sc)).get('ACQURIE-STORE-DEPTH')
+    status(f"depth confirmed: {ACQ_DEPTH_NAMES.get(actual, actual)}"
+           + ("  (LA clamps deep memory to 4K)" if la and actual == 0 and depth_code else ""))
     status("arming SINGLE — letting the scope gather + trigger on the signal…")
     _key(sc, KEY_SINGLE); time.sleep(0.5)
     # SINGLE captures on the first signal edge; on this firmware TRIG-STATE does not
     # always settle to exactly 0 afterwards, but the record IS captured (verified: full
     # 40K/512K records save correctly). So wait briefly, nudge once with Force if nothing
     # has triggered, then proceed — the acquisition memory holds the record either way.
-    t0 = time.time(); forced = False
+    t0 = time.time(); forced = False; triggered = False
     while time.time() - t0 < wait_trig:
-        if _trig_state(sc) == 0:
-            status("triggered — full-depth record captured."); return
+        if _trig_state(sc) == 0:                        # single-seq triggered + stopped itself
+            triggered = True; break
         if not forced and time.time() - t0 > 4:
             _key(sc, KEY_FORCE); forced = True          # ensure a trigger even with no edge
         time.sleep(0.6)
-    status("record captured (single-seq).")
+    # STOP-to-freeze: single-seq gathers real data (not the empty screen a bare RUN→STOP
+    # gives), but in Auto mode the scope keeps free-running after — so freeze it now, else
+    # a later save grabs a differently-filled buffer (verified: multi-source saves drift).
+    _run_stop(sc, False)
+    status("record captured + frozen." if triggered else "record captured (forced) + frozen.")
 
 
 # Save/Recall → CSV softkey ids (verified 2026-07-10 by screenshotting the menu):
 # key 11 opens S/R (Ref=1, SetUp=2, CSV=3); in the CSV menu Source=1 (cycles
 # CH1→CH2→LA), Save=2, Recall=3, delete=4 (NEVER press — erases card files),
 # FileList=5, Back=6. See MSO5202D-protocol.md §9.
-FN_CSV, FN_SAVE, FN_SOURCE = 3, 2, 1
+FN_CSV, FN_SAVE, FN_SOURCE, FN_DELETE = 3, 2, 1, 4
 
 
 def _menuid(sc):
@@ -306,8 +321,45 @@ def _wait_new_csv(sh, before, seen, status, hard_timeout):
     return target                                         # timed out; return best-effort
 
 
-def deep_capture(sc, depth_code, status=lambda m: None, setup=True,
-                 save_sources=(0,), wait_s=None):
+def _clear_wavedata(sc, sh, status=lambda m: None, rounds=4):
+    """Delete ALL WaveData*.csv off the SD card via the front-panel CSV delete key (F4 /
+    keyid 4). Efficient (avoids an `ls` per delete): count the files with ONE `ls`, then
+    press delete **N+1 times** — the first press opens the FileList, each further press
+    deletes the selected file (no confirm dialog — verified 2026-07-11) — then ONE `ls` to
+    verify; repeat only if some presses were dropped (the scope's key mailbox is
+    single-slot). Front-panel keys + read-only `ls` only; **NO shell rm**."""
+    from mso5202d_decode import _key
+    if not _press_for_menu(sc, KEY_SR_MENU, 47, status):
+        return
+    if not _press_for_menu(sc, FN_CSV, 48, status):
+        return
+    n0 = len(_list_wavedata(sh))
+    if not n0:
+        status("card already has no WaveData CSVs"); return
+    for _ in range(rounds):
+        n = len(_list_wavedata(sh))                       # ONE ls to count this round
+        if not n:
+            break
+        status(f"deleting {n} WaveData CSV(s) — F4 ×{n + 1}…")
+        for _ in range(n + 1):                            # 1 press opens FileList, n delete
+            _key(sc, FN_DELETE); time.sleep(0.6)
+    left = len(_list_wavedata(sh))                        # ONE ls to verify
+    status(f"card cleared ({n0 - left} deleted)" if not left else f"{left} CSV(s) still remain")
+
+
+def clear_wavedata(sc, status=lambda m: None):
+    """Standalone: delete all WaveData*.csv off the SD card via the front-panel CSV delete
+    (no shell rm). Opens its own shell for the read-only `ls` checks."""
+    from mso5202d_shell import Shell
+    sh = Shell(scope=sc)
+    try:
+        _clear_wavedata(sc, sh, status)
+    finally:
+        sh.close()
+
+
+def deep_capture(sc, depth_code, status=lambda m: None, setup=True, la=False,
+                 save_sources=(0,), wait_s=None, delete_after=False):
     """Trigger + download one deep record. (1) `trigger_capture` freezes a full-depth
     record (stop → prep → RUN→STOP). (2) For each entry in `save_sources` (a Source
     cycle count from CH1: 0=CH1, 1=CH2), drive Save→CSV via the mapped softkeys and
@@ -323,7 +375,7 @@ def deep_capture(sc, depth_code, status=lambda m: None, setup=True,
     # detection window scales with depth.
     if wait_s is None:
         wait_s = {0: 30, 4: 45, 6: 130, 7: 220}.get(depth_code, 60)
-    trigger_capture(sc, depth_code, status=status, setup=setup)
+    trigger_capture(sc, depth_code, status=status, setup=setup, la=la)
     sh = Shell(scope=sc)                                 # share our USB handle for `ls`
     found = []; seen = set()
     try:
@@ -344,6 +396,8 @@ def deep_capture(sc, depth_code, status=lambda m: None, setup=True,
                 status(f"{name}: {r['size']} samples" + (f", {dt*1e9:.1f} ns/sample" if dt else ""))
             except Exception as e:
                 status(f"failed to read {name}: {e}"); seen.add(name)
+        if delete_after and found:      # all captures are on the PC now → free the card
+            _clear_wavedata(sc, sh, status)
     finally:
         try:                       # back to 4K (stopped) + close the menu (main screen)
             _run_stop(sc, False); _prep_block(sc, 0, setup=False); _close_menu(sc)
@@ -489,7 +543,8 @@ class CaptureWorker(threading.Thread):
         if not self.sc:
             self._status("no scope connected"); self._emit('capture', []); return
         res = deep_capture(self.sc, kw['depth_code'], status=self._status,
-                           setup=kw.get('setup', True), save_sources=kw.get('save_sources', (0,)))
+                           setup=kw.get('setup', True), save_sources=kw.get('save_sources', (0,)),
+                           delete_after=kw.get('delete_after', False))
         self._emit('capture', res)
 
     def _cmd_key(self, kw):
@@ -497,6 +552,11 @@ class CaptureWorker(threading.Thread):
             self._status("no scope connected"); return
         from mso5202d_decode import _key
         _key(self.sc, kw['keyid']); self._status(kw.get('label', 'key sent'))
+
+    def _cmd_clear(self, kw):
+        if not self.sc:
+            self._status("no scope connected"); return
+        clear_wavedata(self.sc, status=self._status)
 
     def _cmd_decode(self, kw):
         ev, dt, used = decode_capture(kw['results'], kw['params'])
@@ -579,6 +639,9 @@ class DecoderApp:
         self.v_setup = tk.BooleanVar(value=True)
         ttk.Checkbutton(g, text="prep CH1/CH2 (on, 1×, DC, 1 V/div)",
                         variable=self.v_setup).pack(anchor='w')
+        self.v_delete = tk.BooleanVar(value=False)
+        ttk.Checkbutton(g, text="delete CSV from card after read",
+                        variable=self.v_delete).pack(anchor='w')
         btn(g, "▶ Trigger & Capture", self._do_capture)
         btn(g, "Force Trig", lambda: self.worker.submit('key', keyid=KEY_FORCE, label="Force trig"))
         btn(g, "Load CSV…", self._load_csv)
@@ -608,6 +671,7 @@ class DecoderApp:
 
         g = group("Output")
         btn(g, "Save PNG…", self._save_png)
+        btn(g, "Clear card CSVs", self._clear_card)
 
     def _build_statusbar(self):
         tk = self.tk
@@ -653,7 +717,7 @@ class DecoderApp:
             sources = (0,)                                  # no protocol → just grab CH1
         self.status.set("capturing…")
         self.worker.submit('capture', depth_code=code, setup=self.v_setup.get(),
-                           save_sources=sources)
+                           save_sources=sources, delete_after=self.v_delete.get())
 
     def _load_csv(self):
         from tkinter import filedialog
@@ -691,6 +755,14 @@ class DecoderApp:
         if path:
             self.fig.savefig(path, dpi=110, facecolor=BG)
             self.status.set(f"saved {path}")
+
+    def _clear_card(self):
+        from tkinter import messagebox
+        if not self.scope_present:
+            self.status.set("no scope connected"); return
+        if messagebox.askokcancel("Clear card", "Delete ALL WaveData*.csv from the SD card?\n"
+                                  "(front-panel delete — make sure you've read back what you need)"):
+            self.status.set("clearing card…"); self.worker.submit('clear')
 
     def _set_busy(self, busy):
         st = 'disabled' if busy else 'normal'
