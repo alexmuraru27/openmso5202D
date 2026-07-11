@@ -344,6 +344,21 @@ def _press_for_menu(sc, keyid, want, status=lambda m: None, tries=4):
     return _menuid(sc) in wants
 
 
+def _close_menu(sc):
+    """Return to the main screen: press Back (close any FileList/back out of the submenu) then
+    write CONTROL-DISP-MENU = 0 to hide the side menu. **Call this only while the scope is
+    RUNNING** — a full-block 0x11 write while STOPPED (single-seq state 5) crash-reboots it,
+    but the same write while running is fine (verified 2026-07-11). Best-effort."""
+    from mso5202d_decode import _key, _field_off, _raw_settings
+    try:
+        _key(sc, FN_BACK); time.sleep(0.35)              # close the FileList / back out one level
+        off, _ = _field_off('CONTROL-DISP-MENU')
+        block = bytearray(_raw_settings(sc)[1:]); block[off] = 0
+        sc.transact(b'\x11' + bytes(block)); time.sleep(0.4)
+    except Exception:
+        pass
+
+
 def _csv_size(sh, name):
     """Byte size of /mnt/udisk/<name>, or -1 if absent/unreadable (via the 0x43 shell)."""
     try:
@@ -738,8 +753,18 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
         if delete_after and found:      # all captures are on the PC now → free the card
             _clear_wavedata(sc, sh, status)
     finally:
-        # Leave the scope STOPPED at the prepared depth (do NOT reset to 4K) so Capture stays
-        # re-pressable without re-preparing. Just release the shell.
+        # Leave the scope clean + live. Order matters: RESUME RUN **first** (from the single-seq
+        # STOP), THEN close the menu — the menu-close does a 0x11 write, which crash-reboots the
+        # scope while STOPPED but is safe while RUNNING (verified 2026-07-11). Resync first — the
+        # big file read-backs can leave a trailing chunk that would desync these key presses.
+        try:
+            sc._resync()
+            status("resuming run…"); _run_stop(sc, True)   # single-seq STOP → running
+            _close_menu(sc)                                 # Back + CONTROL-DISP-MENU=0 (running-safe)
+            _run_stop(sc, True)                             # the 0x11 menu-close can stop it → re-run
+            sc._resync()
+        except Exception:
+            pass
         sh.close()
     return found
 

@@ -169,6 +169,11 @@ first need **one** Save press, not two (else a spurious extra file).
   "card disturbed"); the `0x11` prep write itself does NOT break card detection.
 - **512K is dual-channel** — CH1/CH2 come back genuinely different (86 % of samples differ, decode
   as SPI). Delete-after uses the front-panel delete key (keyid 4), **never** shell `rm`.
+- **End-of-capture cleanup — order matters.** Leave the scope live + clean: **resume RUN first**,
+  then hide the menu (Back + `CONTROL-DISP-MENU = 0` via `0x11`). That `0x11` write **crash-reboots
+  while STOPPED** (single-seq state 5) but is safe **while RUNNING** (verified 2026-07-11) — a
+  reboot here would reset the scope and disturb the SD card. (There is no USB key event that hides
+  the menu; keyid 0 / FN-0 does not.)
 - **LA over CSV:** Source=LA exports the 16-channel pod (`#threshold` header → `is_la`); LA forces
   the record to 4K (deep memory is analog-only).
 
