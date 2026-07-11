@@ -38,6 +38,7 @@ from mso5202d import SAMPLES_PER_DIV, DIV_UNIT
 BASELINE_OFFSET = 16             # byte baseline = (VERT-CHx-POS + 16) mod 256
 V_DIVS          = 8              # graticule is 8 divisions tall (-4 … +4)
 CH_COLORS = ('#e6b400', '#0a84ff')          # CH1 yellow, CH2 blue (like the scope)
+LA_COLOR = '#2ec27e'                         # LA digital rows (green)
 GRID, GRID_MINOR, AXIS = '#274427', '#182a19', '#3f6b3f'
 BG, FG = '#080a08', '#9fb0a0'
 
@@ -343,40 +344,6 @@ def _press_for_menu(sc, keyid, want, status=lambda m: None, tries=4):
     return _menuid(sc) in wants
 
 
-def _save_csv(sc, source_cycles=0, status=lambda m: None):
-    """CLOSED-LOOP drive of S/R → CSV → (Source ×N) → Save: verify CONTROL-MENUID after
-    each menu key so a stray starting screen can't send us into the wrong menu (e.g. into
-    SETUP and bumping its Location). First close any open menu (main screen), then S/R
-    base (menuid 47) → CSV page (menuid 48) → **Save twice** (1st opens the FileList, 2nd
-    writes). `source_cycles`: 0=CH1, 1=CH2, 2=LA. Needs a mounted SD card. Returns True
-    if it reached the CSV menu and pressed Save."""
-    from mso5202d_decode import _key
-    # NOTE: no 0x11 writes here — the vendor app never issues 0x11 during a save, and a
-    # 0x11 write appears to disturb the scope's USB/card detection. Reach a clean menu with
-    # KEY presses only (MENU-SR switches to the S/R base from wherever we are).
-    if not _press_for_menu(sc, KEY_SR_MENU, 47, status):
-        status("couldn't reach S/R base (menuid 47) — aborting save"); return False
-    if not _press_for_menu(sc, FN_CSV, 48, status):
-        status("couldn't reach CSV menu (menuid 48) — aborting save"); return False
-    for _ in range(source_cycles):
-        _key(sc, FN_SOURCE); time.sleep(0.3)           # cycle Source CH1→CH2→LA
-    _key(sc, FN_SAVE); time.sleep(0.8)                 # 1st press: opens the FileList
-    _key(sc, FN_SAVE); time.sleep(1.5)                 # 2nd press: writes WaveData<n>.csv
-    return True
-
-
-def _close_menu(sc):
-    """Return to the main screen — write CONTROL-DISP-MENU=0 (verified 2026-07-10: hides
-    the open side menu, e.g. the CH1 menu the prep write pops up)."""
-    from mso5202d_decode import _field_off, _raw_settings
-    try:
-        od, _ = _field_off('CONTROL-DISP-MENU')
-        block = bytearray(_raw_settings(sc)[1:]); block[od] = 0
-        sc.transact(b'\x11' + bytes(block)); time.sleep(0.2)
-    except Exception:
-        pass
-
-
 def _csv_size(sh, name):
     """Byte size of /mnt/udisk/<name>, or -1 if absent/unreadable (via the 0x43 shell)."""
     try:
@@ -417,10 +384,8 @@ def _wait_new_csv(sh, before, seen, status, hard_timeout):
 
 # --- CSV Source selection (framebuffer-verified) ---------------------------------
 # The CSV menu's Source radio (CH1/CH2/LA) is NOT in the settings blob, so read which is
-# selected off the 0x20 framebuffer: the selected row is orange. Row y-bands + text
-# x-range calibrated from screenshots 2026-07-11 (CH1 y≈60, CH2 y≈82, LA y≈106).
-_SRC_ROWS = {0: (56, 66), 1: (78, 88), 2: (102, 112)}    # source index → (y0, y1)
-_SRC_X = (660, 725)
+# selected off the 0x20 framebuffer: the selected row is orange (coords _SRC_ROW_Y /
+# _SRC_DOT_X below, calibrated from screenshots 2026-07-11).
 _SRC_NAMES = ('CH1', 'CH2', 'LA')
 
 
@@ -447,61 +412,42 @@ def _grab_fb(sc):
     return None
 
 
+# CSV Source radio rows (y-bands) and the orange-dot x-column — the selected row's radio is
+# filled orange (verified against 0x20 grabs 2026-07-11).
+_SRC_ROW_Y = {0: (58, 72), 1: (80, 94), 2: (102, 116)}
+_SRC_DOT_X = (656, 676)
+
+
 def _read_csv_source(sc):
     """Which CSV Source is selected — 0=CH1, 1=CH2, 2=LA — read off the framebuffer (the
-    selected radio row is orange). None if unreadable. The CSV menu must be on screen."""
+    selected radio is filled orange). None if unreadable. The CSV menu must be on screen."""
     img = _grab_fb(sc)
     if img is None:
         return None
-    x0, x1 = _SRC_X
-    best, bestn = None, 3
-    for src, (y0, y1) in _SRC_ROWS.items():
+    x0, x1 = _SRC_DOT_X
+    best, bestf = None, 0.03                              # need ≥3 % orange in the dot column
+    for src, (y0, y1) in _SRC_ROW_Y.items():
         band = img[y0:y1, x0:x1].reshape(-1, 3).astype(int)
-        og = int(((band[:, 0] > 150) & (band[:, 1] > 90) & (band[:, 2] < 90)).sum())
-        if og > bestn:
-            bestn, best = og, src
+        frac = float(((band[:, 0] > 150) & (band[:, 2] < 110)).mean())
+        if frac > bestf:
+            bestf, best = frac, src
     return best
 
 
 def _select_source(sc, target, status=lambda m: None, tries=6):
-    """Cycle the CSV Source to `target` (0/1/2), VERIFYING via the framebuffer after each
-    press (the Source key can drop). CSV menu must be on screen. Returns True on success."""
+    """Cycle the CSV Source to `target` (0/1/2), VERIFYING via the framebuffer after each press
+    (the Source key can drop / the order is CH1→CH2→LA). CSV menu must be on screen. Returns
+    True on success. Resyncs after (the fb grabs need it before the next key)."""
     from mso5202d_decode import _key
+    ok = False
     for _ in range(tries):
         if _read_csv_source(sc) == target:
-            return True
-        _key(sc, FN_SOURCE); time.sleep(0.6)             # cycle CH1→CH2→LA
-    ok = _read_csv_source(sc) == target
+            ok = True; break
+        _key(sc, FN_SOURCE); time.sleep(1.0)             # cycle + settle so it commits
+    sc._resync(); time.sleep(0.4)
     if not ok:
-        status(f"couldn't select Source={_SRC_NAMES[target]}")
+        status(f"couldn't verify Source={_SRC_NAMES[target]}")
     return ok
-
-
-def _save_current(sc):
-    """Two-press Save of the currently-selected Source (CSV menu must be open)."""
-    from mso5202d_decode import _key
-    _key(sc, FN_SAVE); time.sleep(0.7)                   # 1st press opens the FileList
-    _key(sc, FN_SAVE); time.sleep(1.5)                   # 2nd press writes the file
-
-
-def _label_sources(saved):
-    """Tag each saved-CSV dict with r['source'] = 'CH1'/'CH2'/'LA'. Files come in the Source
-    cycle order CH1→CH2→LA; LA is unambiguous (its #threshold header → is_la). If all 3 were
-    saved, deduce CH1/CH2 from LA's index; otherwise just label the analog files in order."""
-    if not saved:
-        return
-    la_idx = next((i for i, r in enumerate(saved) if r.get('is_la')), None)
-    if len(saved) == 3 and la_idx is not None:
-        saved[(la_idx - 2) % 3]['source'] = 'CH1'        # cycle CH1(0)→CH2(1)→LA(2)
-        saved[(la_idx - 1) % 3]['source'] = 'CH2'
-        saved[la_idx]['source'] = 'LA'
-    else:
-        an = 0
-        for r in saved:
-            if r.get('is_la'):
-                r['source'] = 'LA'
-            else:
-                r['source'] = _SRC_NAMES[an] if an < 2 else f'CH{an + 1}'; an += 1
 
 
 def _clear_wavedata(sc, sh, status=lambda m: None, rounds=4):
@@ -595,20 +541,6 @@ def _freeze(sc, min_fill_s=0.6):
     _run_stop(sc, False)
 
 
-def _has_signal(results, min_edges=4):
-    """True if any analog channel carries a real toggling signal (≥ min_edges threshold
-    crossings) — used to reject an empty/desynced direct capture and re-take it. LA counts
-    as signal. A genuinely idle capture just fails this and is returned after the retries."""
-    from serial_decode import threshold_volts
-    for r in results or ():
-        if r.get('is_la'):
-            return True
-        v = np.asarray(r.get('volts', ()))
-        if len(v) and int(np.abs(np.diff(threshold_volts(v).astype(int))).sum()) >= min_edges:
-            return True
-    return False
-
-
 # deep record sample counts per depth code (verified: 40K→40064, 512K→400064; 1M inferred)
 _DEEP_SAMPLES = {0: 4064, 4: 40064, 6: 400064, 7: 4000064}
 
@@ -648,21 +580,6 @@ def _pick_deep_tb(pulse_ns, deep_samples, target_samples=15):
     return min(cands, key=lambda i: abs(cands[i] - ideal_tdiv))
 
 
-def _same_channel(a, b):
-    """True if two parsed CSVs are the same channel (a dropped Source cycle re-saved it)."""
-    if a.get('is_la') != b.get('is_la'):
-        return False
-    if a.get('is_la'):
-        wa, wb = a.get('words') or [], b.get('words') or []
-        return len(wa) == len(wb) and wa[:200] == wb[:200]
-    va, vb = a.get('volts'), b.get('volts')
-    if va is None or vb is None:
-        return False
-    va, vb = np.asarray(va), np.asarray(vb)
-    n = min(len(va), len(vb))
-    return n > 0 and len(va) == len(vb) and np.array_equal(va[:n], vb[:n])
-
-
 def _wait_save_done(sc, status=lambda m: None, timeout=120):
     """After a Save the scope shows an orange **"Operation is in progress! Please Wait……"**
     banner over the FileList and IGNORES key presses until the write finalizes. For a big file
@@ -689,61 +606,50 @@ def _wait_save_done(sc, status=lambda m: None, timeout=120):
     return False
 
 
-def _save_file_only(sc, sh, before, seen, wait_s, status):
-    """Two-press Save on the CSV page (menuid 48), wait for the new WaveData to finish writing
-    to the card, and return its NAME. Does **not** read the file back — deferred so a big read
-    doesn't sit between Source cycles. Returns None if no file appeared (e.g. Source on LA,
-    pod off).
+def _save_file_only(sc, sh, before, seen, wait_s, status, filelist_open=False):
+    """Save one WaveData CSV on the CSV page (menuid 48), wait for the write to finish, return
+    its NAME. Does **not** read the file back — deferred so a big read doesn't sit between
+    Source changes. Returns None if no file appeared (e.g. card save disturbed).
 
-    CRITICAL: press the two-press Save **once**, then wait **patiently**. A big write takes tens
-    of seconds and the scope writes a temp file first, exposing WaveData<n>.csv only when it
-    renames at the END (~40 s in for 512K). Re-pressing Save during that window CORRUPTS the
-    save and desyncs the Source — extra presses advanced it past CH2 (the "512K only-CH1 /
-    skips CH2" bug; the Source order is CH1→CH2→LA). So only re-press if nothing appears after a
-    long grace (a genuinely dropped press). Verified 2026-07-11."""
+    Save is **one keypress when the FileList is already open** (it writes directly), but **two
+    when it's closed** (1st opens the FileList, 2nd writes). The FileList stays OPEN after any
+    save, so the 1st channel saves with two presses and every later channel with ONE — pressing
+    twice with the FileList open writes a SECOND file (that was the spurious "3rd waveform").
+
+    Then wait **patiently**: a big write takes tens of seconds and only exposes WaveData<n>.csv
+    when the scope renames its temp file at the END (~40 s for 512K). Do NOT re-press during the
+    write (corrupts it / desyncs the Source) — only re-press if nothing appears after a long
+    grace (a genuinely dropped press). Verified 2026-07-11."""
     from mso5202d_decode import _key
+    def do_save():                               # write once (open the FileList first if closed)
+        if not filelist_open:
+            _key(sc, FN_SAVE); time.sleep(0.8)   # open FileList
+        _key(sc, FN_SAVE)                        # write
     name = None; t0 = time.time()
-    _key(sc, FN_SAVE); time.sleep(0.8)          # 1st press opens the FileList
-    _key(sc, FN_SAVE)                            # 2nd press writes
+    do_save()
     grace = min(wait_s, 45); last = time.time()  # wait ~45 s (covers a 512K write) before retry
     while time.time() - t0 < wait_s:
         if _list_wavedata(sh) - before - seen:
             name = _wait_new_csv(sh, before, seen, status, wait_s); break
-        if time.time() - last > grace:           # nothing after the grace → the press dropped
-            _key(sc, FN_SAVE); time.sleep(0.8); _key(sc, FN_SAVE); last = time.time()
+        if time.time() - last > grace:           # nothing after the grace → the write press dropped
+            _key(sc, FN_SAVE); last = time.time()   # FileList is open now → a single re-press writes
         time.sleep(0.8)
     return name
 
 
 def deep_capture(sc, depth_code, status=lambda m: None, setup=True, la=False,
                  save_sources=None, wait_s=None, delete_after=False, reset=True, auto_tb=False):
-    """Trigger a record and bring **every enabled channel** back to the PC, tagged
-    `r['source']` = 'CH1'/'CH2'/'LA'. `reset` (default True) does a **Default Setup** first so
-    the capture is idempotent — a known state (incl. CSV Source = CH1), independent of how the
-    panel was left. `auto_tb` (deep only) probes the signal and picks a slower timebase so the
-    deep record spreads over many bit-periods (more frames to scroll), instead of the same ~4 ms
-    window as 4K. Two capture paths, chosen by depth:
+    """One-shot capture = `prepare_capture()` then `capture_prepared()` (the GUI calls those
+    two separately — a Prepare button + a re-pressable Capture button). Brings **every enabled
+    channel** back to the PC tagged `r['source']` = 'CH1'/'CH2'/'LA', via the unified
+    SINGLE-SEQ → Save→CSV → read-back mechanism (see `capture_prepared`).
 
-    * **4K analog** (default `save_sources=None`, no LA): a RUN→STOP **freeze** then a direct
-      `0x02` read of each enabled channel — inter-channel aligned, no SD card, no CSV, no
-      fragile Source-cycling. This is the fast, reliable path for serial decoding. NB the
-      `0x02` acquire is one-deep pipelined, so `_direct_acquire` double-reads each channel
-      (the first read returns the previously-selected channel — see it there).
-    * **Deep (40K/512K/1M) or LA**: SINGLE-SEQ trigger-aligned record → Save→CSV once per
-      enabled Source, cycling Source (keyid 1) **directly between saves — NO Back** (after a
-      Save the scope is back on the CSV page, so a plain Source press cycles it; a Back would
-      go up to the S/R base and break it). Collects DISTINCT files (a dropped cycle re-saves
-      the same channel; an LA-off slot saves nothing) until one per enabled channel is in
-      hand, then reads them back over 0x10. Labelled by order (LA by its `#threshold` header;
-      the decoder tries both CH orderings so a swap is harmless). LA forces the record to 4K
-      (deep memory is analog-only). **Needs the SD card mounted** — if a Save writes no file
-      even after cycling, the scope's card detection got disturbed and a front-panel key press
-      re-detects it. Verified end-to-end: 40K CH1+CH2 → SPI ramp decodes.
-
-    `save_sources` forces an explicit list of source indices (0=CH1,1=CH2,2=LA) via the CSV
-    route. With `delete_after`, clears the card once everything is read back. Worker-thread
-    only. This is the one-shot convenience = `prepare_capture()` then `capture_prepared()`;
-    the GUI calls those two separately (a Prepare button + a re-pressable Capture button)."""
+    `reset` (default True) does a **Default Setup** first so the capture is idempotent (known
+    state, independent of how the panel was left). `auto_tb` (deep only) probes the signal and
+    picks a slower timebase so the deep record spreads over many bit-periods (more frames to
+    scroll). `save_sources` forces an explicit list of source indices (0=CH1,1=CH2,2=LA); with
+    `delete_after`, clears the card once everything is read back. **Needs the SD card mounted.**
+    Worker-thread only."""
     prepare_capture(sc, depth_code, status, setup=setup, la=la, reset=reset, auto_tb=auto_tb)
     return capture_prepared(sc, depth_code, status, save_sources=save_sources, la=la,
                             wait_s=wait_s, delete_after=delete_after)
@@ -752,11 +658,12 @@ def deep_capture(sc, depth_code, status=lambda m: None, setup=True, la=False,
 def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, la=False,
                      wait_s=None, delete_after=False):
     """**Capture** one record from an already-`prepare_capture()`d scope and bring **every
-    enabled channel** back to the PC (tagged `r['source']`). Fast + re-pressable — no reset,
-    no re-configure. 4K → RUN→STOP freeze + direct `0x02` read; deep/LA → SINGLE-SEQ +
-    Save→CSV. (NB on a repeated deep capture the CSV Source starts wherever the last cycle
-    left it, so labels may swap — the decoder tries both orderings; re-Prepare for a
-    guaranteed CH1-first.)"""
+    enabled channel** back to the PC (tagged `r['source']`). Re-pressable — no reset, no
+    re-configure. **One unified mechanism for every depth** (4K included): SINGLE-SEQ trigger
+    → for each enabled channel select its **Source** (framebuffer-verified, deterministic
+    CH1→CH2→…) → two-press **Save** (once; wait out the async "Operation in progress" write)
+    → read the CSVs back over `0x10`. Labels are the channel we actually selected, so there's
+    no order-guessing or "CH2 twice" on a re-Capture."""
     from mso5202d import parse_wavedata_csv, decode_settings
     from mso5202d_decode import _raw_settings
     from mso5202d_shell import Shell
@@ -765,40 +672,12 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
     # 512K (~7.7 MB) / 1M (~19 MB) write takes many seconds — detection window scales.
     if wait_s is None:
         wait_s = {0: 30, 4: 45, 6: 130, 7: 220}.get(depth_code, 60)
-    # 4K → RUN→STOP freeze + direct 0x02 read (fast, aligned, no card). Deep/LA → SINGLE-SEQ,
-    # which self-stops with a trigger-aligned full-depth record (TRIG-STATE → 5/SINGLE, button
-    # red) that Save→CSV then exports — the manual flow that works. The single-seq is left
-    # STOPPED (we don't toggle Run/Stop) so the CSV saves read a stable frozen buffer and the
-    # Source cycles cleanly across CH1/CH2.
-    direct = (depth_code == 0 and not la and save_sources is None)
-    _trigger_record(sc, use_single=not direct, status=status)
-
-    # 4K analog case: read each enabled channel DIRECTLY from the frozen buffer over 0x02 —
-    # inter-channel aligned, reliable, and completely off the SD card, so we never open the
-    # shell or `ls` the card (that alone costs ~10 s). Return before the CSV machinery; leave
-    # the scope stopped + configured (NO 0x11 restore write) so the next capture's prep also
-    # finds nothing changed and skips its write → a repeat capture is fast.
-    if direct:
-        s = decode_settings(_raw_settings(sc))
-        enabled = [c for c, f in ((0, 'VERT-CH1-DISP'), (1, 'VERT-CH2-DISP')) if s.get(f)]
-        if enabled:
-            status("bringing back: " + ", ".join(_SRC_NAMES[t] for t in enabled))
-            # Occasionally a read desyncs and returns garbage; re-freeze + re-read until every
-            # channel is non-empty and at least one carries signal (bounded — a truly idle
-            # capture just returns after the last attempt).
-            found = []
-            for attempt in range(3):
-                found = _direct_acquire(sc, enabled, status)
-                if found and all(r['size'] for r in found) and _has_signal(found):
-                    break
-                if attempt < 2:
-                    status("capture looked empty/garbled — re-capturing…")
-                    sc._resync(); _freeze(sc)
-            if found:
-                status("brought back: "
-                       + ", ".join(f"{r['source']}({r['size']})" for r in found))
-                return found
-        status("direct acquire empty — falling back to CSV route")
+    # ONE unified mechanism for every depth (4K included): SINGLE-SEQ trigger → Save→CSV per
+    # Source → read back over 0x10. The single-seq self-stops with a trigger-aligned record
+    # (TRIG-STATE → 5/SINGLE, button red); we leave it STOPPED (don't toggle Run/Stop) so the
+    # CSV saves read a stable frozen buffer and the Source cycles cleanly across CH1/CH2. (The
+    # old 4K direct-0x02 fast path was removed for consistency — 4K now also goes via the card.)
+    _trigger_record(sc, use_single=True, status=status)
 
     sh = Shell(scope=sc)                                 # share our USB handle for `ls`
     found = []; seen = set()
@@ -814,60 +693,45 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
         if not enabled:
             status("no channels enabled to save"); return found
         status("bringing back: " + ", ".join(_SRC_NAMES[t] for t in enabled))
-        # The CSV Source cycles CH1→CH2→LA and isn't in the settings blob. Save once per enabled
-        # channel, cycling Source (keyid 1) between saves — **directly, NO Back**: after a Save
-        # the scope is back on the CSV page (menuid 48), so a plain Source press cycles it (a
-        # Back would go UP to the S/R base where keyid 1 = Ref, breaking everything — verified
-        # 2026-07-11). A Source press can land on an unsaveable slot (LA with the pod off → no
-        # file) or drop (re-saves the same channel), so collect DISTINCT files and keep cycling
-        # until we have one per enabled channel. Files are labelled by collection order (LA by
-        # its #threshold header); the decoder tries both CH orderings so a swap is harmless.
-        want = len(enabled)
         if not (_press_for_menu(sc, KEY_SR_MENU, 47, status)
                 and _press_for_menu(sc, FN_CSV, 48, status)):
             status("couldn't open the CSV menu"); return found
-        from mso5202d_decode import _key
-        # PHASE 1 — save each Source to the card, cycling Source between saves. Read-back is
-        # DEFERRED to phase 2: a big 7.7 MB read between cycles was disrupting the FN_SOURCE key
-        # at 512K (only CH1 came back). The manual flow saves all sources to the card first,
-        # then reads them — so here we only wait for each file to finish writing (poll ls), no
-        # read, then cycle Source and save the next.
-        names = []
-        for attempt in range(want + 3):          # a few extra for dropped cycles / LA-off slots
-            if attempt > 0:
-                _key(sc, FN_SOURCE); time.sleep(0.9)     # cycle Source (stays on CSV page)
-            status(f"Save→CSV ({len(names) + 1}/{want})…")
-            name = _save_file_only(sc, sh, before, seen, wait_s, status)
+        # DETERMINISTIC save: for each enabled channel, **select its Source explicitly**
+        # (verified via the 0x20 framebuffer — the selected radio is orange) then Save ONCE.
+        # Always CH1 first, then CH2 (…, LA), regardless of where the Source was left by a prior
+        # capture — no blind cycling, no "CH2 twice"/label-swap. The write is async: after each
+        # Save the scope shows "Operation in progress" and ignores keys, so wait for that banner
+        # to clear (`_wait_save_done`) before the NEXT Source select. Read-back is DEFERRED to a
+        # 2nd pass so a 7.7 MB read doesn't sit between Source changes.
+        picked = []                                      # (ch, filename), in enabled order
+        fl_open = False                                  # the FileList stays open after any save
+        for i, ch in enumerate(enabled):
+            if i > 0:                                    # let the previous save's banner clear
+                _wait_save_done(sc, status); sc._resync(); time.sleep(1.5)
+            if not _select_source(sc, ch, status):       # fb-verified Source select
+                status(f"  couldn't select {_SRC_NAMES[ch]} — skipping"); continue
+            status(f"Save→CSV {_SRC_NAMES[ch]} ({i + 1}/{len(enabled)})…")
+            name = _save_file_only(sc, sh, before, seen, wait_s, status, filelist_open=fl_open)
             if name is None:
-                continue                         # Source on LA-off (nothing to save) → cycle on
-            names.append(name); seen.add(name)
-            if len(names) >= want:
-                break
-            # The scope is still finalizing the write ("Operation in progress" banner) and
-            # ignores keys — wait it out before the next Source cycle, else the cycle drops and
-            # we re-save the same channel (the 512K "only CH1" bug). Then resync + settle
-            # generously: the framebuffer polls in _wait_save_done need a solid pause before the
-            # next key or the FN_SOURCE press drops too (verified: 2 s settle → cycle lands).
-            _wait_save_done(sc, status); sc._resync(); time.sleep(2.0)
-        # PHASE 2 — now read + parse the saved files and drop any duplicate channel (a dropped
-        # Source cycle re-saved the same one).
+                status(f"  {_SRC_NAMES[ch]}: no file (card save disturbed? a panel key press "
+                       "re-detects it)"); continue
+            picked.append((ch, name)); seen.add(name); fl_open = True
+        _wait_save_done(sc, status)                      # last save fully done before reads/keys
+        # 2nd pass — read + parse each saved file, tagged by the channel we selected for it.
         saved = []
-        for name in names:
+        for ch, name in picked:
             try:
                 r = parse_wavedata_csv(sc.read_file('/mnt/udisk/' + name, timeout=60000))
-                r['file'] = name
+                r['file'] = name; r['source'] = _SRC_NAMES[ch]
+                saved.append(r)
+                dt = r.get('dt_s')
+                status(f"  {name} = {_SRC_NAMES[ch]}: {r['size']} samples"
+                       + (f", {dt*1e9:.1f} ns/sample" if dt else ""))
             except Exception as e:
-                status(f"failed to read {name}: {e}"); continue
-            if any(_same_channel(r, p) for p in saved):
-                status(f"  {name}: duplicate channel (Source didn't cycle)"); continue
-            saved.append(r)
-            dt = r.get('dt_s')
-            status(f"  {name}: {r['size']} samples, {'LA' if r['is_la'] else 'analog'}"
-                   + (f", {dt*1e9:.1f} ns/sample" if dt else ""))
+                status(f"failed to read {name}: {e}")
         if not saved:
-            status("no CSV saved — Source may be stuck on LA (pod off) or the card save is "
-                   "disturbed (a front-panel key press re-detects it)")
-        _label_sources(saved)                            # tag CH1/CH2/LA by order + LA header
+            status("no CSV saved — the card save may be disturbed (a front-panel key press "
+                   "re-detects it)")
         found[:] = saved
         status("brought back: " + ", ".join(f"{r.get('source')}({'LA' if r['is_la'] else r['size']})"
                                              for r in found))
@@ -1182,7 +1046,6 @@ class DecoderApp:
         # Capture is enabled only after Prepare (managed separately from the busy toggle).
         self.capture_btn = btn(g, "② Capture (single-seq)", self._do_capture)
         self.capture_btn.configure(state='disabled')
-        btn(g, "Force Trig", lambda: self.worker.submit('key', keyid=KEY_FORCE, label="Force trig"))
         btn(g, "Load CSV…", self._load_csv)
 
         g = group("Decode")

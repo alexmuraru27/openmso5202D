@@ -85,158 +85,100 @@ see FileList state, not the menuid.
 
 ---
 
-## 3. Capture — two paths by depth
+## 3. Capture — one unified mechanism (all depths) `[2026-07-11]`
 
-`deep_capture()` in `mso5202d_plot.py` chooses one of two capture/read paths:
+**Prepare once → Capture (re-pressable).** Every depth (4K…1M) uses the SAME path:
+`SINGLE-SEQ trigger → Save→CSV per source → read the CSV(s) back`. Below, `OUT`/`IN` are the
+bulk-USB frames — leader `0x53` unless noted; the IN payload echoes `selector | 0x80`
+(byte-level detail in `MSO5202D-protocol.md`).
 
-### 3.0 4K (screen) analog — direct `0x02` read, no SD card `[verified 2026-07-11]`
+### USB primitives used here
+| Op | OUT | IN | Purpose |
+|---|---|---|---|
+| settings read | `01` | `81` + 213 B | poll `TRIG-STATE` / `CONTROL-MENUID` / depth |
+| settings write | `11` + 213 B | `91` | configure (prep); scope busy ~3.4 s after |
+| key event | `13 <keyid> <state>` | `93` | front-panel key (softkey ids in §4) |
+| framebuffer | `20` | `a0` (~768 KB) | read the screen — Source radio, save banner |
+| acquire | `02 01 <ch>` | `82` size/data/end | screen-buffer waveform (**probe only**) |
+| file read | `10 <path>` | `90` multi-frame | pull a WaveData CSV back (~800 KB/s) |
+| shell `ls` | `0x43 11 "ls …"` | `0x91` + stdout | list `/mnt/udisk` (read-only) |
 
-For a 4K analog capture (the common serial-decode case), skip the SD card entirely:
-
+### ① `prepare_capture()` — slow, once
 ```
-STOP → 0x11 prep (channels + trigger + depth 4K) → RUN→STOP FREEZE → 0x02 read CH1, CH2
-```
-
-- **RUN→STOP freeze, not SINGLE.** SINGLE waits for a specific edge and — on a bursty
-  serial line — can stay *armed* (TRIG-STATE=5) indefinitely, then Force-Trig grabs a
-  mostly-idle window (verified: ~14 edges, undecodable). A RUN→STOP freeze lets the scope
-  acquire the live stream, so the frozen window is full of signal (verified: ~65 edges,
-  SPI decodes to the ramp `3A 3B 3C 3D`). Freeze also captures **one simultaneous
-  2-channel acquisition**, so CH1/CH2 are inter-channel aligned.
-- **Double-read each channel** — the `0x02` channel switch is one-deep pipelined
-  (protocol.md §5): the first read after switching returns the previous channel, so read
-  twice and keep the second, else CH1 and CH2 come back byte-identical.
-- Fast (~15 s vs ~2 min for the CSV route) and needs no card. This is what the plotter's
-  "Trigger & Capture" uses at 4K for UART/SPI/I²C decoding.
-
-LA is **not** available this way (`02 01 05` is broken) — an LA capture falls through to
-the CSV route below.
-
-### 3.0.0 Prepare / Capture split `[verified 2026-07-11]`
-
-Capture is two phases (two GUI buttons, like a bench scope: set up once, hit Single often):
-
-- **① `prepare_capture()`** — the slow, idempotent SETUP: Default Setup + configure channels/
-  trigger/depth (+ auto-timebase probe). The depth is written while STOPPED (a running-scope
-  depth write reboots it), then the scope is left **running** (live) and ready. Run once.
-- **② `capture_prepared()`** — the fast trigger + read-back: SINGLE-SEQ (deep) or RUN→STOP
-  freeze (4K) → bring back every enabled channel. **Re-pressable** — each press grabs a fresh
-  record with no re-configure (4K ≈ 1.7 s each; Prepare ≈ 6 s once). `deep_capture()` is just
-  the two called back-to-back (headless/tests). NB a repeated *deep* capture starts the CSV
-  Source wherever the last cycle left it, so labels may swap (the decoder tries both orderings;
-  re-Prepare for a guaranteed CH1-first).
-
-### 3.0.1 Idempotent reset + timebase spread `[verified 2026-07-11]`
-
-**Reset to a known state first (idempotency).** A capture should not depend on how the panel
-was left — the CSV Source in particular persists and is not readable. Press **Default Setup
-(keyid 21)** before configuring: it is **card-safe** (a Save straight after DS writes a file)
-and resets to a known state — **CSV Source = CH1**, CH2 off, depth 4K, a default timebase — so
-a deep multi-channel save then cycles CH1→CH2 deterministically. Confirm it landed via
-`CONTROL-MENUID == 25` (the DefaultSetup menu), then let it settle ~1.5 s. `_prep_block`
-re-enables CH2 and sets probe/coupling/V-div/trigger/depth afterwards. `deep_capture(reset=True)`.
-
-**Spread a deep record over more time (more frames).** Deep memory at a fixed timebase gives
-the **same time window** as the screen (≈ `19.2 × TDIV`), just more samples — so 40K over
-200 µs/div is the same ~4 ms window as 4K, only ~5 SPI bytes. To capture *many* frames, slow
-the timebase. The deep sample interval is `deep_dt = 19.2 · TDIV / deep_samples` (deep_samples:
-40K→40064, 512K→400064). To put ~15–25 samples on the finest pulse, set
-`TDIV = (pulse / target) · deep_samples / 19.2`. `deep_capture(auto_tb=True)` probes the signal
-at 4K (finest pulse), picks that TDIV, then does the deep capture — verified: 40K @ 20 kHz SPI
-went from 5 → **101 decoded bytes** over an 80 ms record (2 µs/sample, ~25 samples/bit).
-
-### 3.1 Deep (40K/512K/1M) or LA — SINGLE-SEQ + Save→CSV
-
-Goal: get one deep trigger-aligned record onto the PC. There is no deep sample stream
-over USB (protocol.md §10.7) — the record must be saved to the SD card as CSV and read
-back. `deep_capture()`:
-
-```
-CONNECT reset=False
-│
-├─ trigger_capture(depth):
-│    ├─ STOP            press RUN/STOP (19) until TRIG-STATE==0   [poll each time]
-│    ├─ PREP  (0x11, one write, while stopped):
-│    │        CH1/CH2 DISP=1, PROBE=1×, COUP=DC, RPHASE=off, 20MHz=full, VB=1V/div,
-│    │        CH1 POS=0 / CH2 POS=−2div, TRIG Edge/CH1/Auto, TRIG-VPOS=40 (≈+1.6V),
-│    │        ACQURIE-STORE-DEPTH=depth
-│    ├─ ARM SINGLE      press SINGLE (18)                          ← do NOT manual-stop
-│    └─ WAIT            poll TRIG-STATE; the scope triggers on the signal edge and
-│                       captures one full-depth record. (Force-Trig (47) only as a
-│                       last resort.) A manual RUN→STOP here freezes an EMPTY screen —
-│                       single-seq is what captures real data.
-│
-├─ SAVE→CSV  (per channel source; keys only, NO 0x11):
-│    ├─ MENU-SR (11)  → poll menuid==47
-│    ├─ CSV     (3)   → poll menuid==48
-│    ├─ [Source (1) ×N]   0=CH1, 1=CH2, 2=LA         (cycles the Source radio)
-│    ├─ Save    (2)   1st press → opens the FileList
-│    └─ Save    (2)   2nd press → writes /mnt/udisk/WaveData<n>.csv
-│
-├─ WAIT-FOR-FILE:   poll `ls /mnt/udisk` (retry the flaky read) until a NEW
-│                   WaveData*.csv appears AND its size stops changing (deep files
-│                   grow for seconds while written).
-│
-├─ READ-BACK:       read_file("/mnt/udisk/WaveData<n>.csv") over 0x10 → parse_wavedata_csv
-│
-└─ RESTORE:         STOP → 0x11 depth=4K → CONTROL-DISP-MENU=0 (main screen)
+Default Setup ....... OUT 13 21 01                     idempotent known state (Source=CH1)
+[auto_tb] probe ..... freeze + 02 01 0 / 02 01 1       measure finest pulse → pick TDIV
+STOP ................ OUT 13 19 · poll 01→81           TRIG-STATE→{0,5}   (depth writes need STOP)
+configure ........... OUT 11 +213B → 91                channels/trigger/depth/timebase (skip if unchanged)
+confirm depth ....... 01→81   (re-prep if wrong)
+RUN ................. OUT 13 19                         leave it live (running)
 ```
 
-**A completed single-seq reads TRIG-STATE = 5 (SINGLE), not 0 `[verified 2026-07-11]`.**
-When SINGLE captures, the scope **stops itself** with the record and the RUN/STOP button
-goes **red** — but `TRIG-STATE` reads **5 (SINGLE-captured/stopped)**, not 0 (STOP). Treat 5
-as STOPPED (`_STOPPED_STATES = {0, 5}`). Two bugs came from misreading 5 as "armed": (a)
-polling for state==0 that never comes → forcing; (b) a stop request (`_run_stop`) then
-pressing RUN/STOP on a state-5 record, which **starts it running** — that was the "512K scope
-kept running, only CH1" symptom. So after a single-seq: wait for state ∈ {0,5}, and do **not**
-toggle Run/Stop.
+### ② `capture_prepared()` — fast, re-pressable
+```
+SINGLE-SEQ .......... OUT 13 18 01 · poll 01→81 until TRIG-STATE ∈ {0,5}   self-stops, button RED
+open CSV menu ....... OUT 13 11, 13 03 · poll 01→81 CONTROL-MENUID 47→48
+for each enabled channel (deterministic CH1→CH2→LA):
+  select Source ..... grab 20→a0 (read radio) · OUT 13 01 until radio == ch
+  Save .............. OUT 13 02   (×2 if FileList closed, ×1 if already open)  → WaveData<n>.csv
+  wait file ......... 0x43 ls until the file appears + size stable
+  wait "busy" ....... grab 20→a0 until the orange "Operation in progress" banner clears
+read back ........... OUT 10 <path> → 90  per file  → parse_wavedata_csv
+[delete_after] ...... OUT 13 04 ×(N+1) · 0x43 ls verify        front-panel delete, NEVER shell rm
+```
 
-**The save is asynchronous — "Operation in progress" `[verified 2026-07-11]`.** After the
-two-press Save the scope shows an orange **"Operation is in progress! Please Wait……"** banner
-over the FileList and **ignores all key presses** until the write finalizes. The card `ls`
-sees the final `WaveData<n>.csv` only when the scope renames its temp file at the **END** of
-the write (~40 s for a 512K/7.7 MB file). So: press the two-press Save **once and wait
-patiently** — do **NOT** re-press during the write (extra Save presses corrupt the save and
-advance the Source past CH2 → the "512K skips CH2" bug). Wait for the banner to clear
-(framebuffer `0x20`; `_wait_save_done`) before the next Source cycle, then resync + settle ~2 s
-(the framebuffer grabs need a pause before the next key). This is what "verify state, don't
-blind-wait" means — a slow SD card just makes the banner last longer, and we watch it, not a
-fixed timer.
+Three rules are baked into the DAG (details in §3.0.1): a single-seq stops at **TRIG-STATE 5**
+(not 0) — never toggle Run/Stop after; the save is **async** ("Operation in progress" banner) —
+press Save **once** and wait it out; a Save **leaves the FileList open**, so channels after the
+first need **one** Save press, not two (else a spurious extra file).
 
-**Trigger level matters.** With no level *on* the signal, SINGLE arms forever
-(never crosses) — set `TRIG-VPOS` mid-logic (≈ +1.6 V for 3.3 V logic at 1 V/div).
-`[verified]`
+> **Historical note:** a removed 4K-only fast path read the screen buffer **directly** over
+> `0x02` (freeze + double-read; the `0x02` channel switch is one-deep pipelined, protocol.md §5).
+> The direct read still lives in `_direct_acquire` — used only by the auto-timebase probe above.
 
-**Prerequisite: the SD card must be mounted** (`df /mnt/udisk` → a vfat device, not
-`ubi0:rootfs`). Save is a **silent no-op** with no card, and no `/dsocsv.tmp` is
-written (the save aborts at the USB-disk check). There is no card-free path.
+### 3.0.0 Two GUI buttons
 
-**Two channels (SPI/I²C) — works at every depth incl. 512K `[verified 2026-07-11]`:** save
-CH1 then CH2 from the *same* frozen record. The Source radio order is **CH1→CH2→LA**; a single
-`keyid 1` press advances one step. After a Save the scope is on the CSV page with the FileList
-open; cycle Source **directly (keyid 1), NOT via Back** (Back goes *up* to the S/R base where
-keyid 1 = Ref). The whole sequence, per channel:
+- **① `prepare_capture()`** — slow idempotent SETUP: Default Setup + configure + auto-tb probe.
+  Depth is written while STOPPED (a running-scope depth write reboots it), then the scope is
+  left **running**. Run once (~6 s).
+- **② `capture_prepared()`** — the fast trigger + read-back (the ② DAG above). **Re-pressable**
+  (a fresh record per press, no re-configure). `deep_capture()` = the two back-to-back.
 
-1. two-press Save **once**, then wait for the `WaveData<n>.csv` (patiently — see the async note);
-2. `_wait_save_done` (banner clears) → `resync` + settle ~2 s;
-3. one Source press (CH1→CH2), settle ~1.5 s;
-4. next Save.
+### 3.0.1 The rules the DAG bakes in `[verified 2026-07-11]`
 
-**512K IS dual-channel** — CH1 and CH2 come back as genuinely different records (verified: the
-two files differ in 86 % of samples and decode as SPI). The earlier "512K is single-channel"
-suspicion was wrong; the real bug was the rapid Save re-pressing above. Read-back is **deferred**
-(save all channels first, then read) so a 7.7 MB read doesn't sit between Source cycles.
-`save_sources=None` brings back every enabled channel; the two files are index-aligned.
+- **Reset first (idempotency).** Default Setup (keyid 21) → known state (Source=CH1, CH2 off,
+  4K, default TB); card-safe; confirm via `CONTROL-MENUID == 25`, settle ~1.5 s. A capture then
+  never depends on how the panel was left (the CSV Source isn't in the settings blob).
+- **Single-seq stops at TRIG-STATE 5**, not 0 — the RUN/STOP button goes red at 5.
+  `_STOPPED_STATES = {0,5}`. Misreading 5 as "running" made `_run_stop` toggle it back into RUN
+  (the "512K kept running / only CH1" bug). Wait for state ∈ {0,5}; **never toggle Run/Stop after**.
+- **Trigger level on the signal.** No crossing → single-seq arms forever; set `TRIG-VPOS`
+  mid-logic (≈ +1.6 V for 3.3 V at 1 V/div). Force-Trig (keyid 47) only as a last resort.
+- **The save is async.** After Save an orange **"Operation is in progress"** banner covers the
+  FileList and the scope ignores keys; the WaveData file appears only when the temp is renamed
+  at the END (~40 s for 512K). Press Save **once**, watch the banner (`0x20`, `_wait_save_done`)
+  clear before the next key — never a fixed wait (a slow SD card just lasts longer).
+- **A Save leaves the FileList open.** First channel = **two** Save presses (open + write); every
+  later channel = **one** (write) — two would spawn a spurious extra file (the "3rd waveform").
+- **Source select (deterministic).** Order CH1→CH2→LA (keyid 1 advances one). Cycle **directly,
+  not via Back** (Back goes up to the S/R base where keyid 1 = Ref). `_select_source` reads the
+  radio off the `0x20` framebuffer and presses until it matches → files are CH1, CH2, … correctly
+  labelled (no blind cycling / "CH2 twice"). Read-back is **deferred** (save all, then read) so a
+  7.7 MB read doesn't sit between Source changes.
+- **Needs a mounted SD card** (`df /mnt/udisk` = vfat, not `ubi0:rootfs`). No card → Save is a
+  silent no-op. Saving Source = **LA with the pod off** also writes nothing (a common false
+  "card disturbed"); the `0x11` prep write itself does NOT break card detection.
+- **512K is dual-channel** — CH1/CH2 come back genuinely different (86 % of samples differ, decode
+  as SPI). Delete-after uses the front-panel delete key (keyid 4), **never** shell `rm`.
+- **LA over CSV:** Source=LA exports the 16-channel pod (`#threshold` header → `is_la`); LA forces
+  the record to 4K (deep memory is analog-only).
 
-**Card-detection caveat:** saving Source = **LA while the pod is off** writes no file (the
-earlier "card undetected / no `/dsocsv.tmp`" symptom was often just the Source being parked
-on LA, not the card). A genuinely disturbed card is rarer and a front-panel key press
-re-detects it. The `0x11` prep write did **not** break card detection in testing — deep
-saves succeed straight after it.
+### 3.0.2 Timebase spread — more frames `[verified 2026-07-11]`
 
-**LA over CSV:** the CSV Source selector includes **LA** — Save with Source=LA exports the
-16-channel pod (`#threshold` header → `is_la`). LA forces the record to 4K (deep memory is
-analog-only).
+Deep memory at a fixed timebase = the **same time window** as the screen (≈ `19.2 × TDIV`), just
+more samples (40K over 200 µs/div is still ~5 SPI bytes). For many frames, slow the timebase:
+`deep_dt = 19.2·TDIV/deep_samples` (40K→40064, 512K→400064), so for ~15–25 samples on the finest
+pulse set `TDIV = (pulse/target)·deep_samples/19.2`. `auto_tb=True` probes the pulse at 4K and
+picks it — verified 40K @ 20 kHz SPI: 5 → **101 bytes** (80 ms); 512K → **1012 bytes** (800 ms).
 
 ---
 

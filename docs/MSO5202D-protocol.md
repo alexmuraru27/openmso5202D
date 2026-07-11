@@ -2044,6 +2044,11 @@ is **delete** — never issue it blind (it erases card files). The **Source** se
 means a save can export **CH1, CH2, or the LA pod** — the LA path is a way to get the
 16 digital channels out as a file (the live `02 01 05` read being unusable).
 
+**The Source selector is a menu-only control — it is NOT in the `0x01` settings blob, so
+there is no wire command to read or set it `[verified 2026-07-11]`.** Cycling it changes no
+settings byte; it only advances one step per Source key press (order **CH1→CH2→LA**). There is
+no polled value for its position (how a host tracks it is a tooling concern, not the protocol).
+
 **The save needs the SD card mounted at `/mnt/udisk`.** `[verified 2026-07-10]` With no
 card (`df /mnt/udisk` → `ubi0:rootfs`), pressing Save is a **silent no-op** — **no
 `/dsocsv.tmp` is written** and no file appears (the save aborts at the USB-disk check
