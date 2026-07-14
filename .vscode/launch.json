@@ -11,10 +11,10 @@
             "justMyCode": true
         },
         {
-            "name": "MSO5202D: probe",
+            "name": "MSO5202D: screen picker",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/scripts/mso5202d_probe.py",
+            "program": "${workspaceFolder}/scripts/mso5202d_screenpick.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}/scripts",
             "justMyCode": true
