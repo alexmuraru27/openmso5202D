@@ -17,18 +17,21 @@ Run from scripts/ (like the other tools):
     python3 mso5202d_screenpick.py --save shot.png  # grab, show, and also save that PNG
 
 Mouse:  drag to draw the box; drag its edges/inside to resize/move it.
+Coords: type "x1,y1,x2,y2" in the box at the bottom and press Enter to draw that box on the screen
+        (the reverse of picking — load a box from coordinates to see where it lands).
 Keys:   r = re-grab from scope   s = save a PNG of the current screen   c = clear the box   q = quit
 Both the title/overlay and the console show the current box; the bottom-left readout shows the
 pixel + RGB under the cursor.
 """
 import argparse
+import re
 import sys
 import time
 
 import matplotlib
 matplotlib.use('TkAgg')                     # interactive backend (set before pyplot import)
 import matplotlib.pyplot as plt
-from matplotlib.widgets import RectangleSelector
+from matplotlib.widgets import RectangleSelector, TextBox
 import numpy as np
 
 W, H = 800, 480
@@ -85,10 +88,8 @@ def main():
     im = ax.imshow(state['img'], interpolation='nearest')
     ax.set_xlim(-0.5, W - 0.5); ax.set_ylim(H - 0.5, -0.5)
 
-    HELP = "drag = box   ·   r = re-grab   ·   s = save PNG   ·   c = clear   ·   q = quit"
-    def set_title(extra=""):
-        ax.set_title(f"{title_src}   ·   {HELP}" + (f"\n{extra}" if extra else "\n(no box)"),
-                     fontsize=9)
+    HELP = ("[%s]  drag = box (fills the coord input)   ·   type x1,y1,x2,y2 + Enter = draw box   ·  "
+            " r = re-grab   ·   s = save PNG   ·   c = clear   ·   q = quit" % title_src)
 
     # cursor readout: integer pixel + the RGB at that pixel
     def format_coord(x, y):
@@ -99,29 +100,62 @@ def main():
         return f"x={xi}  y={yi}"
     ax.format_coord = format_coord
 
-    def on_select(eclick, erelease):
-        x1, x2 = sorted((eclick.xdata, erelease.xdata))
-        y1, y2 = sorted((eclick.ydata, erelease.ydata))
-        x1, x2 = int(round(x1)), int(round(x2))
-        y1, y2 = int(round(y1)), int(round(y2))
+    def report_box(ax1, ay1, ax2, ay2):
+        """Clamp+sort a box to pixel ints, store it, and print the paste-ready coords + mean RGB.
+        Shared by the mouse selector and the coordinate input. Returns the normalised
+        (x1, y1, x2, y2)."""
+        x1, x2 = sorted((int(round(ax1)), int(round(ax2))))
+        y1, y2 = sorted((int(round(ay1)), int(round(ay2))))
         x1, x2 = max(0, x1), min(W, x2)
         y1, y2 = max(0, y1), min(H, y2)
         state['box'] = (x1, y1, x2, y2)
         region = state['img'][y1:y2, x1:x2].reshape(-1, 3).astype(float)
         mr, mg, mb = (region.mean(axis=0) if len(region) else (0, 0, 0))
-        line = (f"box  x=[{x1},{x2}]  y=[{y1},{y2}]   (w={x2-x1}, h={y2-y1})   "
-                f"mean RGB=({mr:.0f},{mg:.0f},{mb:.0f})")
-        set_title(line)
-        fig.canvas.draw_idle()
-        # paste-ready console output (matches the code's coord styles)
-        print("\n" + line)
+        print(f"\nbox  x=[{x1},{x2}]  y=[{y1},{y2}]   (w={x2-x1}, h={y2-y1})   "
+              f"mean RGB=({mr:.0f},{mg:.0f},{mb:.0f})")
         print(f"    img[{y1}:{y2}, {x1}:{x2}]      # slice")
         print(f"    x0, x1 = {x1}, {x2}")
         print(f"    y0, y1 = {y1}, {y2}")
         print(f"    region = ({x1}, {y1}, {x2}, {y2})")
+        return x1, y1, x2, y2
+
+    def _set_textbox(s):
+        """Set the coord input's text WITHOUT re-triggering on_text (mute guard)."""
+        state['_mute'] = True
+        try:
+            textbox.set_val(s)
+        finally:
+            state['_mute'] = False
+
+    def on_select(eclick, erelease):
+        x1, y1, x2, y2 = report_box(eclick.xdata, eclick.ydata, erelease.xdata, erelease.ydata)
+        _set_textbox(f"{x1},{y1},{x2},{y2}")            # a drag fills the coord input
 
     selector = RectangleSelector(ax, on_select, useblit=True, button=[1],
                                  minspanx=1, minspany=1, spancoords='data', interactive=True)
+
+    # Coordinate input — bidirectional: a drag fills it (above); typing "x1,y1,x2,y2" + Enter draws
+    # that box on the screen (the reverse of picking).
+    fig.subplots_adjust(bottom=0.13)
+    axbox = fig.add_axes([0.13, 0.035, 0.42, 0.045])
+    textbox = TextBox(axbox, "box  x1,y1,x2,y2 = ", initial="")
+
+    def on_text(text):
+        if state.get('_mute'):                          # this change came from a drag → ignore
+            return
+        nums = [n for n in re.split(r'[,\s]+', text.strip()) if n]
+        try:
+            vals = [int(round(float(n))) for n in nums]
+            if len(vals) != 4:
+                raise ValueError
+        except ValueError:
+            print(f"[coords] need 4 numbers 'x1,y1,x2,y2' — got {text!r}"); return
+        x1, y1, x2, y2 = report_box(vals[0], vals[1], vals[2], vals[3])
+        selector.extents = (x1, x2, y1, y2)             # draw/move the selector box to match
+        selector.set_visible(True)
+        fig.canvas.draw_idle()
+
+    textbox.on_submit(on_text)
 
     def on_key(ev):
         if ev.key == 'r' and sc is not None:
@@ -135,10 +169,9 @@ def main():
             name = a.save or f"scope_{time.strftime('%H%M%S')}.png"
             plt.imsave(name, state['img']); print(f"[+] saved {name}")
         elif ev.key == 'c':
-            state['box'] = None; selector.set_visible(False); set_title(); fig.canvas.draw_idle()
+            state['box'] = None; selector.set_visible(False); _set_textbox(""); fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect('key_press_event', on_key)
-    set_title()
     print(HELP)
     try:
         plt.show()
