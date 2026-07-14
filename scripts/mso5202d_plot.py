@@ -548,26 +548,42 @@ def _grab_fb(sc):
     return None
 
 
-# CSV Source radio rows (y-bands) and the orange-dot x-column — the selected row's radio is
-# filled orange (verified against 0x20 grabs 2026-07-11).
+# CSV Source radio rows (y-bands) and the dot x-column on the 0x20 framebuffer (verified against
+# grabs 2026-07-11). Order = CH1, CH2, LA.
 _SRC_ROW_Y = {0: (58, 72), 1: (80, 94), 2: (102, 116)}
 _SRC_DOT_X = (656, 676)
+# Min extra colour distance the selected dot must have over the two unselected dots' mutual
+# distance to count as a clear selection (else the read is rejected as ambiguous).
+_SRC_MIN_CONTRAST = 15.0
 
 
 def _read_csv_source(sc):
-    """Which CSV Source is selected — 0=CH1, 1=CH2, 2=LA — read off the framebuffer (the
-    selected radio is filled orange). None if unreadable. The CSV menu must be on screen."""
+    """Which CSV Source radio is selected — 0=CH1, 1=CH2, 2=LA — read off the `0x20` framebuffer.
+    **Theme-independent**: instead of matching a fixed accent colour, it compares the three radio
+    dots to each other and picks the **odd one out**. In a radio group the selected dot is filled
+    while the other two are identical hollow rings, so the two unselected dots are the closest pair
+    (by mean colour) and the remaining dot is the selection — whatever the menu/accent colours are
+    (orange, green, inverted, …). Returns None if no dot clearly stands out (menu not on screen /
+    bad grab). The CSV menu must be on screen; dot coords `_SRC_ROW_Y`/`_SRC_DOT_X`."""
     img = _grab_fb(sc)
     if img is None:
         return None
     x0, x1 = _SRC_DOT_X
-    best, bestf = None, 0.03                              # need ≥3 % orange in the dot column
-    for src, (y0, y1) in _SRC_ROW_Y.items():
-        band = img[y0:y1, x0:x1].reshape(-1, 3).astype(int)
-        frac = float(((band[:, 0] > 150) & (band[:, 2] < 110)).mean())
-        if frac > bestf:
-            bestf, best = frac, src
-    return best
+    mean = {src: img[y0:y1, x0:x1].reshape(-1, 3).astype(float).mean(axis=0)
+            for src, (y0, y1) in _SRC_ROW_Y.items()}
+
+    def dist(a, b):
+        return float(np.linalg.norm(mean[a] - mean[b]))
+
+    # The two hollow (unselected) dots look alike → they are the closest-matching pair; the third
+    # dot is the filled/selected one.
+    a, b = min(((0, 1), (0, 2), (1, 2)), key=lambda p: dist(*p))
+    selected = ({0, 1, 2} - {a, b}).pop()
+    # Confidence: the selected dot must sit clearly apart from BOTH unselected dots, i.e. further
+    # than the two unselected dots sit from each other. Otherwise the group looks uniform → reject.
+    if min(dist(selected, a), dist(selected, b)) < dist(a, b) + _SRC_MIN_CONTRAST:
+        return None
+    return selected
 
 
 def _select_source(sc, target, status=lambda m: None, tries=6):
