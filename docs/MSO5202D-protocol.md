@@ -34,6 +34,16 @@ account for **every byte** on the wire.
   binary settings blob, and 8-bit waveform records. Do not use FX2/Cypress
   scope references for it.
 
+### External reference & credit
+
+The community article **"Hantek_Protokoll"** on mikrocontroller.net
+(<https://www.mikrocontroller.net/articles/Hantek_Protokoll>) documents the same `'S'`/`'C'`
+protocol for the sibling **DSO5xxxB** family. It corroborates our framing and key-code list and
+describes the `0x43 0x43` **press/release** key command (release = `keycode | 0x80`), documented and
+**credited to that article** in **§5.8** and **§9.3.1**. On the MSO5202D a key event is a single
+`0x13 <keyid>` inject per frame (the second byte is a don't-care) that drives every softkey,
+including the CSV Source cycle (§9.4).
+
 ### The two command spaces (leaders)
 
 Every frame in either direction begins with a **leader byte** that selects one
@@ -1068,8 +1078,11 @@ Small command selectors, each answered by an **empty ack** `43 02 00 <echo> ck`:
   ```
 - **`0x42`** — parameter setter: `a` byte + a 16-bit LE value. echo `0xc2`. Effect not
   swept. [gap]
-- **`0x43`** — repeat-action command: `a` byte + a repeat `cnt`; runs a begin / repeat×cnt
-  / end sequence. echo `0xc3`. Effect not swept. [gap]
+- **`0x43`** — key event with press and release: `43 <len> 43 <keycode> <cnt> ck`, echo `0xc3`
+  (`43 02 00 c3 ck`). The argument byte is the **keycode**; a **release** is the keycode **OR-ed
+  with `0x80`** (press = `keycode`, release = `keycode | 0x80`), `<cnt>` = repeat count. Softkeys
+  are driven via the `0x13` inject instead (§9.3); this form is credited to the mikrocontroller.net
+  *Hantek_Protokoll* article (DSO5xxxB family). See §9.3.1. `[external — mikrocontroller.net]`
 - **`0x45`** — 16-bit id + an 8-byte payload write. echo `0xc5`. Effect not swept. [gap]
 - **`0x50` / `0x60`** — parameter I/O (manufacturing/debug); argument layout not decoded,
   echo `0xd0` / `0xe0`. [gap]
@@ -1588,7 +1601,7 @@ capture or panel label, not exercised over USB) · `G` = [gap] (function/units u
 
 | field | blk | frm | w | type | units | enum (code → meaning) | range / observed | tag |
 |---|--:|--:|--:|---|---|---|---|:--:|
-| **VERT-CH1-DISP** | 0 | 4 | 1 | u8 | — | 0=hidden 1=shown. **A `0x11` write to this byte is ignored** — it does not enable/disable the channel or light its LED, and the field keeps its prior value. The channel is turned on/off only by the **CH1 button key event `0x13 18 <state>`**: `state=0x01` (press) = channel **ON**, `0x00` (release) = **OFF** — a direct, idempotent on/off, NOT a toggle (so a press+release pair = on-then-off = net off). [verified 2026-07-11] | {0,1} | V |
+| **VERT-CH1-DISP** | 0 | 4 | 1 | u8 | — | 0=hidden 1=shown. **A `0x11` write to this byte is ignored** — it does not enable/disable the channel or light its LED, and the field keeps its prior value. The channel is turned on/off only by the **CH1 button key event `0x13 18 <b>`** (keyid 24), which **toggles** `VERT-CH1-DISP` — each frame flips shown↔hidden (the `<b>` byte is a don't-care). To reach a desired state, read this field and send the key only if it needs to flip. [verified 2026-07-14] | {0,1} | V |
 | **VERT-CH1-VB** | 1 | 5 | 1 | u8 | V/div idx | → `VB_TO_MV` (§8.4) | 0…10 | V |
 | **VERT-CH1-COUP** | 2 | 6 | 1 | u8 | — | 0=DC 1=AC 2=GND | {0,1,2} | V |
 | **VERT-CH1-20MHZ** | 3 | 7 | 1 | u8 | — | 0=Full 1=20 MHz BW-limit | {0,1} | V |
@@ -1928,8 +1941,8 @@ Notes and caveats:
 ### 9.2 `/keyprotocol.inf` — the 49 front-panel keys
 
 `[TOTAL] 49`, one CRLF-terminated name per line between `[START]`/`[END]`. The
-**line index (0-based) is the `keyid`** you send in `0x13 | keyid | state`. The full
-list (byte-exact from the on-device file):
+**line index (0-based) is the `keyid`** you send in `0x13 | keyid | <b>` (the second byte `<b>`
+is a don't-care, §9.3). The full list (byte-exact from the on-device file):
 
 | id | name | meaning |
 |---:|------|---------|
@@ -1950,13 +1963,13 @@ list (byte-exact from the on-device file):
 | 21 | CT-DS-KEY | **Default Setup** (factory reset) |
 | 22 | CT-STU-KEY | Setup ("STU") key |
 | 23 | VT-MATH-MENU-KEY | Math menu |
-| 24 | VT-CH1-MENU-KEY | CH1 menu / on-off — **direct on/off, not a toggle**: press (`13 18 01`) = CH1 **ON**, release (`13 18 00`) = **OFF** (idempotent). A normal press+release tap = on-then-off = net off. The `VERT-CH1-DISP` settings byte (§8) does not track this and is not settable via `0x11`. [verified 2026-07-11] |
+| 24 | VT-CH1-MENU-KEY | CH1 on-off — **toggles** `VERT-CH1-DISP`: each `13 18 <b>` frame flips CH1 shown↔hidden (`<b>` is a don't-care). The `VERT-CH1-DISP` settings byte (§8) tracks the resulting state but is not settable via `0x11`; read it and send the key only when a flip is needed. [verified 2026-07-14] |
 | 25 | VT-CH1-PSUB-KEY | CH1 vertical position − |
 | 26 | VT-CH1-PADD-KEY | CH1 vertical position + |
 | 27 | VT-CH1-PZERO-KEY | CH1 position knob push (`VERT-CH1-POS := 0`) |
 | 28 | VT-CH1-VBSUB-KEY | CH1 V/div − |
 | 29 | VT-CH1-VBADD-KEY | CH1 V/div + |
-| 30 | VT-CH2-MENU-KEY | CH2 menu / on-off — same **direct** press=ON / release=OFF as CH1 (`13 1e 01`=on, `13 1e 00`=off; idempotent). Default Setup baseline = CH1 on, CH2 off. [verified 2026-07-11] |
+| 30 | VT-CH2-MENU-KEY | CH2 on-off — **toggles** `VERT-CH2-DISP` the same way as CH1 (each `13 1e <b>` frame flips shown↔hidden). Default Setup baseline = CH1 on, CH2 off. [verified 2026-07-14] |
 | 31 | VT-CH2-PSUB-KEY | CH2 vertical position − |
 | 32 | VT-CH2-PADD-KEY | CH2 vertical position + |
 | 33 | VT-CH2-PZERO-KEY | CH2 position knob push (`VERT-CH2-POS := 0`) |
@@ -1982,13 +1995,14 @@ Appendix-F control keys exactly. [verified against the on-device file]
 
 ### 9.3 How a `0x13` key press flows — and the single-slot mailbox
 
-Frame form (leader `0x53`): `53 04 00 13 <keyid> <state> <ck>`. Two verified facts
-shape correct use:
+Frame form (leader `0x53`): `53 04 00 13 <keyid> <b> <ck>` (the second byte `<b>` is a
+don't-care — see fact 1). Two verified facts shape correct use:
 
-1. **The `state` byte is not acted on.** Every `0x13` frame injects exactly **one**
-   key press regardless of whether `state` is `00` or `01`. The vendor app always
-   sends `01`, but sending `00` produces the identical single press. Treat `0x13` as
-   an edge, not a level; there is no separate "release" event to send. [verified]
+1. **The second byte is not acted on.** Every `0x13` frame injects exactly **one**
+   key press regardless of the second byte (`00`, `01`, and `02` all inject one event).
+   The vendor app always sends `01`. Treat `0x13` as an edge, not a level; there is no
+   separate "release" event to send, and one frame per intended press drives every softkey
+   (including the CSV Source cycle, §9.4). [verified]
 2. **The pending-key store is a single slot, not a queue.** A `0x13` frame writes
    `keyid` into a one-byte mailbox (idle sentinel = `0xFF`); the device's input loop
    consumes it on its next poll and clears it back to the sentinel. **Two key events
@@ -2011,6 +2025,25 @@ Softkey targeting: to press "the 3rd option in the current menu," open the menu 
 its `MENU-*` key, confirm `CONTROL-MENUID` via a poll (§9.1), then send `FN-2`
 (keyid 2). An option slot that does nothing in a given menu is simply inert (a
 no-op), so a mis-aimed `FN-n` is harmless. [inferred]
+
+### 9.3.1 External reference — the DSO5000-series key protocol (mikrocontroller.net)
+
+The community **"Hantek_Protokoll"** article
+(<https://www.mikrocontroller.net/articles/Hantek_Protokoll>) documents the key/menu protocol of the
+sibling Hantek/Tekway **DSO5xxxB** family (same `'S'`/`'C'` framing). It corroborates the frame format
+(`0x53`/`0x43` leader, LE16 length = framelen−3, `sum & 0xFF` checksum), the softkey codes **F0–F7 =
+`0x00`–`0x07`**, Save/Recall = `0x0B`, and that `/keyprotocol.inf` (fetched via `0x43 0x10`) is the
+authoritative key-name→code list whose 0-based line index is the `keyid`.
+
+It also describes a separate `0x43 0x43` "debug" key command carrying an explicit press and release.
+On the `0x43` command leader, selector `0x43`:
+  - **Press:**   `43 <len_LE16> 43 <keycode>       01 <ck>`
+  - **Release:** `43 <len_LE16> 43 <keycode|0x80>  01 <ck>`  ← release = keycode OR-ed with `0x80`.
+  - Reply: `43 02 00 c3 <ck>` (echo `0x43 | 0x80`).
+
+On the MSO5202D this press/release form is not needed: the plain `0x13` key event (§9.3, one inject
+per frame) drives every softkey and menu control, including the CSV Source cycle (§9.4). `[external —
+mikrocontroller.net]`
 
 ### 9.4 Save / export flows are pure key sequences (no save selector)
 
@@ -2045,9 +2078,12 @@ means a save can export **CH1, CH2, or the LA pod** — the LA path is a way to 
 16 digital channels out as a file (the live `02 01 05` read being unusable).
 
 **The Source selector is a menu-only control — it is NOT in the `0x01` settings blob, so
-there is no wire command to read or set it `[verified 2026-07-11]`.** Cycling it changes no
-settings byte; it only advances one step per Source key press (order **CH1→CH2→LA**). There is
-no polled value for its position (how a host tracks it is a tooling concern, not the protocol).
+there is no wire command to read or set it `[verified 2026-07-11]`.** On the CSV page it is
+`keyid 1`; each `0x13` frame advances it exactly one step, wrapping **CH1→CH2→LA→CH1**. This
+works in **any run-state** (running, stopped, single-seq) and **regardless of which channels are
+enabled** `[verified 2026-07-14]`. Cycling changes no settings byte and there is no polled value
+for its position (a host that must track it reads the `0x20` framebuffer — the selected radio is
+highlighted — which is a tooling concern, not the protocol).
 
 **The save needs the SD card mounted at `/mnt/udisk`.** `[verified 2026-07-10]` With no
 card (`df /mnt/udisk` → `ubi0:rootfs`), pressing Save is a **silent no-op** — **no

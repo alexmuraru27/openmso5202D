@@ -199,15 +199,6 @@ def _default_setup(sc, status=lambda m: None):
     return ok
 
 
-def _key_tap(sc, keyid, hold=0.1):
-    """Tap a front-panel key: press (`0x13 keyid 0x01`), hold ~100 ms, then release (`0x13 keyid
-    0x00`). An instrumented count proved one tap advances the LongMem depth exactly one step — the
-    apparent 'doubling' was never a double key event, it was tapping again before the wave rendered
-    (see `_set_depth_via_keys`) plus an unreliable depth-field readback at deep depths."""
-    sc.transact(bytes([0x13, keyid, 0x01])); time.sleep(hold)
-    sc.transact(bytes([0x13, keyid, 0x00]))
-
-
 def _depth_now(sc):
     """Read ACQURIE-STORE-DEPTH. **Reliable only at 4K/40K** — at 512K/1M the field lies while the
     deep record loads (it reads transient 4K / wrong codes), so the depth-set walk does NOT trust it
@@ -237,11 +228,12 @@ def _set_depth_via_keys(sc, depth_code, status=lambda m: None, timeout=10):
     start it takes exactly the ring distance. Returns True once the field reaches the target. 1M is
     single-channel (the DS baseline CH1-only satisfies that)."""
     from mso5202d import ACQ_DEPTH_NAMES
+    from mso5202d_decode import _key
     if depth_code not in _DEPTH_RING:
         status(f"  depth {depth_code} not on the F5 ring — leaving depth as-is"); return False
-    _key_tap(sc, KEY_ACQUIRE); time.sleep(0.8)             # open Acquire (a normal click opens it)
+    _key(sc, KEY_ACQUIRE); time.sleep(0.8)                 # one press opens Acquire (menuid 17)
     if _menuid(sc) != MENU_ACQUIRE:
-        _key_tap(sc, KEY_ACQUIRE); time.sleep(0.8)         # one retry
+        _key(sc, KEY_ACQUIRE); time.sleep(0.8)             # one retry (single-slot mailbox can drop)
     cur = _depth_now(sc)
     at = _DEPTH_RING.index(cur) if cur in _DEPTH_RING else 0
     edge = 0x01                                            # first F5 edge = press; then alternate
@@ -279,14 +271,13 @@ def _channel_enabled(sc, ch):
 
 
 def _set_channels_via_keys(sc, channels, status=lambda m: None, tries=3):
-    """Enable/disable CH1/CH2 via their front-panel MENU buttons (keyid 24/30). These buttons are
-    **direct, not toggles**: a PRESS event (`0x13 keyid 0x01`) turns the channel **ON**, a RELEASE
-    (`0x13 keyid 0x00`) turns it **OFF** (verified by 4K wave data 2026-07-11 — press+release =
-    on-then-off = net off, which is why a plain tap never enabled a channel). Buttons, not a 0x11
-    `VERT-CHx-DISP` write, so the LED lights *and* the acquisition actually serves the channel.
-    **Closed-loop on 4K wave data** (`_channel_enabled`) — the DISP field is decoupled and useless —
-    with ~1 s settle for the button-to-state latency. Run at 4K, scope running, before the depth
-    walk (1M needs CH2 off first)."""
+    """Enable/disable CH1/CH2 via their front-panel MENU buttons (keyid 24/30). Each button is a
+    **toggle**: one `0x13 keyid` frame flips the channel shown↔hidden (the 2nd byte is a don't-care).
+    Buttons, not a 0x11 `VERT-CHx-DISP` write, so the LED lights *and* the acquisition actually
+    serves the channel. **Closed-loop on 4K wave data** (`_channel_enabled`) — read the state and
+    send the toggle only when it does not match the target, re-checking after each press (~1 s
+    button-to-state latency). Run at 4K, scope running, before the depth walk (1M needs CH2 off
+    first)."""
     keys = {1: KEY_CH1_MENU, 2: KEY_CH2_MENU}
     want = set(channels)
     for n in (1, 2):
@@ -294,7 +285,7 @@ def _set_channels_via_keys(sc, channels, status=lambda m: None, tries=3):
         for _ in range(tries):
             if _channel_enabled(sc, n - 1) == want_on:
                 break
-            sc.transact(bytes([0x13, keys[n], 0x01 if want_on else 0x00]))   # press=on / release=off
+            sc.transact(bytes([0x13, keys[n], 0x01]))      # toggle CHn on/off (one flip per frame)
             time.sleep(1.0)                                # button-to-state latency ~0.5–1 s
         state = _channel_enabled(sc, n - 1)
         status(f"  CH{n} {'on' if want_on else 'off'}"
@@ -581,14 +572,21 @@ def _read_csv_source(sc):
 
 def _select_source(sc, target, status=lambda m: None, tries=6):
     """Cycle the CSV Source to `target` (0/1/2), VERIFYING via the framebuffer after each press
-    (the Source key can drop / the order is CH1→CH2→LA). CSV menu must be on screen. Returns
-    True on success. Resyncs after (the fb grabs need it before the next key)."""
+    (order CH1→CH2→LA, wraps). CSV menu must be on screen. Returns True on success.
+
+    The Source softkey is keyid 1 (`FN_SOURCE`) sent as a plain `0x13` key event — one inject per
+    press cycles the radio one step (verified on hardware 2026-07-14: CH1→CH2→LA→CH1 in every
+    run-state — running, stopped, and single-seq; the `0x13` second byte is ignored by the firmware,
+    it is NOT a press/release, so press-only is a full click). It cycles through all three sources
+    regardless of which channels are enabled. NOTE: reliability needs a HEALTHY link — a desynced
+    scope (mid-reboot / stuck menu from a prior bad sequence) can swallow the key; a clean
+    Default-Setup (see `prepare_capture(reset=True)`) restores it."""
     from mso5202d_decode import _key
     ok = False
     for _ in range(tries):
         if _read_csv_source(sc) == target:
             ok = True; break
-        _key(sc, FN_SOURCE); time.sleep(1.0)             # cycle + settle so it commits
+        _key(sc, FN_SOURCE); time.sleep(1.0)             # one 0x13 keyid-1 inject = one radio step
     sc._resync(); time.sleep(0.4)
     if not ok:
         status(f"couldn't verify Source={_SRC_NAMES[target]}")

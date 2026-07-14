@@ -44,25 +44,20 @@ commands than about *ordering, pacing, and reading state back between steps*.
    `0x11` depth write leaves the on-screen **LongMem radio stale at 4K** (scope moves slower
    yet the menu lies), so walk the visible menu: open Acquire (keyid 13 → `CONTROL-MENUID` 17),
    then step F5 (keyid 5) through the ring `4K→40K→512K→1M→(4K)` (codes 0→4→6→7). **F5 advances
-   one step per key EDGE** — the press (`13 05 01`) *and* the release (`13 05 00`) each advance
-   one step. A normal press+release tap 100 ms apart merges into one click = one step, but if the
-   two edges get **stretched apart in time** (slow USB, a retry, a delayed release) they count as
-   two → that was the old intermittent **depth skip**. So drive it with **single alternating edges**
-   and, after each edge, **poll `ACQURIE-STORE-DEPTH` until it reaches the next step** (self-correct:
-   if an edge no-ops because F5 was already at that level, flip the edge and resend). No render
-   delay — the field settles within ~1–2 s and the poll catches it; whole ring 4K→1M in ~4 s
-   (`_set_depth_via_keys`). From the Default-Setup 4K start it takes exactly the ring distance. 1M
-   is single-channel (DS baseline CH1-only satisfies it). `[verified on-screen 2026-07-11]`
+   one step per `0x13` frame** (one key event per frame; the 2nd byte is a don't-care). Send **one
+   frame per step** and, after each, **poll `ACQURIE-STORE-DEPTH` until it reaches the next step**
+   before sending the next — one frame = one step, so never send a second frame for the same step.
+   No render delay — the field settles within ~1–2 s and the poll catches it; whole ring 4K→1M in
+   ~4 s (`_set_depth_via_keys`). From the Default-Setup 4K start it takes exactly the ring distance.
+   1M is single-channel (DS baseline CH1-only satisfies it). `[verified on-screen 2026-07-11]`
 
 4b. **Turn channels on/off with the CH1/CH2 buttons (keyid 24/30), not a `0x11`
    `VERT-CHx-DISP` write.** The `VERT-CHx-DISP` *field* is **decoupled** — a `0x11` write to it
    changes nothing visible (no LED, no acquisition) and the field reads the Default-Setup
-   baseline regardless. The CH buttons are **direct, not toggles**: the **press** event
-   (`0x13 keyid 0x01`) turns the channel **ON**, the **release** (`0x13 keyid 0x00`) turns it
-   **OFF** — so a normal press+release tap is on-then-off = *net off* and never enables anything.
-   Send a **single edge** (press to enable, release to disable); both are **idempotent** (re-
-   asserting a state is a no-op), so extra edges are harmless. ~0.5–1 s button-to-state latency →
-   settle ~1 s. **Verify with 4K wave data, not the field** (`_channel_enabled`): a disabled
+   baseline regardless. Each CH button is a **toggle**: one `0x13 keyid` frame flips the channel
+   shown↔hidden (the 2nd byte is a don't-care). Drive it closed-loop — read the channel state and
+   send **one** frame only when it does not match the target, re-checking after each press.
+   ~0.5–1 s button-to-state latency → settle ~1 s. **Verify with 4K wave data, not the field** (`_channel_enabled`): a disabled
    channel's `0x02` acquire returns EMPTY, an enabled one returns ~3200 samples (double-read to
    defeat the one-deep `0x02` channel pipeline). Set channels **before** the depth walk — 1M
    needs CH2 off first (`_set_channels_via_keys`). **`TRIG-SRC` is likewise not writable via

@@ -11,11 +11,47 @@ write. File reads return a content frame (subtype 0x01) + an end-marker frame
 Needs a udev rule granting access to 049f:505a to run without root (see
 70-mso5202d.rules); otherwise run as root.
 """
-import struct, time, threading
+import struct, time, threading, os, sys
 import usb.core, usb.util
 
 VID, PID = 0x049F, 0x505A
 EP_OUT, EP_IN = 0x02, 0x81
+
+# --- optional USB-out logging --------------------------------------------------
+# Set env MSO_USB_LOG=1 (stderr) or MSO_USB_LOG=/path/to/file to log every OUT frame
+# the driver writes, decoded. Lets you see exactly what key/command bytes hit the wire.
+_USB_LOG_DEST = os.environ.get('MSO_USB_LOG')
+_usb_log_fh = None
+if _USB_LOG_DEST:
+    _usb_log_fh = sys.stderr if _USB_LOG_DEST in ('1', 'stderr') else open(_USB_LOG_DEST, 'a')
+
+def _decode_out(frame: bytes) -> str:
+    """One-line human decode of an OUT frame for the USB log."""
+    if len(frame) < 4:
+        return frame.hex()
+    leader, sel = frame[0], frame[3]
+    body = frame[3:-1]
+    if leader == 0x53 and sel == 0x13 and len(body) >= 3:
+        return f"0x53 KEY       keyid={body[1]:<3} count={body[2]}   [{frame.hex()}]"
+    if leader == 0x53 and sel == 0x11:
+        return f"0x53 SETTINGS-WRITE ({len(body)}B)                  [{frame[:8].hex()}…]"
+    if leader == 0x53:
+        return f"0x53 sel=0x{sel:02x} ({len(body)}B)                 [{frame[:12].hex()}…]"
+    if leader == 0x43 and sel == 0x43 and len(body) >= 3:
+        kc = body[1]; rel = 'RELEASE' if kc & 0x80 else 'PRESS  '
+        return f"0x43 KEY-{rel} keycode={kc & 0x7f:<3} count={body[2]}   [{frame.hex()}]"
+    if leader == 0x43:
+        return f"0x43 sel=0x{sel:02x} ({len(body)}B)                 [{frame[:16].hex()}…]"
+    return frame.hex()
+
+def log_usb_out(frame: bytes, tag: str = ''):
+    if _usb_log_fh is None:
+        return
+    try:
+        _usb_log_fh.write(f"[{time.strftime('%H:%M:%S')}] OUT {tag}{_decode_out(bytes(frame))}\n")
+        _usb_log_fh.flush()
+    except Exception:
+        pass
 # Transport: the device only replies if a bulk-IN read is already posted when the
 # OUT is written. We start a reader thread, wait until it signals it is about to
 # read (Event), then leave TRANSACT_POST_S for the IN URB to actually reach the
@@ -110,8 +146,10 @@ class Scope:
         t = threading.Thread(target=reader, daemon=True); t.start()
         posted.wait(0.5)                                  # reader is up and about to read
         time.sleep(TRANSACT_POST_S)                       # margin for the IN URB to post
+        frame = build(payload)
+        log_usb_out(frame)
         try:
-            self.dev.write(EP_OUT, build(payload), timeout=2000)
+            self.dev.write(EP_OUT, frame, timeout=2000)
         except usb.core.USBError as e:
             out.setdefault('e', e)
         t.join(timeout / 1000 + 1.5)                      # reader has finished by now
