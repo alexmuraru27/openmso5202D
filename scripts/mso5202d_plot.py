@@ -630,6 +630,36 @@ def clear_wavedata(sc, status=lambda m: None):
         sh.close()
 
 
+def download_wavedata(sc, dest, status=lambda m: None):
+    """Copy every `WaveData*.csv` off the SD card into the local directory `dest`, reading each
+    file back over USB (file-read selector `0x10`). Read-only on the scope — it lists the card
+    (`ls`) and reads files; it never deletes or modifies anything (use `clear_wavedata` for that).
+    Opens its own shell for the read-only listing. Returns the list of saved local paths."""
+    import os
+    from mso5202d_shell import Shell
+    sh = Shell(scope=sc)
+    saved = []
+    try:
+        names = _list_wavedata(sh)
+        if not names:
+            status("card has no WaveData CSVs to download"); return saved
+        os.makedirs(dest, exist_ok=True)
+        status(f"downloading {len(names)} CSV(s) to {dest}…")
+        for i, name in enumerate(names, 1):
+            try:
+                data = sc.read_file('/mnt/udisk/' + name, timeout=120000)
+            except Exception as e:
+                status(f"  {name}: read failed ({e})"); sc._resync(); continue
+            with open(os.path.join(dest, name), 'wb') as f:
+                f.write(data)
+            saved.append(os.path.join(dest, name))
+            status(f"  {name} → {len(data) // 1024} KB ({i}/{len(names)})")
+    finally:
+        sh.close()
+    status(f"downloaded {len(saved)} file(s) to {dest}")
+    return saved
+
+
 def _direct_acquire(sc, channels, status=lambda m: None):
     """Read each analog channel (0=CH1, 1=CH2) DIRECTLY from the one frozen buffer over
     `0x02 01 <ch>` — the two reads hit the same stopped acquisition so CH1/CH2 are
@@ -1105,6 +1135,12 @@ class CaptureWorker(threading.Thread):
             self._status("no scope connected"); return
         clear_wavedata(self.sc, status=self._status)
 
+    def _cmd_download(self, kw):
+        if not self.sc:
+            self._status("no scope connected"); return
+        saved = download_wavedata(self.sc, kw['dest'], status=self._status)
+        self._emit('downloaded', saved)
+
     def _cmd_decode(self, kw):
         ev, dt, used = decode_capture(kw['results'], kw['params'])
         proto = kw['params'].get('proto', 'none')
@@ -1185,11 +1221,9 @@ class DecoderApp:
         depth_cb = ttk.Combobox(g, textvariable=self.v_depth, state='readonly',
                                 values=[d[0] for d in DEEP_DEPTHS], width=12)
         depth_cb.pack(fill=tk.X)
-        # Changing the depth/reset invalidates the prepared state → must Prepare again.
+        # Changing the depth invalidates the prepared state → must Prepare again.
         depth_cb.bind('<<ComboboxSelected>>', lambda e: self._set_prepared(False))
-        self.v_reset = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g, text="reset scope first (idempotent)", variable=self.v_reset,
-                        command=lambda: self._set_prepared(False)).pack(anchor='w')
+        # Prepare ALWAYS does a Default Setup first (idempotent, card-safe) — no user toggle.
         # Which channels to prepare + capture (on, 1×, DC, 1 V/div). Untick to leave a channel off.
         self.v_setup = tk.BooleanVar(value=True)          # configure channels at all (kept for API)
         ttk.Label(g, text="prepare channels (on, 1×, DC, 1 V/div):").pack(anchor='w')
@@ -1235,6 +1269,7 @@ class DecoderApp:
 
         g = group("Output")
         btn(g, "Save PNG…", self._save_png)
+        btn(g, "Download card CSVs", self._download_card)
         btn(g, "Clear card CSVs", self._clear_card)
 
     def _build_statusbar(self):
@@ -1289,7 +1324,7 @@ class DecoderApp:
         # auto_tb (deep only): spread the record over more time when decoding a protocol so
         # there are many frames to scroll through, instead of the same ~4 ms window as 4K.
         self.worker.submit('prepare', depth_code=code, setup=self.v_setup.get(), channels=channels,
-                           reset=self.v_reset.get(),
+                           reset=True,      # Prepare always Default-Setups first (idempotent, card-safe)
                            auto_tb=(code != 0 and self.v_proto.get() != 'none'))
 
     def _do_capture(self):
@@ -1348,6 +1383,14 @@ class DecoderApp:
         if messagebox.askokcancel("Clear card", "Delete ALL WaveData*.csv from the SD card?\n"
                                   "(front-panel delete — make sure you've read back what you need)"):
             self.status.set("clearing card…"); self.worker.submit('clear')
+
+    def _download_card(self):
+        from tkinter import filedialog
+        if not self.scope_present:
+            self.status.set("no scope connected"); return
+        dest = filedialog.askdirectory(title="Download card CSVs to…")
+        if dest:
+            self.status.set("downloading card CSVs…"); self.worker.submit('download', dest=dest)
 
     def _set_busy(self, busy):
         st = 'disabled' if busy else 'normal'
@@ -1432,6 +1475,10 @@ class DecoderApp:
                 elif kind == 'decode':
                     self.events = payload['events']; self.dt = payload['dt']; self.proto = payload['proto']
                     self._update_decode()
+                elif kind == 'downloaded':
+                    n = len(payload or [])
+                    self.status.set(f"downloaded {n} CSV(s) from card" if n
+                                    else "no CSVs on the card to download")
         except queue.Empty:
             pass
 
