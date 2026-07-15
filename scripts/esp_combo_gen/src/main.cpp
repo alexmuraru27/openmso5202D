@@ -225,12 +225,19 @@ static void i2cUnit()
     sdaSet(1); // STOP
 }
 
-// Idle gap between transmit units: ~30 bit-times (so the decoder can reframe),
-// floored at 200us. bit_us = 1e6/freq.
+// Idle gap between transmit units, in framed mode. A FIXED number of bit-times
+// (GAP_BITS) so the active/idle duty is frequency-independent: unambiguously
+// longer than one bit (so the serial decoders reframe on it) yet short enough
+// that the capture window stays mostly *active*. A fixed absolute floor (the old
+// 200 us) is wrong — at 1 MHz it buried an 8 us byte under 200 us of idle (96%
+// idle), so the auto-threshold's 95th-percentile "high rail" fell into the idle
+// noise band and the decoders mis-framed. Small us floor only so a very fast rate
+// still leaves a resolvable gap. bit_us = 1e6/freq.
+static const double GAP_BITS = 16.0;
 static uint32_t computeGapUs(uint32_t freq)
 {
-    uint32_t g = (uint32_t)(30.0 * 1e6 / (double)freq);
-    return g < 200 ? 200 : g;
+    uint32_t g = (uint32_t)(GAP_BITS * 1e6 / (double)freq + 0.5);
+    return g < 4 ? 4 : g;
 }
 
 static void applyFreqInternal()

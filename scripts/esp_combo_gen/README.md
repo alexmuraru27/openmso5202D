@@ -59,8 +59,12 @@ single JSON line**, so it is easy to script; boot-banner lines are plain text.
 **Continuous vs framed.** Each transmit "unit" sends `burst` ramp bytes in **one
 transaction** (SPI: a single `beginTransaction`/`endTransaction`; UART: one write
 with no per-byte flush; I²C: one `START…STOP`), then idles for `gap` µs. So:
-- `mode single` (default) = `burst 1`, auto gap (~30 bit-times) — **framed** bytes
-  with idle gaps the serial decoders use to reframe. I²C's framed default is 4 B.
+- `mode single` (default) = `burst 1`, auto gap = a **fixed ~16 bit-times** (scales
+  with the frequency, floored at 4 µs) — **framed** bytes with idle gaps the serial
+  decoders use to reframe. I²C's framed default is 4 B. (The gap is a fixed count of
+  *bit-times*, not a fixed µs value: a former 200 µs floor buried an 8 µs byte under
+  96 % idle at 1 MHz, so the auto-threshold's high rail fell into the idle noise and
+  decodes failed — the proportional gap keeps the window mostly active at any rate.)
 - `mode continuous` = `burst 64`, `gap 0` — a **solid, near-gapless stream** for
   looking at the waveform. Verified on hardware: at 500 kHz SPI this lifts the
   record's edge activity from ~3% (framed) to ~39% (continuous).

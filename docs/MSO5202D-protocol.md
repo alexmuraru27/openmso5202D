@@ -653,9 +653,20 @@ sum of all 911 360 file bytes. [verified]
 ### `0x11` — Write settings
 
 The inverse of `0x01`: writes the whole 213-byte settings block back to the
-device. It is the primary control primitive — do a **read-modify-write**: poll
-with `0x01`, decode, change the field(s) you want, re-encode, write with `0x11`.
-Any field in the datasheet (§8) is settable this way.
+device. Any field in the datasheet (§8) can be set this way with a
+**read-modify-write** (poll `0x01`, decode, change fields, re-encode, write `0x11`).
+
+**A `0x11` write sets the field but does NOT run the front-panel key handler's
+side-effects** — the channel LED, the on-screen radios (LongMem depth, CSV Source),
+the acquisition reconfiguration, and (empirically) SD-card detection. Consequences
+[verified]: a `VERT-CHx-DISP` write flips the field without lighting the LED or
+serving the channel; a depth write leaves the on-screen LongMem radio stale at 4K
+and **reboots a running scope**; and configuring a capture by `0x11` was associated
+with Save→CSV writing no file and with reboots. **The robust control path is
+front-panel keys** (`0x13`) — every knob has ± key ids (§9.2), so a driver can set
+V/div, SEC/DIV, trigger level, channels and depth by key and only ever *read*
+settings memory. Treat `0x11` as a field poke whose GUI/hardware side-effects may
+not follow, not as a full "set control" primitive. `[verified 2026-07-15]`
 
 **A write makes the scope busy ~3.4 s [verified 2026-07-11].** Reapplying the whole
 block reconfigures channels/trigger/depth, and the device does not answer the *next*
@@ -1992,6 +2003,20 @@ is a don't-care, §9.3). The full list (byte-exact from the on-device file):
 `FN-0..7` are the eight bezel option keys (which softkey is which depends on the
 currently-open menu, §9.1). The five bold ids (17/19/21/46/47) match the earlier
 Appendix-F control keys exactly. [verified against the on-device file]
+
+**Driving the knobs to set values.** The ± knob keys (V/div 28/29 & 34/35, SEC/DIV
+40/41, position 25/26 & 31/32, trigger level 43/44) each step the value one notch;
+inject one, poll the resulting field over `0x01`, repeat until the read-back reaches
+the target (V/div → `CHn-VDIV-mV`, SEC/DIV → `SAMPLE-INTERVAL-ns`×200, level →
+`TRIG-VPOS`). This closed loop is how a driver sets controls **without** an `0x11`
+write (§4 `0x11` — a raw field write skips key side-effects). Two verified quirks
+[2026-07-15]: **SEC/DIV 40/41 are inverted** vs their SUB/ADD names on this firmware
+(40 = faster, 41 = slower) — drive by read-back, not by the label; and **Set-50 %
+(id 46) is a no-op over USB injection** — it does not move `TRIG-VPOS` even with the
+scope running and TRIG'D, though the *physical* key works. The trigger level does not
+need setting for a ground-referenced logic signal anyway: with channel POS = 0 the
+3.3 V signal's low rail sits at 0 V = screen centre, so the DS-default `TRIG-VPOS` 0
+already triggers it. `push` ids (27/33 position, 45 trigger level) zero their axis.
 
 ### 9.3 How a `0x13` key press flows — and the single-slot mailbox
 

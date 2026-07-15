@@ -132,17 +132,30 @@ bulk-USB frames — leader `0x53` unless noted; the IN payload echoes `selector 
 | file read | `10 <path>` | `90` multi-frame | pull a WaveData CSV back (~800 KB/s) |
 | shell `ls` | `0x43 11 "ls …"` | `0x91` + stdout | list `/mnt/udisk` (read-only) |
 
-### ① `prepare_capture()` — slow, once
+### ① `prepare_capture()` — slow, once — **KEY-ONLY (settings memory is READ-only)**
+Every step is a front-panel key; the settings block is only *read* (`01`→`81`) to verify. No
+`0x11` config write — a `0x11` sets the field but skips the key handler's side-effects (LED,
+on-screen radios, acquisition reconfig, SD-card detection), so config-by-`0x11` is what broke
+Save→CSV and rebooted the scope. The scope stays RUNNING throughout (only the capture stops it).
 ```
-Default Setup ....... OUT 13 21 01                     idempotent known state (Source=CH1)
-[auto_tb] probe ..... freeze + 02 01 0 / 02 01 1       measure finest pulse → pick TDIV
-STOP ................ OUT 13 19 · poll 01→81           TRIG-STATE→{0,5}   (depth change needs STOP)
-configure ........... OUT 11 +213B → 91                channels/trigger/timebase (skip if unchanged)
-set depth (F5) ...... OUT 13 13 (open Acquire, menuid 17) · OUT 13 05 01/00 · poll 01→81
-                                                       cycle LongMem 4K→40K→512K→1M until depth==target
-confirm depth ....... 01→81   (re-prep if wrong)
-RUN ................. OUT 13 19                         leave it live (running)
+Default Setup ....... OUT 13 21 01 · poll 01→81 MENUID==25     idempotent known state, all side-effects
+channels on ......... OUT 13 18 (CH1) / 13 1e (CH2) · verify    CH buttons (LED + acquisition correct)
+                       via 4K wave-data
+V/div → 1 V ......... OUT 13 1d/1c (CH1 ±) 23/22 (CH2 ±)        off the 100 mV DS DEFAULT — a 3.3 V
+                       · poll CHn-VDIV-mV until 1000            signal at 100 mV/div is 33 div (clipped!)
+set depth (F5) ...... OUT 13 0d (open Acquire 17) · OUT 13 05   cycle LongMem 4K→40K→512K→1M until depth
+                       · poll 01→81 until depth==target
+SEC/DIV ............. OUT 13 28/29 · poll ns/div (=SI×200)      step to target; known rate → compute it,
+                                                               else auto-probe. ±labels are INVERTED
+trigger level ....... left at TRIG-VPOS 0 (DS default)          0 V already triggers a 3.3 V CMOS signal
+                                                               (its low rail = 0 V = screen centre)
+                                                               → leaves scope RUNNING, ready
 ```
+Knob key ids used (keyprotocol.inf §9.2): CH1 V/div −/+ = `1c`/`1d` (28/29), CH2 = `22`/`23`
+(34/35), SEC/DIV = `28`/`29` (40/41, slower/faster **inverted** — resolve from the read-back),
+trigger level −/+/push = `2b`/`2c`/`2d` (43/44/45). Set-50% = `2e` (46) is a **no-op over USB
+injection** (works on the physical key) — not used. The ONE remaining `0x11` is the LA-pod
+enable (`LA-SWI`, no mapped key yet).
 
 ### ② `capture_prepared()` — fast, re-pressable
 ```
@@ -168,9 +181,9 @@ first need **one** Save press, not two (else a spurious extra file).
 
 ### 3.0.0 Two GUI buttons
 
-- **① `prepare_capture()`** — slow idempotent SETUP: Default Setup + configure + auto-tb probe.
-  Depth is written while STOPPED (a running-scope depth write reboots it), then the scope is
-  left **running**. Run once (~6 s).
+- **① `prepare_capture()`** — slow idempotent SETUP, **all via key presses** (no `0x11`): Default
+  Setup → channels on → V/div → depth (F5) → SEC/DIV. Everything is set by stepping a knob key and
+  polling the read-back; the scope stays **running** throughout. Run once (~15 s).
 - **② `capture_prepared()`** — the fast trigger + read-back (the ② DAG above). **Re-pressable**
   (a fresh record per press, no re-configure). `deep_capture()` = the two back-to-back.
 
@@ -182,8 +195,16 @@ first need **one** Save press, not two (else a spurious extra file).
 - **Single-seq stops at TRIG-STATE 5**, not 0 — the RUN/STOP button goes red at 5.
   `_STOPPED_STATES = {0,5}`. Misreading 5 as "running" made `_run_stop` toggle it back into RUN
   (the "512K kept running / only CH1" bug). Wait for state ∈ {0,5}; **never toggle Run/Stop after**.
-- **Trigger level on the signal.** No crossing → single-seq arms forever; set `TRIG-VPOS`
-  mid-logic (≈ +1.6 V for 3.3 V at 1 V/div). Force-Trig (keyid 47) only as a last resort.
+- **V/div — raise it off the DS default.** Default Setup leaves **100 mV/div**, at which a 3.3 V
+  logic signal is 33 divisions tall = **clipped off-screen** (Set-50% then can't measure it, and
+  the decode is garbage). Step each enabled channel's V/div ± key (CH1 `1c`/`1d`, CH2 `22`/`23`)
+  to **1 V/div**, closed-loop on `CHn-VDIV-mV`. The channel must be ON first (the V/div key is a
+  no-op on a hidden channel). `[verified 2026-07-15]`
+- **Trigger level: the DS default (TRIG-VPOS 0) already triggers.** A 3.3 V CMOS signal with
+  channel POS = 0 sits from 0 V (low = screen centre) to +3.3 div, so its rising edges cross the
+  0 V level — the scope reads TRIG'D at VPOS 0. No level-setting needed. For a *specific* level,
+  step the ± keys (`2b`/`2c`); **Set-50% (`2e`) is a no-op over USB injection** (works on the
+  physical key only). Force-Trig (keyid 47) is the last resort. `[verified 2026-07-15]`
 - **The save is async.** After Save an orange **"Operation is in progress"** banner covers the
   FileList and the scope ignores keys; the WaveData file appears only when the temp is renamed
   at the END (~40 s for 512K). Press Save **once**, watch the banner (`0x20`, `_wait_save_done`)
@@ -197,14 +218,17 @@ first need **one** Save press, not two (else a spurious extra file).
   7.7 MB read doesn't sit between Source changes.
 - **Needs a mounted SD card** (`df /mnt/udisk` = vfat, not `ubi0:rootfs`). No card → Save is a
   silent no-op. Saving Source = **LA with the pod off** also writes nothing (a common false
-  "card disturbed"); the `0x11` prep write itself does NOT break card detection.
+  "card disturbed"). **Configuring by `0x11` instead of keys was associated with Save→CSV writing
+  no file and with reboots; the fully key-only prepare (above) saves reliably.** A `0x11` field
+  write does not run the key handler's side-effects (LED / on-screen radio verified; card
+  detection empirically), so drive config by key and only *read* settings memory. `[2026-07-15]`
 - **512K is dual-channel** — CH1/CH2 come back genuinely different (86 % of samples differ, decode
   as SPI). Delete-after uses the front-panel delete key (keyid 4), **never** shell `rm`.
-- **End-of-capture cleanup — order matters.** Leave the scope live + clean: **resume RUN first**,
-  then hide the menu (Back + `CONTROL-DISP-MENU = 0` via `0x11`). That `0x11` write **crash-reboots
-  while STOPPED** (single-seq state 5) but is safe **while RUNNING** (verified 2026-07-11) — a
-  reboot here would reset the scope and disturb the SD card. (There is no USB key event that hides
-  the menu; keyid 0 / FN-0 does not.)
+- **End-of-capture cleanup.** Leave the scope live + clean: **resume RUN first** (from the
+  single-seq STOP), then press **Back** (keyid 6) to close the FileList. Key-only — the side menu
+  staying visible is cosmetic and the next capture's Default Setup clears it, so there is no need
+  to write `CONTROL-DISP-MENU = 0` (the old `0x11` menu-hide, now dropped along with every other
+  config write).
 - **LA over CSV:** Source=LA exports the 16-channel pod (`#threshold` header → `is_la`); LA forces
   the record to 4K (deep memory is analog-only).
 

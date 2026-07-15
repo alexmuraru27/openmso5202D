@@ -55,6 +55,15 @@ def _schmitt_auto(sig, frac=0.5, hysteresis=0.3):
     if not len(sig):
         return np.zeros(0, dtype=bool)
     lo, hi = np.percentile(sig, 5), np.percentile(sig, 95)
+    # Sparse/bursty signals (e.g. a framed serial line that is idle most of the record — high
+    # bit rate with a long gap) sit at ONE rail for >90 % of samples, so the 95th percentile
+    # falls in the idle band, not on the active rail, and the threshold lands in the idle noise
+    # → the whole record decodes to garbage. Detect that (the 5–95 % swing is a small fraction
+    # of the full glitch-robust range) and use the full range so the threshold sits between the
+    # two real logic levels. [verified 2026-07-15: this is what makes 20 MHz framed SPI decode.]
+    full_lo, full_hi = np.percentile(sig, 0.1), np.percentile(sig, 99.9)
+    if (hi - lo) < 0.5 * (full_hi - full_lo):
+        lo, hi = full_lo, full_hi
     if hi - lo < 1e-12:                   # flat line — no signal
         return np.zeros(len(sig), dtype=bool)
     mid = lo + (hi - lo) * frac

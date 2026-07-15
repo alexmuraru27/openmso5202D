@@ -103,8 +103,153 @@ DEEP_DEPTHS = [('4K', 0), ('40K', 4), ('512K', 6), ('1M (1-ch)', 7)]
 # advances one step per key EDGE (press and release each advance) — driven via single alternating
 # edges + poll-until-change in `_set_depth_via_keys`, no render delay needed.
 _DEPTH_RING = [0, 4, 6, 7]
-# 2-byte signed settings fields we write in the prep block (little-endian, signed).
+# 2-byte signed settings fields (little-endian, signed) — read-only now; kept for LA prep.
 _POS_SIGNED = {'VERT-CH1-POS', 'VERT-CH2-POS', 'TRIG-VPOS'}
+
+# --- knob controls via KEY PRESSES (no 0x11 settings writes) -------------------------
+# Every knob has ± key ids (keyprotocol.inf §9.2), so the whole capture is driven by keys and
+# the settings block is only ever READ (0x01) to verify. Why this matters: a 0x11 block write
+# flips the settings *field* but SKIPS the firmware side-effects a real key runs — the LED, the
+# on-screen radios, the acquisition reconfig, and (the one that broke saves) SD-CARD DETECTION.
+# A 0x11 write leaves the card undetected → Save→CSV writes no file, and it reboots the scope.
+# So: memory is read-only; ALL changes go through keys. [verified 2026-07-15]
+KEY_CH_VDIV_DN = {1: 28, 2: 34}   # CHn V/div −   (VT-CHn-VBSUB-KEY)
+KEY_CH_VDIV_UP = {1: 29, 2: 35}   # CHn V/div +   (VT-CHn-VBADD-KEY)
+KEY_SECDIV = (40, 41)             # SEC/DIV pair (HZ-TBSUB/HZ-TBADD) — which is slower vs faster
+                                  #   is resolved from the read-back (the +/- labels in
+                                  #   keyprotocol.inf are inverted on this firmware [verified])
+
+
+def _tdiv_ns(sc):
+    """Current SEC/DIV in ns/div = SAMPLE-INTERVAL-ns × 200 (200 samples/div). Read-only."""
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    try:
+        si = decode_settings(_raw_settings(sc)).get('SAMPLE-INTERVAL-ns')
+        return si * 200 if si else None
+    except Exception:
+        return None
+
+
+def _vdiv_mv(sc, ch):
+    """Current CHn V/div in mV. Read-only."""
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    try:
+        return decode_settings(_raw_settings(sc)).get(f'CH{ch}-VDIV-mV')
+    except Exception:
+        return None
+
+
+def _step_key(sc, read, target, key_up, key_down, rel_tol, max_steps=16, settle=0.6):
+    """Press key_up (when read() < target) / key_down (when read() > target) until read() lands
+    within a *multiplicative* rel_tol of target (V/div & SEC/DIV move in 1-2-5 jumps). Closed-
+    loop on the read-back, so the ± key direction is never assumed."""
+    from mso5202d_decode import _key
+    for _ in range(max_steps):
+        cur = read()
+        if cur is None:
+            time.sleep(0.3); continue
+        if target / (1 + rel_tol) <= cur <= target * (1 + rel_tol):
+            return cur
+        _key(sc, key_up if cur < target else key_down)
+        time.sleep(settle)
+    return read()
+
+
+KEY_CH_MENU = {1: 24, 2: 30}      # CH button: opens the CHn menu (also toggles on/off)
+_CH_MENUID = {1: 1, 2: 2}         # CONTROL-MENUID when the CHn menu is open
+FN_PROBE = 4                      # CH-menu softkey that CYCLES probe atten 1×→10×→100×→1000×→1×
+
+
+def _probe_code(sc, ch):
+    """CHn probe attenuation code (0=1×,1=10×,2=100×,3=1000×). Read-only."""
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    try:
+        return decode_settings(_raw_settings(sc)).get(f'VERT-CH{ch}-PROBE')
+    except Exception:
+        return None
+
+
+def _set_probe_via_keys(sc, ch, target=0, status=lambda m: None):
+    """Set CHn probe attenuation to `target` (0 = 1×) by opening the CHn menu and cycling its
+    probe softkey (FN-4), closed-loop on VERT-CHn-PROBE. **Default Setup leaves probe at 10×**,
+    so a direct-wired 3.3 V signal reads as 33 V = 33 divisions at 1 V/div = clipped off-screen;
+    this must run (before V/div) to bring the trace back on-screen at the true scale. FN-4 is the
+    probe key ONLY while the CH menu is open (softkey meaning is menu-dependent), so open it first."""
+    from mso5202d import VERT_PROBE_NAMES
+    from mso5202d_decode import _key
+    if not _press_for_menu(sc, KEY_CH_MENU[ch], _CH_MENUID[ch], status):
+        status(f"  couldn't open CH{ch} menu — probe left as-is"); return
+    for _ in range(5):
+        if _probe_code(sc, ch) == target:
+            break
+        _key(sc, FN_PROBE); time.sleep(0.7)
+    status(f"  CH{ch} probe {VERT_PROBE_NAMES.get(_probe_code(sc, ch), '?')}")
+
+
+KEY_TRIG_DN, KEY_TRIG_UP = 43, 44   # trigger level −/+
+
+
+def _trig_vpos(sc):
+    from mso5202d import decode_settings
+    from mso5202d_decode import _raw_settings
+    try:
+        return decode_settings(_raw_settings(sc)).get('TRIG-VPOS')
+    except Exception:
+        return None
+
+
+def _set_trig_level_via_keys(sc, target_vpos=13, status=lambda m: None):
+    """Step the trigger level onto the signal via the ± keys, closed-loop on TRIG-VPOS. Default
+    ≈ +13 (≈ 0.5 V at 1 V/div) — ABOVE the idle baseline so a **framed/bursty** signal (idle at
+    0 V, brief bursts to 3.3 V) triggers on a real burst, not on the idle-noise 0 V crossings.
+    (At 0 V the single-seq can latch an idle window.) 1/25-div units; level_V = VPOS·Vdiv/25."""
+    from mso5202d_decode import _key
+    for _ in range(30):
+        v = _trig_vpos(sc)
+        if v is not None and abs(v - target_vpos) <= 2:
+            break
+        _key(sc, KEY_TRIG_UP if (v or 0) < target_vpos else KEY_TRIG_DN)
+        time.sleep(0.4)
+    v = _trig_vpos(sc)
+    status(f"  trigger level VPOS={v} (~{(v or 0) * 0.04:.2f} V at 1 V/div)")
+
+
+def _set_vdiv_via_keys(sc, ch, target_mv, status=lambda m: None):
+    """Set CHn V/div to target_mv (1000 = 1 V/div) by stepping the CHn V/div ± keys, closed-loop
+    on CHn-VDIV-mV. Default Setup leaves 100 mV/div, at which a 3.3 V logic signal is 33 divisions
+    tall (clipped off-screen) — so this MUST run to bring the trace on-screen. The channel must be
+    ON first (its V/div key is a no-op while the channel is hidden)."""
+    got = _step_key(sc, lambda: _vdiv_mv(sc, ch), target_mv,
+                    KEY_CH_VDIV_UP[ch], KEY_CH_VDIV_DN[ch], 0.0)
+    status(f"  CH{ch} V/div {got} mV" + ("" if got == target_mv else f" (target {target_mv})"))
+
+
+def _set_timebase_via_keys(sc, target_tdiv_ns, status=lambda m: None):
+    """Set SEC/DIV to ~target_tdiv_ns by stepping the SEC/DIV keys, closed-loop on the read-back
+    ns/div. Resolves which of the two keys is slower/faster by probing one press."""
+    from mso5202d_decode import _key
+    a, b = KEY_SECDIV
+    before = _tdiv_ns(sc)
+    _key(sc, a); time.sleep(0.6)
+    after = _tdiv_ns(sc)
+    up, dn = (a, b) if (before and after and after > before) else (b, a)
+    got = _step_key(sc, lambda: _tdiv_ns(sc), target_tdiv_ns, up, dn, 0.35)
+    status(f"  SEC/DIV {got} ns/div" + (f" (target ~{int(target_tdiv_ns)})" if got else ""))
+
+
+def _pick_deep_tdiv_ns(pulse_ns, deep_samples, target_samples=15):
+    """Target SEC/DIV (ns/div) so the DEEP record puts ~target_samples on the finest pulse:
+    deep_dt = 19.2·TDIV/deep_samples; deep_dt = pulse/target → TDIV = (pulse/target)·deep/19.2."""
+    return (pulse_ns / target_samples) * deep_samples / 19.2
+
+
+def deep_tdiv_for_bit(bit_ns, deep_samples=40064, target_samples=18):
+    """Target SEC/DIV (ns/div) for a KNOWN bit period (a caller that set the generator knows the
+    rate), so the deep record puts ~target_samples per bit — no signal probe needed."""
+    return bit_ns * deep_samples / (19.2 * target_samples)
 
 
 def _wavedata_num(name):
@@ -329,64 +474,71 @@ def _run_stop(sc, want_run, tries=8):
 
 
 def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
-                    reset=True, auto_tb=False):
-    """**Prepare** the scope for capture — the slow, idempotent SETUP half (run once). The scope
-    stays **RUNNING the whole time** — we never stop it here; the only stop is the capture
-    single-seq. Default Setup (if `reset`) → a known state (CSV Source = CH1, depth 4K) →
-    configure channels + trigger + timebase (one 0x11 write, depth byte left alone so it can't
-    reboot a running scope) → set the store depth by walking the Acquire-menu F5 softkey (which
-    the scope handles cleanly while running, and which updates the on-screen LongMem radio too).
-    `auto_tb` (deep only) briefly freezes the live signal at 4K to measure it and pick a slower
-    timebase (more bit-periods per deep record), then resumes running. Leaves the scope running
-    and ready; call `capture_prepared()` (or press Capture). Returns the chosen tb_idx (or None)."""
-    from mso5202d import ACQ_DEPTH_NAMES, TB_TO_NS
+                    reset=True, auto_tb=False, tb_target_ns=None):
+    """**Prepare** the scope for capture — the idempotent SETUP half (run once). **KEY-ONLY: no
+    0x11 settings writes.** The settings block is only READ (0x01) to verify each step; every
+    change is a front-panel key, so the firmware runs the real side-effects (LED, on-screen radios,
+    acquisition reconfig, and SD-CARD DETECTION — a 0x11 write skips those and breaks Save→CSV /
+    reboots the scope). The scope stays RUNNING throughout (the only stop is the capture single-seq).
+
+    Sequence (all keys): Default Setup (if `reset`) → known state (1× probe, DC, invert off,
+    Edge/CH1/Auto, TRIG-VPOS 0 which already triggers a 3.3 V signal, CH1 on, 100 mV/div, 4K) →
+    turn the wanted channels on (CH buttons) → raise each channel's V/div to 1 V (V/div ± keys, off
+    the clipped 100 mV default) → set the store depth (Acquire F5 walk) → set SEC/DIV (± keys) from
+    an explicit `tb_target_ns` (a caller that set the generator knows the rate) or an `auto_tb`
+    signal probe. Leaves the scope running/ready; call `capture_prepared()`. Returns None."""
+    from mso5202d import ACQ_DEPTH_NAMES
     if reset:
-        _default_setup(sc, status)                     # known state → idempotent capture (4K)
-    tb_idx = None
-    if auto_tb and depth_code != 0 and not la:
-        status("probing the signal to pick a timebase…")
-        pulse = _probe_pulse_ns(sc, status)            # transient 4K freeze to measure, then resumes
-        if pulse:
-            tb_idx = _pick_deep_tb(pulse, _DEEP_SAMPLES.get(depth_code, 40064))
-            status(f"finest pulse ≈ {pulse/1000:.1f} µs → timebase {TB_TO_NS[tb_idx]/1e3:.0f} "
-                   f"µs/div (record ≈ {19.2*TB_TO_NS[tb_idx]/1e6:.0f} ms)")
-        else:
-            status("no signal to probe — keeping the current timebase")
-        _run_stop(sc, True)                            # the probe froze the scope — resume RUN
-    status(f"configuring channels + trigger + depth {ACQ_DEPTH_NAMES.get(depth_code, depth_code)}"
-           + (" + LA pod" if la else "") + "…")
-    # Configure channels/trigger/timebase with ONE 0x11 block write, **set_depth=False so the depth
-    # byte is untouched** — a 0x11 depth *change* on a running scope reboots it, but a write that
-    # leaves the depth alone is safe while running (verified 2026-07-11). The store depth is then
-    # set below by cycling the Acquire-menu F5 softkey: it's safe while running, and unlike a 0x11
-    # depth write it also updates the on-screen LongMem radio (a 0x11 write leaves it stale at 4K).
-    # LA forces the depth to 4K (the pod clamps deep memory), so LA needs no F5 cycling — after DS
-    # the depth is already 4K and the pod holds it there.
-    _prep_block(sc, depth_code, setup, la=la, tb_idx=tb_idx, set_depth=False)
-    # Channel ON/OFF via the CH1/CH2 buttons (LED-accurate, unlike a 0x11 DISP write), starting from
-    # the Default-Setup baseline (CH1 on, CH2 off). Must come BEFORE the depth F5 walk: 1M is
-    # single-channel-only, so CH2 has to be off before 1M is even reachable. Needs `reset` (the DS
-    # gives the known baseline); without it we leave the channels as the panel had them.
+        _default_setup(sc, status)                     # known state via a real key (side-effects incl. card)
+    # Channels on/off via the CH buttons (LED + acquisition correct). Before the depth F5 walk:
+    # 1M is single-channel-only, so CH2 must be off before 1M is reachable. Needs `reset` for the
+    # known baseline (CH1 on, CH2 off).
     if setup and not la and reset:
-        status("setting channels via the CH1/CH2 buttons…")
+        status("channels via the CH1/CH2 buttons…")
         _set_channels_via_keys(sc, channels, status)
+    # Probe → 1× then V/div → 1 V per enabled channel. BOTH are off their DS defaults (probe
+    # 10×, V/div 100 mV) and both matter: at 10× a direct-wired 3.3 V signal reads 33 V and clips
+    # off-screen; probe must be fixed BEFORE V/div (it rescales V/div). Keys only.
+    if setup and not la:
+        for n in channels:
+            _set_probe_via_keys(sc, n, 0, status)
+            _set_vdiv_via_keys(sc, n, 1000, status)
+    # LA pod on: the ONE remaining 0x11 — there is no mapped key for LA-SWI yet. LA also clamps
+    # depth to 4K, so it needs no F5 walk. [TODO: drive the LA pod via the LogicAnalyzer menu keys]
+    if la:
+        _prep_block(sc, depth_code, setup=False, la=True, set_depth=False)
+    # Trigger level onto the signal (≈ 0.5 V) so a framed/bursty line triggers on a real burst,
+    # not the idle-noise 0 V crossings. Keys only.
+    if setup and not la:
+        _set_trig_level_via_keys(sc, 13, status)
+    # Store depth via the Acquire F5 walk (updates the on-screen LongMem radio; safe while running).
     ok = True
     if not la and depth_code != 0:
-        status(f"setting store depth {ACQ_DEPTH_NAMES.get(depth_code)} via the Acquire menu (F5)…")
+        status(f"store depth {ACQ_DEPTH_NAMES.get(depth_code)} via the Acquire menu (F5)…")
         ok = False
         for _ in range(3):                             # retry the whole menu walk if it can't land
             if _set_depth_via_keys(sc, depth_code, status):
                 ok = True; break
             sc._resync()
-    # Trust the F5 walk's own post-tap confirmation — do NOT re-poll the depth here: a deep record
-    # is still populating and the field reads a transient 4K the whole time it loads (re-reading it
-    # would falsely report '4K'). `_set_depth_via_keys` already verified the target in the reliable
-    # window right after the tap.
+    # Timebase via SEC/DIV keys — an explicit target (known bit rate) wins; else probe the signal.
+    if not la:
+        target = tb_target_ns
+        if target is None and auto_tb and depth_code != 0:
+            status("probing the signal to pick a timebase…")
+            pulse = _probe_pulse_ns(sc, status)        # transient 4K freeze to measure, then resumes
+            if pulse:
+                target = _pick_deep_tdiv_ns(pulse, _DEEP_SAMPLES.get(depth_code, 40064))
+                status(f"finest pulse ≈ {pulse/1000:.1f} µs → SEC/DIV ~{target/1e6:.2f} ms/div")
+            else:
+                status("no signal to probe — keeping the current timebase")
+            _run_stop(sc, True)                        # the probe froze the scope — resume RUN
+        if target:
+            _set_timebase_via_keys(sc, target, status)
     status(f"depth {'confirmed' if ok else 'NOT confirmed'}: "
            f"{ACQ_DEPTH_NAMES.get(0 if la else depth_code)}"
            + ("  (LA clamps deep memory to 4K)" if la and depth_code else ""))
     status("ready (running) — press Capture to grab a single-seq record")
-    return tb_idx
+    return None
 
 
 def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
@@ -402,6 +554,15 @@ def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
         _freeze(sc)
         status("record captured (freeze).")
         return
+    # Ensure the scope is RUNNING and acquiring the live signal BEFORE arming SINGLE.
+    # A single-seq armed from a STOPPED scope latches the stale/empty buffer it was
+    # holding (an all-0xFF record — no real trace) instead of a fresh acquisition.
+    # Start it running, let it acquire briefly, THEN arm the single-seq. (No-op cost
+    # when already running, since _run_stop only presses when the state disagrees.)
+    if _is_stopped(sc):
+        status("scope was stopped — starting it running before the single-seq…")
+        _run_stop(sc, True)
+        time.sleep(0.5)
     status("arming SINGLE — triggering on the signal…")
     _key(sc, KEY_SINGLE); time.sleep(0.5)
     # A single-seq captures on the first edge and **stops itself with the record** — the RUN/STOP
@@ -422,12 +583,12 @@ def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
 
 
 def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
-                    wait_trig=25, use_single=True, tb_idx=None, reset=True):
+                    wait_trig=25, use_single=True, tb_target_ns=None, reset=True):
     """Backward-compatible one-shot = prepare + trigger (used by tests/headless). The GUI
-    splits these into a Prepare button and a Capture button instead."""
-    prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset)
-    if tb_idx is not None:                               # explicit tb override (tests)
-        _prep_block(sc, depth_code, setup, la=la, tb_idx=tb_idx)
+    splits these into a Prepare button and a Capture button instead. `tb_target_ns` sets an
+    explicit SEC/DIV via keys (for a caller that knows the bit rate)."""
+    prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset,
+                    tb_target_ns=tb_target_ns)
     _trigger_record(sc, use_single, status, wait_trig)
 
 
@@ -466,16 +627,12 @@ def _press_for_menu(sc, keyid, want, status=lambda m: None, tries=4):
 
 
 def _close_menu(sc):
-    """Return to the main screen: press Back (close any FileList/back out of the submenu) then
-    write CONTROL-DISP-MENU = 0 to hide the side menu. **Call this only while the scope is
-    RUNNING** — a full-block 0x11 write while STOPPED (single-seq state 5) crash-reboots it,
-    but the same write while running is fine (verified 2026-07-11). Best-effort."""
-    from mso5202d_decode import _key, _field_off, _raw_settings
+    """Back out of the FileList / submenu with the Back key. KEY-ONLY — the old version also did a
+    0x11 write to hide the side menu (CONTROL-DISP-MENU=0), but memory is read-only now and the
+    next capture's Default Setup clears the display anyway, so a Back press is enough. Best-effort."""
+    from mso5202d_decode import _key
     try:
         _key(sc, FN_BACK); time.sleep(0.35)              # close the FileList / back out one level
-        off, _ = _field_off('CONTROL-DISP-MENU')
-        block = bytearray(_raw_settings(sc)[1:]); block[off] = 0
-        sc.transact(b'\x11' + bytes(block)); time.sleep(0.4)
     except Exception:
         pass
 
@@ -741,7 +898,9 @@ def _probe_pulse_ns(sc, status=lambda m: None):
     from mso5202d import decode_settings
     from mso5202d_decode import _raw_settings
     from serial_decode import threshold_volts
-    _run_stop(sc, False); _prep_block(sc, 0, setup=True); _freeze(sc)
+    # Vertical is already set (V/div via keys in prepare_capture) — just freeze a 4K record and
+    # read it. No 0x11: a RUN→STOP freeze fills the screen buffer, read directly over 0x02.
+    _freeze(sc)
     si_ns = decode_settings(_raw_settings(sc)).get('SAMPLE-INTERVAL-ns') or 0
     if not si_ns:
         return None
@@ -928,15 +1087,13 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
         if delete_after and found:      # all captures are on the PC now → free the card
             _clear_wavedata(sc, sh, status)
     finally:
-        # Leave the scope clean + live. Order matters: RESUME RUN **first** (from the single-seq
-        # STOP), THEN close the menu — the menu-close does a 0x11 write, which crash-reboots the
-        # scope while STOPPED but is safe while RUNNING (verified 2026-07-11). Resync first — the
-        # big file read-backs can leave a trailing chunk that would desync these key presses.
+        # Leave the scope clean + live: resume RUN from the single-seq STOP, then Back out of the
+        # FileList (key-only — _close_menu no longer writes memory). Resync first: the big file
+        # read-backs can leave a trailing chunk that would desync these key presses.
         try:
             sc._resync()
             status("resuming run…"); _run_stop(sc, True)   # single-seq STOP → running
-            _close_menu(sc)                                 # Back + CONTROL-DISP-MENU=0 (running-safe)
-            _run_stop(sc, True)                             # the 0x11 menu-close can stop it → re-run
+            _close_menu(sc)                                 # Back key only
             sc._resync()
         except Exception:
             pass
