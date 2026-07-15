@@ -243,6 +243,7 @@ def _set_timebase_via_keys(sc, target_tdiv_ns, status=lambda m: None):
 # Samples per clock/bit the deep record targets — enough to decode with integrity. At the max
 # signal frequency the fastest edges get this many samples; slower content gets proportionally more.
 _SAMPLES_PER_CLOCK = 12
+_MIN_SAMPLES_PER_CLOCK = 10   # below ~10, the bandwidth-rounded clock loses edges → unreliable decode
 
 
 def deep_tdiv_for_bit(bit_ns, deep_samples=40064, target_samples=_SAMPLES_PER_CLOCK):
@@ -1066,14 +1067,19 @@ def decode_capture(results, params):
 
     if proto == 'uart':
         line = params.get('line', 0)
-        ev = decode_uart(ch(line), sample_interval_ns=ns, baud=params.get('baud'))
+        ev = decode_uart(ch(line), sample_interval_ns=ns, baud=params.get('baud'),
+                         parity=params.get('parity', 'none'), idle=params.get('idle', 1))
         return ev, dt, [line]
     if proto == 'spi':
         clk, data = params.get('clk', 0), params.get('data', 1)
-        a = decode_spi(ch(clk), ch(data), cpol=params.get('cpol', 0), cpha=params.get('cpha', 0))
+        # `auto_mode` detects the sampling edge from the signal (mode 0-3); explicit cpol/cpha
+        # override when given. msb_first is user-set (can't be inferred).
+        skw = dict(cpol=params.get('cpol', 0), cpha=params.get('cpha', 0),
+                   msb_first=params.get('msb', True), auto_mode=params.get('auto_mode', False))
+        a = decode_spi(ch(clk), ch(data), **skw)
         # channel labels can be imperfect (Source-cycle order) — also try swapping clk/data
         # and keep whichever decodes more bytes, so SCLK/data can't be silently swapped.
-        b = decode_spi(ch(data), ch(clk), cpol=params.get('cpol', 0), cpha=params.get('cpha', 0))
+        b = decode_spi(ch(data), ch(clk), **skw)
         return (a, dt, [clk, data]) if n_bytes(a) >= n_bytes(b) else (b, dt, [data, clk])
     if proto == 'i2c':
         scl, sda = params.get('scl', 0), params.get('sda', 1)
@@ -1341,7 +1347,7 @@ class DecoderApp:
         # Samples per clock the timebase targets on that fastest edge (default 12 — enough to decode
         # with integrity; raise for margin, lower to fit more bytes in the window).
         spcrow = ttk.Frame(g); spcrow.pack(anchor='w', fill=tk.X)
-        ttk.Label(spcrow, text="samples/clock:").pack(side=tk.LEFT)
+        ttk.Label(spcrow, text=f"samples/clock (≥{_MIN_SAMPLES_PER_CLOCK}):").pack(side=tk.LEFT)
         self.v_spc = tk.StringVar(value=str(_SAMPLES_PER_CLOCK))
         ttk.Entry(spcrow, textvariable=self.v_spc, width=5).pack(side=tk.LEFT, padx=(4, 0))
         # A changed target (freq or samples/clock) means a different timebase → require Prepare again.
@@ -1407,19 +1413,29 @@ class DecoderApp:
 
     # -- handlers -------------------------------------------------------------
     def _decode_params(self):
+        # The 'extra' field is a space-separated option string:
+        #   UART : <baud> [inv] [even|odd]        e.g. "115200 inv even"  (idle & polarity auto if omitted)
+        #   SPI  : [auto|00|01|10|11] [lsb]        e.g. "auto lsb"         (auto-detects the mode by default)
+        #   I2C  : (nothing)
         proto = self.v_proto.get()
         a = 0 if self.v_chA.get() == 'CH1' else 1
         b = 0 if self.v_chB.get() == 'CH1' else 1
-        extra = self.v_extra.get().strip()
+        toks = self.v_extra.get().strip().lower().split()
         p = {'proto': proto}
         if proto == 'uart':
             p['line'] = a
-            p['baud'] = float(extra) if extra else None
+            baud = next((t for t in toks if t.replace('.', '', 1).isdigit()), None)
+            p['baud'] = float(baud) if baud else None
+            p['parity'] = 'even' if 'even' in toks else ('odd' if 'odd' in toks else 'none')
+            p['idle'] = 0 if ('inv' in toks or 'inverted' in toks) else ('auto' if 'auto' in toks else 1)
         elif proto == 'spi':
             p['clk'] = a; p['data'] = b
-            mode = extra or '00'
-            p['cpol'] = int(mode[0]) if mode[:1] in '01' else 0
-            p['cpha'] = int(mode[1]) if len(mode) > 1 and mode[1] in '01' else 0
+            p['msb'] = 'lsb' not in toks
+            mode = next((t for t in toks if t in ('00', '01', '10', '11')), None)
+            if mode:
+                p['cpol'] = int(mode[0]); p['cpha'] = int(mode[1]); p['auto_mode'] = False
+            else:
+                p['auto_mode'] = True                        # default: detect the sampling edge
         elif proto == 'i2c':
             p['scl'] = a; p['sda'] = b
         return p
@@ -1449,9 +1465,10 @@ class DecoderApp:
         # Blank/invalid freq → leave the timebase alone.
         try:
             spc = int(float(self.v_spc.get()))
-            assert spc >= 2
+            assert spc >= _MIN_SAMPLES_PER_CLOCK
         except Exception:
-            self.status.set(f"samples/clock must be an integer ≥ 2 (got '{self.v_spc.get()}')"); return
+            self.status.set(f"samples/clock must be an integer ≥ {_MIN_SAMPLES_PER_CLOCK} "
+                            f"(below that, edge detection is unreliable) — got '{self.v_spc.get()}'"); return
         tb_target_ns = None
         max_hz = _parse_freq(self.v_maxfreq.get())
         if max_hz:
@@ -1691,16 +1708,22 @@ def main():
                     help="headless: decode WaveData CSV file(s) (CH1 [CH2]) → PNG")
     ap.add_argument('--proto', choices=['none', 'uart', 'spi', 'i2c'], default='none')
     ap.add_argument('--baud', type=float, default=None, help="UART baud (default auto)")
-    ap.add_argument('--mode', default='00', help="SPI cpol/cpha, e.g. 00")
+    ap.add_argument('--parity', choices=['none', 'even', 'odd'], default='none', help="UART parity")
+    ap.add_argument('--invert', action='store_true', help="UART inverted / idle-low line")
+    ap.add_argument('--mode', default='auto', help="SPI cpol/cpha (00/01/10/11) or 'auto' (default)")
+    ap.add_argument('--lsb', action='store_true', help="SPI LSB-first (default MSB)")
     ap.add_argument('--png', metavar='PATH', help="output PNG for --load (default decode.png)")
     a = ap.parse_args()
     if a.load:
         params = {'proto': a.proto}
         if a.proto == 'uart':
-            params.update(line=0, baud=a.baud)
+            params.update(line=0, baud=a.baud, parity=a.parity, idle=(0 if a.invert else 1))
         elif a.proto == 'spi':
-            params.update(clk=0, data=1, cpol=int(a.mode[0]),
-                          cpha=int(a.mode[1]) if len(a.mode) > 1 else 0)
+            params.update(clk=0, data=1, msb=not a.lsb)
+            if a.mode == 'auto':
+                params['auto_mode'] = True
+            else:
+                params.update(cpol=int(a.mode[0]), cpha=int(a.mode[1]) if len(a.mode) > 1 else 0)
         elif a.proto == 'i2c':
             params.update(scl=0, sda=1)
         run_headless(a.load, params, a.png or 'decode.png')

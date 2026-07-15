@@ -67,11 +67,11 @@ def _uart_one(digital, reverse=False, *, sample_interval_ns=None, baud=None,
             return None
         val = 0
         for b in range(bits):
-            if fr[data_cells[b]]:
-                val |= (1 << b)
+            if fr[data_cells[b]] == idle:                    # logical 1 = MARK = idle level (handles
+                val |= (1 << b)                              # an inverted / idle-low line too)
         ok = True
         if par_cell is not None:
-            ones = bin(val).count('1') + int(fr[par_cell])
+            ones = bin(val).count('1') + int(fr[par_cell] == idle)
             ok = (ones % 2 == 0) if parity == 'even' else (ones % 2 == 1)
         return val, ok
 
@@ -104,16 +104,30 @@ def _uart_one(digital, reverse=False, *, sample_interval_ns=None, baud=None,
 
 def decode_uart(digital, sample_interval_ns=None, baud=None,
                 bits=8, parity='none', stops=1, idle=1, both_ways=False):
-    """Decode an asynchronous UART line (idle high, LSB first, 1 start bit).
+    """Decode an asynchronous UART line (LSB first, 1 start bit).
 
     The caller specifies the line rate: pass `baud` with `sample_interval_ns` to lock the bit period
-    (auto-detect from the shortest pulse is only a fallback). Robust to gapless back-to-back streams
-    (bit-grid framing, not start-edge hunting): each frame is validated and the walk re-syncs at every
-    frame, so a capture that TRIGGERS MID-BYTE skips the leading garbage and decodes cleanly from the
-    first good frame to the end. `both_ways=True` also tries the time-reversed trace and keeps whichever
-    yields more frames (only helpful if the forward walk can't lock at all). `parity`:
-    'none'|'even'|'odd'. Returns frames [{start, end, value, ok, text, kind}]; `ok` is the framing check."""
+    (auto-detect from the shortest pulse is only a fallback). `idle` is the resting level — 1 (idle
+    high, the usual TTL/3.3 V convention; the reliable default), 0 for an
+    inverted line, or 'auto' for a best-effort guess (unreliable on some continuous streams — prefer
+    setting it explicitly). Robust to gapless back-to-back streams (bit-grid framing, not start-edge hunting): each
+    frame is validated and the walk re-syncs at every frame, so a capture that TRIGGERS MID-BYTE skips
+    the leading garbage and decodes cleanly from the first good frame to the end. `both_ways=True` also
+    tries the time-reversed trace. `parity`: 'none'|'even'|'odd'. Returns frames
+    [{start, end, value, ok, text, kind}]; `ok` is the framing check."""
     digital = np.asarray(digital).astype(np.int8)
+    if idle == 'auto':
+        # Detect polarity: decode both ways and keep the one that frames more bytes (the wrong
+        # polarity usually flips the start/stop template and barely validates). When the counts are
+        # close — a framed stream can coincidentally frame the same number at a shifted phase in the
+        # wrong polarity — break the tie with the idle level (the longest constant run rests at idle).
+        kw = dict(sample_interval_ns=sample_interval_ns, baud=baud, bits=bits, parity=parity,
+                  stops=stops, both_ways=both_ways)
+        hi = decode_uart(digital, idle=1, **kw)
+        lo = decode_uart(digital, idle=0, **kw)
+        if min(len(hi), len(lo)) >= 0.8 * max(len(hi), len(lo), 1):
+            return hi if sc.idle_level(digital) == 1 else lo
+        return hi if len(hi) > len(lo) else lo
     kw = dict(sample_interval_ns=sample_interval_ns, baud=baud,
               bits=bits, parity=parity, stops=stops, idle=idle)
     if both_ways:
@@ -159,6 +173,13 @@ def selftest():
     good = ramp_ratio(got) >= 0.99 and len(got) > 100       # ≤1 artifact at the cut boundary
     print(f"UART mid-stream start    : {len(got)} bytes ramp={ramp_ratio(got):.3f}, {'OK' if good else 'FAIL'}")
     ok &= good
+    dig = 1 - _synth_uart(ramp, spb=20, gap=6)              # inverted line (idle low), idle set explicitly
+    got = [f['value'] for f in decode_uart(dig, idle=0)]
+    print(f"UART inverted (idle=0)   : {len(got)} bytes, {'OK' if got == ramp else 'FAIL'}")
+    ok &= (got == ramp)
+    got_auto = [f['value'] for f in decode_uart(dig, idle='auto')]   # best-effort auto (framed → ok)
+    print(f"UART inverted (idle auto): {len(got_auto)} bytes, {'OK' if got_auto == ramp else 'FAIL'}")
+    ok &= (got_auto == ramp)
     return ok
 
 

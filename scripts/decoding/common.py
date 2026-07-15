@@ -115,6 +115,18 @@ def min_pulse(d):
     return int(np.min(np.diff(e))) if len(e) >= 2 else 0
 
 
+def idle_level(d):
+    """Detect a line's resting/idle level as the level held during its LONGEST constant run — an
+    idle stretch (line at rest, or a multi-bit gap) is longer than any in-frame run. Used to
+    auto-detect UART polarity (idle high vs low) and an SPI clock's idle level. Returns 0 or 1."""
+    d = np.asarray(d).astype(np.int8)
+    if len(d) < 2:
+        return 1
+    bounds = np.concatenate([[0], np.flatnonzero(np.diff(d) != 0) + 1, [len(d)]])
+    k = int(np.argmax(np.diff(bounds)))
+    return int(d[bounds[k]])
+
+
 # --- bit grid --------------------------------------------------------------------
 def refine_period(e, spb0):
     """Refine samples-per-bit + phase by least-squares fitting the edges to an integer grid

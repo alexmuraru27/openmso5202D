@@ -9,35 +9,69 @@ and no gaps or CS, byte boundaries are genuinely ambiguous. Run `python3 -m deco
 import numpy as np
 
 
+def detect_sample_rising(clk, data):
+    """Detect the SPI sampling edge from the signal itself (subsumes CPOL+CPHA). Data is shifted on
+    one clock edge and held stable across the other — the SAMPLING edge — so data-line transitions
+    cluster near the SHIFT edge; the correct sampling edge is the opposite one. Returns True to sample
+    on rising clock edges, False on falling. Falls back to True (mode 0) if there's too little to tell."""
+    c = np.asarray(clk).astype(int)
+    dat = np.asarray(data).astype(int)
+    crise = np.flatnonzero(np.diff(c) == 1) + 1
+    cfall = np.flatnonzero(np.diff(c) == -1) + 1
+    dedge = np.flatnonzero(np.diff(dat) != 0) + 1
+    if len(dedge) < 3 or len(crise) < 2 or len(cfall) < 2:
+        return True
+    clock_edges = np.sort(np.concatenate([crise, cfall]))
+    rising_set = np.zeros(len(c) + 1, dtype=bool)
+    rising_set[crise] = True
+    j = np.clip(np.searchsorted(clock_edges, dedge), 1, len(clock_edges) - 1)
+    left, right = clock_edges[j - 1], clock_edges[j]
+    nearest = np.where(dedge - left <= right - dedge, left, right)
+    near_rise = int(rising_set[nearest].sum())
+    shift_on_rising = near_rise >= (len(nearest) - near_rise)
+    return not shift_on_rising                                # sample on the edge opposite the shift
+
+
 def decode_spi(clk, data, cpol=0, cpha=0, msb_first=True, cs=None, bits=8,
-               word_gap=10.0, max_missed=8):
+               word_gap=10.0, max_missed=8, anchor='auto', auto_mode=False):
     """Decode an SPI data line clocked by `clk`. With clock idle level `cpol`, the sampling edge is
     rising iff cpol==cpha, else falling.
 
     Word framing (priority): a captured `cs` (active-low) frames words and gates edges; else an
-    idle-clock gap longer than `word_gap`× the typical bit spacing starts a new word; else bytes are
-    grouped every `bits` sampled edges. A gap of 2..`max_missed` bit periods is treated as missed clock
-    edges and reconstructed. Returns [{start, end, value, text, kind}]."""
+    idle-clock gap longer than `word_gap`× the typical bit spacing splits bursts; within a burst
+    bytes are grouped every `bits` sampled edges. A gap of 2..`max_missed` bit periods is treated as
+    missed clock edges and reconstructed.
+
+    Byte-boundary **anchoring** (no CS): a capture triggered mid-byte shifts every byte if grouped
+    forward from the cut start. `anchor`:
+      - 'start' — group forward from each burst's start (drop a trailing partial);
+      - 'end'   — anchor the first burst to its END (drop the LEADING partial) — correct when the
+                  transaction ended cleanly but the capture began mid-byte;
+      - 'auto'  — pick 'end' when the clock stopped well before the record end (clean trailing idle)
+                  yet was already running at sample 0 (no clean leading idle) ⇒ triggered mid-byte,
+                  clean end. Whole-byte bursts decode identically either way.
+    `auto_mode=True` ignores cpol/cpha and detects the sampling edge from the signal
+    (`detect_sample_rising`) — so a mode-1/2/3 device decodes without specifying the mode.
+    Returns [{start, end, value, text, kind}]."""
     c = np.asarray(clk).astype(np.int8)
     dat = np.asarray(data).astype(np.int8)
-    sample_rising = (cpol == cpha)
+    N = len(c)
+    sample_rising = detect_sample_rising(c, dat) if auto_mode else (cpol == cpha)
     want = 1 if sample_rising else -1
     edges = list(np.flatnonzero(np.diff(c.astype(int)) == want) + 1)
     cs_arr = None if cs is None else np.asarray(cs).astype(int)
     med = float(np.median(np.diff(edges))) if (cs_arr is None and len(edges) > 2) else None
 
-    out = []
-    buf, pos = [], []
+    # Collect sampled bits into bursts (split on CS deselect or an idle-clock gap; reconstruct
+    # missed clock edges). Each burst: list of (bit, sample_idx).
+    bursts = [[]]
 
-    def _sample(idx):
-        buf.append(dat[min(idx, len(dat) - 1)]); pos.append(idx)
-        if len(buf) == bits:
-            val = 0
-            for j, b in enumerate(buf):
-                val = (val << 1) | b if msb_first else val | (b << j)
-            out.append({'start': pos[0], 'end': pos[-1], 'value': val,
-                        'text': f"{val:02X}", 'kind': 'byte'})
-            buf.clear(); pos.clear()
+    def add(idx):
+        bursts[-1].append((int(dat[min(idx, len(dat) - 1)]), idx))
+
+    def new_burst():
+        if bursts[-1]:
+            bursts.append([])
 
     prev_active = True
     prev_edge = None
@@ -45,21 +79,40 @@ def decode_spi(clk, data, cpol=0, cpha=0, msb_first=True, cs=None, bits=8,
         if cs_arr is not None:
             active = cs_arr[e] == 0
             if not active:
-                buf.clear(); pos.clear(); prev_active = False
+                new_burst(); prev_active = False
                 continue
             if not prev_active:
-                buf.clear(); pos.clear()
+                new_burst()
             prev_active = True
         elif med and prev_edge is not None:
             gap = e - prev_edge
             n = int(round(gap / med)) if med else 1
             if 2 <= n <= max_missed and abs(gap - n * med) <= 0.5 * med:
                 for k in range(1, n):
-                    _sample(prev_edge + int(round(k * med)))
+                    add(prev_edge + int(round(k * med)))
             elif word_gap and gap > word_gap * med:
-                buf.clear(); pos.clear()
+                new_burst()
         prev_edge = e
-        _sample(e)
+        add(e)
+    bursts = [b for b in bursts if b]
+
+    anchor_end = (anchor == 'end')
+    if anchor == 'auto' and cs_arr is None and med and len(edges) >= 2:
+        clean_start = edges[0] > word_gap * med
+        clean_end = (N - edges[-1]) > word_gap * med
+        anchor_end = clean_end and not clean_start
+
+    out = []
+    for bi, burst in enumerate(bursts):
+        if bi == 0 and anchor_end:
+            burst = burst[len(burst) % bits:]            # drop the leading partial → end-aligned
+        for k in range(0, len(burst) - bits + 1, bits):
+            grp = burst[k:k + bits]
+            val = 0
+            for j, (b, _) in enumerate(grp):
+                val = (val << 1) | b if msb_first else val | (b << j)
+            out.append({'start': grp[0][1], 'end': grp[-1][1], 'value': val,
+                        'text': f"{val:02X}", 'kind': 'byte'})
     return out
 
 
@@ -104,6 +157,13 @@ def selftest():
                 print(f"SPI  mode{cpol}{cpha} {'MSB' if msb else 'LSB'}: {len(got)} bytes, "
                       f"{'OK' if good else 'FAIL'}")
                 ok &= good
+    both = True                                             # auto sampling-edge detection, all 4 modes
+    for cpol in (0, 1):
+        for cpha in (0, 1):
+            clk, dat = _synth_spi(ramp, cpol=cpol, cpha=cpha)
+            both &= ([o['value'] for o in decode_spi(clk, dat, auto_mode=True)] == ramp)
+    print(f"SPI  auto-mode (4 modes): {'OK' if both else 'FAIL'}")
+    ok &= both
     clk, dat = _synth_spi(ramp, spb=10, byte_gap=150)
     got = [o['value'] for o in decode_spi(clk, dat)]
     print(f"SPI  gap-framed  : {len(got)} bytes, {'OK' if got == ramp else 'FAIL'}")
@@ -112,6 +172,19 @@ def selftest():
     got = [o['value'] for o in decode_spi(clk[cut:], dat[cut:])]
     print(f"SPI  mid-byte cut: {len(got)} bytes, {'OK' if got == ramp[1:] else 'FAIL'}")
     ok &= (got == ramp[1:])
+    # End-anchor: a GAPLESS burst triggered mid-byte (no leading idle) but with the clock stopping
+    # cleanly at the end. Forward grouping would shift every byte; auto-anchoring to the clean end
+    # recovers the ramp tail (the reverse-decode case).
+    from decoding.common import ramp_ratio
+    clk, dat = _synth_spi(ramp, spb=10, byte_gap=0)
+    clk = np.concatenate([clk, np.zeros(400, dtype=int)])   # long trailing idle (clock stopped)
+    dat = np.concatenate([dat, np.full(400, dat[-1], dtype=int)])
+    cut = 34                                                # begin mid-byte-0, no leading idle
+    got = [o['value'] for o in decode_spi(clk[cut:], dat[cut:])]
+    good = ramp_ratio(got) == 1.0 and got and got[-1] == 255 and len(got) > 200
+    print(f"SPI  end-anchor  : {len(got)} bytes ramp={ramp_ratio(got):.3f} last={got[-1] if got else '-':>3}"
+          f", {'OK' if good else 'FAIL'}")
+    ok &= good
     return ok
 
 
