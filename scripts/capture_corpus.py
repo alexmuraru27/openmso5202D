@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a long-term serial-waveform corpus for a protocol (SPI / UART / I2C): every listed
 rate × {4K,40K,512K} memory depth × {12,100} samples-per-bit, captured as REAL deep records
-(single-seq → Save→CSV → read-back) and saved verbatim into decoder_tests/<proto>/waves/.
+(single-seq → Save→CSV → read-back) and saved verbatim into decoding/decoder_tests/<proto>/waves/.
 
     python3 capture_corpus.py spi     # (already captured — resumes/skips validated)
     python3 capture_corpus.py uart
@@ -24,7 +24,7 @@ sys.path.insert(0, '.')
 import numpy as np
 from mso5202d import Scope
 from mso5202d_plot import deep_capture, decode_capture, deep_tdiv_for_bit, _DEEP_SAMPLES
-from serial_decode import threshold_volts
+from decoding import threshold_volts
 
 DEPTHS = [(0, '4k'), (4, '40k'), (6, '512k')]
 MIN_SWING = 0.5              # volts — a channel below this is flat/idle (no real signal)
@@ -124,7 +124,8 @@ def main():
     if proto not in PROTOS:
         print(f"usage: capture_corpus.py {{{'|'.join(PROTOS)}}}"); return
     cfg = PROTOS[proto]
-    waves = f"decoder_tests/{proto}/waves"
+    corpus = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'decoding', 'decoder_tests')
+    waves = f"{corpus}/{proto}/waves"
     manifest_path = f"{waves}/manifest.json"
     for _, dn in DEPTHS:
         os.makedirs(f"{waves}/{dn}", exist_ok=True)

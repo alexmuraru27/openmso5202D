@@ -1,66 +1,6 @@
 [
  {
   "freq": 10000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 200000.0,
-  "dt_ns": 1000.0,
-  "act_spc": 100.0,
-  "swings": [
-   3.52,
-   3.44
-  ],
-  "edges": [
-   53,
-   19
-  ],
-  "n_bytes": 0,
-  "ramp": 0.0,
-  "run": 0,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "i2c_10000hz_100spc_CH1.csv",
-   "i2c_10000hz_100spc_CH2.csv"
-  ]
- },
- {
-  "freq": 10000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 1666666.7,
-  "dt_ns": 10000.0,
-  "act_spc": 10.0,
-  "swings": [
-   3.52,
-   3.48
-  ],
-  "edges": [
-   532,
-   149
-  ],
-  "n_bytes": 0,
-  "ramp": 0.0,
-  "run": 0,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "i2c_10000hz_12spc_CH1.csv",
-   "i2c_10000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 10000,
   "depth": "40k",
   "depth_code": 4,
   "spc": 100,
@@ -181,66 +121,6 @@
  },
  {
   "freq": 400000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 5000.0,
-  "dt_ns": 20.0,
-  "act_spc": 125.0,
-  "swings": [
-   3.48,
-   3.44
-  ],
-  "edges": [
-   27,
-   9
-  ],
-  "n_bytes": 0,
-  "ramp": 0.0,
-  "run": 0,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "i2c_400000hz_100spc_CH1.csv",
-   "i2c_400000hz_100spc_CH2.csv"
-  ]
- },
- {
-  "freq": 400000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 41666.7,
-  "dt_ns": 200.0,
-  "act_spc": 12.5,
-  "swings": [
-   3.48,
-   3.44
-  ],
-  "edges": [
-   270,
-   69
-  ],
-  "n_bytes": 0,
-  "ramp": 0.0,
-  "run": 0,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "i2c_400000hz_12spc_CH1.csv",
-   "i2c_400000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 400000,
   "depth": "40k",
   "depth_code": 4,
   "spc": 100,
@@ -357,66 +237,6 @@
   "files": [
    "i2c_400000hz_12spc_CH1.csv",
    "i2c_400000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 1000000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 2000.0,
-  "dt_ns": 10.0,
-  "act_spc": 100.0,
-  "swings": [
-   3.48,
-   3.4
-  ],
-  "edges": [
-   14,
-   5
-  ],
-  "n_bytes": 0,
-  "ramp": 0.0,
-  "run": 0,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "i2c_1000000hz_100spc_CH1.csv",
-   "i2c_1000000hz_100spc_CH2.csv"
-  ]
- },
- {
-  "freq": 1000000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 16666.7,
-  "dt_ns": 100.0,
-  "act_spc": 10.0,
-  "swings": [
-   3.48,
-   3.48
-  ],
-  "edges": [
-   134,
-   29
-  ],
-  "n_bytes": 0,
-  "ramp": 0.0,
-  "run": 0,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "i2c_1000000hz_12spc_CH1.csv",
-   "i2c_1000000hz_12spc_CH2.csv"
   ]
  },
  {

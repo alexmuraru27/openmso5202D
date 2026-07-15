@@ -20,7 +20,7 @@ No live data is involved — only the trigger, the CSV download, and offline dec
 
 UART needs one channel; SPI/I²C need two (SCLK+data / SCL+SDA) — save CH1 then CH2
 from the same frozen acquisition so the two files are index-aligned. Decoders live
-in serial_decode.py; the CSV parser + deep-capture helpers in mso5202d.py / here.
+in the decoding/ package; the CSV parser + deep-capture helpers in mso5202d.py / here.
 """
 import argparse
 import os
@@ -33,7 +33,7 @@ from mso5202d import SAMPLES_PER_DIV, DIV_UNIT
 
 # --- rendering model (docs/MSO5202D-rendering.md) --------------------------------
 # to_divs/x_divs are the scope's byte→division model, kept here because
-# serial_decode.threshold() and mso5202d_decode.py import them for the 3840-sample
+# decoding.common.threshold() and mso5202d_decode.py import them for the 3840-sample
 # SCREEN-buffer decode path. This tool itself works on deep-capture CSVs (volts).
 BASELINE_OFFSET = 16             # byte baseline = (VERT-CHx-POS + 16) mod 256
 V_DIVS          = 8              # graticule is 8 divisions tall (-4 … +4)
@@ -45,7 +45,7 @@ BG, FG = '#080a08', '#9fb0a0'
 def to_divs(y_bytes, pos):
     """Waveform byte + the channel's VERT-POS → vertical divisions (up = positive).
     Unwraps the sample around the POS-referenced baseline (undoes the 8-bit wrap near
-    screen centre and the reversed sense). Used by serial_decode.threshold() and the
+    screen centre and the reversed sense). Used by decoding.common.threshold() and the
     screen-buffer viewer in mso5202d_decode.py."""
     pos = int(pos)
     base = (pos + BASELINE_OFFSET) & 0xFF
@@ -1042,7 +1042,7 @@ def decode_capture(results, params):
     enabled channel, in enable order — not necessarily [CH1, CH2]); falls back to list
     order for CSVs loaded without a source tag. Channel index 0=CH1, 1=CH2. LA results are
     ignored here (analog decoders). Returns (events, dt_seconds_per_sample, used_indices)."""
-    from serial_decode import threshold_volts, decode_uart, decode_spi, decode_i2c
+    from decoding import threshold_volts, decode_uart, decode_spi, decode_i2c
     analog = [r for r in results if not r.get('is_la') and r.get('volts') is not None]
     if not analog:
         return [], (results[0].get('dt_s') if results else None), []

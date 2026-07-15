@@ -1,58 +1,6 @@
 [
  {
   "freq": 9600,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 208333.3,
-  "dt_ns": 1000.0,
-  "act_spc": 104.2,
-  "swings": [
-   3.52
-  ],
-  "edges": [
-   18
-  ],
-  "n_bytes": 3,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "uart_9600baud_100spc_CH1.csv"
-  ]
- },
- {
-  "freq": 9600,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 1736111.1,
-  "dt_ns": 10000.0,
-  "act_spc": 10.4,
-  "swings": [
-   3.52
-  ],
-  "edges": [
-   224
-  ],
-  "n_bytes": 30,
-  "ramp": 0.138,
-  "run": 2,
-  "sizes": [
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "uart_9600baud_12spc_CH1.csv"
-  ]
- },
- {
-  "freq": 9600,
   "depth": "40k",
   "depth_code": 4,
   "spc": 100,
@@ -157,58 +105,6 @@
  },
  {
   "freq": 115200,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 17361.1,
-  "dt_ns": 100.0,
-  "act_spc": 86.8,
-  "swings": [
-   3.48
-  ],
-  "edges": [
-   21
-  ],
-  "n_bytes": 4,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "uart_115200baud_100spc_CH1.csv"
-  ]
- },
- {
-  "freq": 115200,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 144675.9,
-  "dt_ns": 400.0,
-  "act_spc": 21.7,
-  "swings": [
-   3.48
-  ],
-  "edges": [
-   112
-  ],
-  "n_bytes": 15,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "uart_115200baud_12spc_CH1.csv"
-  ]
- },
- {
-  "freq": 115200,
   "depth": "40k",
   "depth_code": 4,
   "spc": 100,
@@ -309,58 +205,6 @@
   "validated": true,
   "files": [
    "uart_115200baud_12spc_CH1.csv"
-  ]
- },
- {
-  "freq": 921600,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 2170.1,
-  "dt_ns": 10.0,
-  "act_spc": 108.5,
-  "swings": [
-   3.48
-  ],
-  "edges": [
-   17
-  ],
-  "n_bytes": 3,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "uart_921600baud_100spc_CH1.csv"
-  ]
- },
- {
-  "freq": 921600,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 18084.5,
-  "dt_ns": 100.0,
-  "act_spc": 10.9,
-  "swings": [
-   3.48
-  ],
-  "edges": [
-   193
-  ],
-  "n_bytes": 28,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "uart_921600baud_12spc_CH1.csv"
   ]
  },
  {

@@ -30,7 +30,7 @@ import sys
 import time
 import numpy as np
 
-from serial_decode import threshold, decode_uart, decode_spi, decode_i2c
+from decoding import threshold, decode_uart, decode_spi, decode_i2c
 
 
 # --- capture (synchronized frozen snapshot) --------------------------------------

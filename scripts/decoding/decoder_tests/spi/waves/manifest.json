@@ -1,66 +1,6 @@
 [
  {
   "freq": 10000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 200000.0,
-  "dt_ns": 1000.0,
-  "act_spc": 100.0,
-  "swings": [
-   3.48,
-   3.44
-  ],
-  "edges": [
-   81,
-   20
-  ],
-  "n_bytes": 5,
-  "ramp": 1.0,
-  "run": 5,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_10000hz_100spc_CH1.csv",
-   "spi_10000hz_100spc_CH2.csv"
-  ]
- },
- {
-  "freq": 10000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 1666666.7,
-  "dt_ns": 10000.0,
-  "act_spc": 10.0,
-  "swings": [
-   3.48,
-   3.44
-  ],
-  "edges": [
-   809,
-   228
-  ],
-  "n_bytes": 50,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_10000hz_12spc_CH1.csv",
-   "spi_10000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 10000,
   "depth": "40k",
   "depth_code": 4,
   "spc": 100,
@@ -177,66 +117,6 @@
   "files": [
    "spi_10000hz_12spc_CH1.csv",
    "spi_10000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 500000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 4000.0,
-  "dt_ns": 20.0,
-  "act_spc": 100.0,
-  "swings": [
-   3.44,
-   3.44
-  ],
-  "edges": [
-   81,
-   22
-  ],
-  "n_bytes": 5,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_500000hz_100spc_CH1.csv",
-   "spi_500000hz_100spc_CH2.csv"
-  ]
- },
- {
-  "freq": 500000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 33333.3,
-  "dt_ns": 200.0,
-  "act_spc": 10.0,
-  "swings": [
-   3.48,
-   3.44
-  ],
-  "edges": [
-   777,
-   168
-  ],
-  "n_bytes": 48,
-  "ramp": 1.0,
-  "run": 48,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_500000hz_12spc_CH1.csv",
-   "spi_500000hz_12spc_CH2.csv"
   ]
  },
  {
@@ -361,66 +241,6 @@
  },
  {
   "freq": 2000000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 100,
-  "tb_ns": 1000.0,
-  "dt_ns": 5.0,
-  "act_spc": 100.0,
-  "swings": [
-   3.44,
-   3.4
-  ],
-  "edges": [
-   81,
-   12
-  ],
-  "n_bytes": 5,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_2000000hz_100spc_CH1.csv",
-   "spi_2000000hz_100spc_CH2.csv"
-  ]
- },
- {
-  "freq": 2000000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 8333.3,
-  "dt_ns": 40.0,
-  "act_spc": 12.5,
-  "swings": [
-   3.48,
-   3.44
-  ],
-  "edges": [
-   564,
-   173
-  ],
-  "n_bytes": 35,
-  "ramp": 0.0,
-  "run": 1,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_2000000hz_12spc_CH1.csv",
-   "spi_2000000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 2000000,
   "depth": "40k",
   "depth_code": 4,
   "spc": 100,
@@ -537,66 +357,6 @@
   "files": [
    "spi_2000000hz_12spc_CH1.csv",
    "spi_2000000hz_12spc_CH2.csv"
-  ]
- },
- {
-  "freq": 20000000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 30,
-  "tb_ns": 333.3,
-  "dt_ns": 2.5,
-  "act_spc": 20.0,
-  "swings": [
-   2.72,
-   3.2
-  ],
-  "edges": [
-   203,
-   31
-  ],
-  "n_bytes": 12,
-  "ramp": 1.0,
-  "run": 12,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_20000000hz_30spc_CH1.csv",
-   "spi_20000000hz_30spc_CH2.csv"
-  ]
- },
- {
-  "freq": 20000000,
-  "depth": "4k",
-  "depth_code": 0,
-  "spc": 12,
-  "tb_ns": 833.3,
-  "dt_ns": 5.0,
-  "act_spc": 10.0,
-  "swings": [
-   2.68,
-   3.32
-  ],
-  "edges": [
-   406,
-   104
-  ],
-  "n_bytes": 25,
-  "ramp": 1.0,
-  "run": 25,
-  "sizes": [
-   4064,
-   4064
-  ],
-  "size_ok": true,
-  "validated": true,
-  "files": [
-   "spi_20000000hz_12spc_CH1.csv",
-   "spi_20000000hz_12spc_CH2.csv"
   ]
  },
  {
