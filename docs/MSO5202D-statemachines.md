@@ -242,19 +242,29 @@ first need **one** Save press, not two (else a spurious extra file).
 
 ### 3.0.2 Timebase from the max signal frequency `[verified 2026-07-15]`
 
-The record's SEC/DIV sets the sample interval (`deep_dt = 19.2·TDIV/deep_samples`, 40K→40064,
-512K→400064), which is a **trade-off**: too coarse → too few samples/clock → aliased/undecodable;
-too fine → the window (`19.2·TDIV`) holds too few bytes. Aim for **~10–12 samples per clock** on
-the fastest edge. **The caller supplies the highest frequency to resolve** (the GUI's
-`MAX_SIGNAL_FRQ` field, e.g. `20M`) and we compute:
-`TDIV = (1e9/max_hz)·deep_samples / (19.2·samples_per_clock)` — `deep_tdiv_for_bit()`, set closed-
-loop via the SEC/DIV ± keys. No signal probe: the earlier `auto_tb` (which single-seq-captured a
-4K record and measured the finest pulse via `_direct_acquire`/`_probe_pulse_ns`) was **removed** —
-you know the rate, so you state it. Two limits fall out of the sample-rate behaviour (§below):
-past the ADC ceiling a finer SEC/DIV stops helping (200 ns/div = 8 ns/div → same CSV); and zooming
-out drops the rate (`rate = min(ADC_max, depth/window)`) — 1 ms/div on 40K is only ~2 MSa/s.
-Examples: 40K @ 20 kHz → **101 bytes**; 512K @ 20 kHz → **1012 bytes**; MAX_SIGNAL_FRQ 2M @ 40K →
-87 µs/div, 12.5 samples/clock, ramp decodes clean.
+**Acquisition geometry:** the record is acquired over **exactly 20 divisions** with `record_len =
+4000·mult` samples; `mult` = {1, 5, 10, 100, 200} for 4K / 20K / 40K / 512K / 1M. So:
+```
+deep samples/div = record_len / 20 = 200·mult
+deep_dt          = SEC_per_div / (200·mult)
+time_window      = 20 · SEC_per_div            (deep memory does NOT widen the window)
+CSV rows         = record_len + 64             → 4064 / 40064 / 400064 / 800064   (1M = 800000!)
+sample_rate      = 200·mult / SEC_per_div
+```
+(The on-screen `0x02` block is a **different** view — 3840 = 19.2 div of that 20-div record at the
+base 200 samples/div. Timebase steps 2-4-8 per decade, index 0 = 2 ns/div.)
+
+Choosing SEC/DIV is a **trade-off**: too coarse → too few samples/clock → aliased/undecodable; too
+fine → the 20-div window holds too few bytes. Aim for **~10–12 samples/clock** on the fastest edge.
+**The caller supplies the highest frequency to resolve** (the GUI's `MAX_SIGNAL_FRQ` field, e.g.
+`20M`) and we solve `deep_dt = period/target` for SEC/DIV:
+`TDIV = period · (200·mult) / samples_per_clock` = `period·(deep_samples−64)/(20·samples_per_clock)`
+— `deep_tdiv_for_bit()`, set closed-loop via the SEC/DIV ± keys. No signal probe: the earlier
+`auto_tb` (`_probe_pulse_ns`/`_direct_acquire`) was **removed** — you know the rate, so you state it.
+Two limits from the sample-rate behaviour (§below): past the ADC ceiling a finer SEC/DIV stops
+helping (200 ns = 8 ns/div → same CSV); zooming out drops the rate (`rate = 200·mult/SEC_per_div`,
+capped at the ADC max) — 1 ms/div on 40K is only ~2 MSa/s. Examples: 40K @ 20 kHz → **101 bytes**;
+512K @ 20 kHz → **1012 bytes**; 4K @ 20 MHz → 800 ns/div, 12.5 samples/clock; 2M @ 40K → 8 µs/div.
 
 ---
 

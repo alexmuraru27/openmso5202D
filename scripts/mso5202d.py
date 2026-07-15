@@ -506,10 +506,13 @@ MENU_NAMES = {
     25: 'Default Setup',   # factory reset — resets all params (verified 2026-07-09)
 }
 
-# Horizontal sample density. The vendor spec gives "sample interval = s/div /
-# 200" (i.e. 200 samples per division); confirmed to the digit against our own
-# cal signal (500 samples/period at 400 us/div, 1 kHz). A waveform block is
-# 3840 samples = 19.2 divisions.
+# Horizontal sample density = 200 samples per division — vendor spec ("sample interval = s/div /
+# 200"), confirmed against our cal signal. The acquired record spans exactly **20 divisions** with
+# a base length of 4000 samples; deep memory keeps the same 20-div window and multiplies the point
+# count by a store-rate factor ∈ {1,5,10,100,200} for 4K/20K/40K/512K/1M, i.e. deep samples/div =
+# 200·mult and deep_dt = (s/div)/(200·mult); the deep CSV carries `4000·mult + 64` rows. The **0x02
+# screen block returns 3840 = 19.2 div** of that 20-div record at the base 200 samples/div (this
+# SAMPLES_PER_DIV; used for the screen buffer only — the deep rate comes from the CSV #timebase).
 SAMPLES_PER_DIV = 200
 
 

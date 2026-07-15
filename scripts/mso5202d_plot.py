@@ -247,11 +247,17 @@ _SAMPLES_PER_CLOCK = 12
 
 def deep_tdiv_for_bit(bit_ns, deep_samples=40064, target_samples=_SAMPLES_PER_CLOCK):
     """Target SEC/DIV (ns/div) for a KNOWN highest bit/clock period, so the deep record puts
-    ~`target_samples` samples per clock (12 ≈ enough to decode with integrity — e.g. 20 MHz → ~10
-    samples/clock at this scope's deep sample-rate ceiling). deep_dt = 19.2·TDIV/deep_samples and
-    we want deep_dt = period/target → TDIV = period·deep_samples/(19.2·target). Caller supplies the
-    max signal frequency (`bit_ns = 1e9/max_hz`); no signal probe needed."""
-    return bit_ns * deep_samples / (19.2 * target_samples)
+    ~`target_samples` samples per clock (12 ≈ enough to decode with integrity).
+
+    The record is acquired over **exactly 20 divisions** with a length of `4000·mult` samples
+    (mult ∈ {1,10,100,200} for 4K/40K/512K/1M), so **deep samples-per-div = record_len/20 =
+    200·mult**. The CSV carries `record_len + 64` rows, hence `record_len = deep_samples − 64` and
+    samples/div = (deep_samples−64)/20. deep_dt = TDIV/(samples/div); set deep_dt = period/target →
+    TDIV = period·(samples/div)/target. Caller supplies the max frequency (`bit_ns = 1e9/max_hz`).
+    (NB the on-screen `0x02` buffer returns 3840 = 19.2 div of that 20-div record — a different,
+    fixed 200-samples/div view; this is the DEEP-record geometry.)"""
+    samples_per_div = (deep_samples - 64) / 20.0
+    return bit_ns * samples_per_div / target_samples
 
 
 def _parse_freq(text):
@@ -833,9 +839,11 @@ def download_wavedata(sc, dest, status=lambda m: None):
     return saved
 
 
-# deep record sample counts per depth code (verified: 40K→40064, 512K→400064; 1M inferred).
-# Used to compute the timebase for a target samples-per-clock from the max signal frequency.
-_DEEP_SAMPLES = {0: 4064, 4: 40064, 6: 400064, 7: 4000064}
+# Deep-record CSV row counts per store-depth code = record_len + 64, where record_len = 4000·mult
+# and mult by code = {0:1(4K),4:10(40K),6:100(512K),7:200(1M)}. 1M is 4000·200 = 800000 (+64),
+# single-channel only. Used to derive the timebase for a target samples/clock.
+# [verified 2026-07-15; earlier 1M=4000064 was a wrong guess]
+_DEEP_SAMPLES = {0: 4064, 4: 40064, 6: 400064, 7: 800064}
 
 
 def _wait_save_done(sc, status=lambda m: None, timeout=120):
@@ -1328,8 +1336,15 @@ class DecoderApp:
         self.v_maxfreq = tk.StringVar(value='2M')
         mf = ttk.Entry(g, textvariable=self.v_maxfreq, width=12)
         mf.pack(fill=tk.X)
-        # A changed target means a different timebase → require Prepare again.
+        # Samples per clock the timebase targets on that fastest edge (default 12 — enough to decode
+        # with integrity; raise for margin, lower to fit more bytes in the window).
+        spcrow = ttk.Frame(g); spcrow.pack(anchor='w', fill=tk.X)
+        ttk.Label(spcrow, text="samples/clock:").pack(side=tk.LEFT)
+        self.v_spc = tk.StringVar(value=str(_SAMPLES_PER_CLOCK))
+        ttk.Entry(spcrow, textvariable=self.v_spc, width=5).pack(side=tk.LEFT, padx=(4, 0))
+        # A changed target (freq or samples/clock) means a different timebase → require Prepare again.
         self.v_maxfreq.trace_add('write', lambda *a: self._set_prepared(False))
+        self.v_spc.trace_add('write', lambda *a: self._set_prepared(False))
         # Prepare ALWAYS does a Default Setup first (idempotent, card-safe) — no user toggle.
         # Which channels to prepare + capture (on, 1×, DC, 1 V/div). Untick to leave a channel off.
         self.v_setup = tk.BooleanVar(value=True)          # configure channels at all (kept for API)
@@ -1427,14 +1442,19 @@ class DecoderApp:
             self.status.set("tick at least one channel (CH1/CH2) to prepare"); return
         if code == 7 and len(channels) > 1:              # 1M store depth is single-channel only
             self.status.set("1M is single-channel only — untick CH1 or CH2 (or pick 512K)"); return
-        # Timebase from the max signal frequency the user wants to resolve (e.g. 20 MHz). The
-        # deep record is set so the fastest clock gets ~SAMPLES_PER_CLOCK samples — enough to
-        # decode with integrity. Blank/invalid → leave the timebase alone.
+        # Timebase from the max signal frequency the user wants to resolve (e.g. 20 MHz) and the
+        # samples/clock target — the deep record is set so the fastest clock gets that many samples.
+        # Blank/invalid freq → leave the timebase alone.
+        try:
+            spc = int(float(self.v_spc.get()))
+            assert spc >= 2
+        except Exception:
+            self.status.set(f"samples/clock must be an integer ≥ 2 (got '{self.v_spc.get()}')"); return
         tb_target_ns = None
         max_hz = _parse_freq(self.v_maxfreq.get())
         if max_hz:
             tb_target_ns = deep_tdiv_for_bit(1e9 / max_hz, _DEEP_SAMPLES.get(code, 40064),
-                                             target_samples=_SAMPLES_PER_CLOCK)
+                                             target_samples=spc)
         elif self.v_maxfreq.get().strip():
             self.status.set(f"can't parse MAX_SIGNAL_FRQ '{self.v_maxfreq.get()}' (e.g. 20M, 115200)"); return
         self._set_prepared(False)

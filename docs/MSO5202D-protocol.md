@@ -1240,9 +1240,19 @@ mis-reading of signed data and are **retracted**:
 
 ### 6.3 Horizontal: 200 samples/division, block width tracks the display, not the timebase
 
-- **200 samples per division** `[verified]`. Therefore
-  `sample_interval = time_per_div / 200` and `sample_rate = 200 / time_per_div`.
-  (`decode_settings()` exposes these as `SAMPLE-INTERVAL-ns` and `SAMPLERATE-HZ`.)
+- **200 samples per division** `[verified]`. Therefore `sample_interval = time_per_div / 200` and
+  `sample_rate = 200 / time_per_div` for the screen block. (`decode_settings()` exposes
+  `SAMPLE-INTERVAL-ns` = `TDIV/200` — a **screen-only** derivation; it is not clamped at the ADC
+  max and is not the deep-record rate — read the deep rate from the CSV `#timebase`. The old
+  `SAMPLERATE-HZ` derivation was removed as unused/misleading.)
+- **Deep-record geometry** `[verified 2026-07-15]`: the acquired record spans **exactly 20
+  divisions** with `record_len = 4000·mult` samples, `mult` ∈ {1, 5, 10, 100, 200} for
+  4K / 20K / 40K / 512K / **1M** (so 1M = 4000·200 = **800000** samples, single-channel only — the
+  "1,000,000" is the allocated buffer). Hence **deep samples/div = 200·mult**, **deep dt =
+  TDIV/(200·mult)**, the window is `20·TDIV` (deep memory does NOT widen it — it multiplies the
+  point count), and the Save→CSV file has `record_len + 64` rows (4064 / 40064 / 400064 / 800064).
+  The timebase steps are **2-4-8 per decade**, index 0 = 2 ns/div (single-channel; dual-channel's
+  fastest detent is 4 ns/div).
 - The **block width is not fixed** and, crucially, **does not depend on the timebase**.
   It is governed by whether the right-hand soft-menu panel is open — the settings-blob
   field `CONTROL-DISP-MENU` (frame offset 206):
