@@ -1055,9 +1055,19 @@ def decode_capture(results, params):
         if name:
             by_name[name] = threshold_volts(r['volts'])
 
-    def ch(idx):                                          # 0→CH1, 1→CH2
+    by_name_v = {}                                        # source name → raw volts (for analog checks)
+    for i, r in enumerate(analog):
+        name = r.get('source') or (_SRC_NAMES[i] if i < 2 else None)
+        if name:
+            by_name_v[name] = np.asarray(r['volts'])
+
+    def ch(idx):                                          # 0→CH1, 1→CH2  (thresholded digital)
         name = _SRC_NAMES[idx] if idx < 2 else None
         return by_name.get(name) if name in by_name else threshold_volts(analog[min(idx, len(analog)-1)]['volts'])
+
+    def chv(idx):                                         # raw volts for channel idx
+        name = _SRC_NAMES[idx] if idx < 2 else None
+        return by_name_v.get(name) if name in by_name_v else np.asarray(analog[min(idx, len(analog)-1)]['volts'])
 
     proto = params.get('proto', 'none')
     ns = dt * 1e9 if dt else None
@@ -1076,10 +1086,12 @@ def decode_capture(results, params):
         # override when given. msb_first is user-set (can't be inferred).
         skw = dict(cpol=params.get('cpol', 0), cpha=params.get('cpha', 0),
                    msb_first=params.get('msb', True), auto_mode=params.get('auto_mode', False))
-        a = decode_spi(ch(clk), ch(data), **skw)
+        # Pass the analog clock so the decoder can tell a real inter-word gap (clock flat) from a
+        # bandwidth-missed edge (clock pulsed) — fixes low-frequency continuous framing.
+        a = decode_spi(ch(clk), ch(data), clk_analog=chv(clk), **skw)
         # channel labels can be imperfect (Source-cycle order) — also try swapping clk/data
         # and keep whichever decodes more bytes, so SCLK/data can't be silently swapped.
-        b = decode_spi(ch(data), ch(clk), **skw)
+        b = decode_spi(ch(data), ch(clk), clk_analog=chv(data), **skw)
         return (a, dt, [clk, data]) if n_bytes(a) >= n_bytes(b) else (b, dt, [data, clk])
     if proto == 'i2c':
         scl, sda = params.get('scl', 0), params.get('sda', 1)

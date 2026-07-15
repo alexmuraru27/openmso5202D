@@ -9,22 +9,24 @@ import numpy as np
 
 
 def _i2c_forward(scl, sda):
-    """Forward I²C decode: bits counted from each START. Returns START/STOP markers + byte dicts."""
+    """Forward I²C decode: bits counted from each START. Returns START/STOP markers + byte dicts.
+    Handles repeated START (labelled 'Sr'), 7-bit and 10-bit (11110XX) addressing, ACK/NACK."""
     n = len(scl)
     events = []
     bits, byte_start = [], None
     in_frame = False
-    expect_addr = False
+    expect_addr = False      # first byte after START = address
+    expect_addr2 = False     # second byte of a 10-bit address
     for i in range(1, n):
         if scl[i] == 1 and scl[i - 1] == 1:
-            if sda[i - 1] == 1 and sda[i] == 0:              # START
-                events.append({'start': i, 'end': i, 'text': 'S', 'kind': 'start'})
+            if sda[i - 1] == 1 and sda[i] == 0:              # START (repeated if already in a transfer)
+                events.append({'start': i, 'end': i, 'text': 'Sr' if in_frame else 'S', 'kind': 'start'})
                 bits, byte_start = [], None
-                in_frame, expect_addr = True, True
+                in_frame, expect_addr, expect_addr2 = True, True, False
                 continue
             if sda[i - 1] == 0 and sda[i] == 1:              # STOP
                 events.append({'start': i, 'end': i, 'text': 'P', 'kind': 'stop'})
-                bits, byte_start, in_frame = [], None, False
+                bits, byte_start, in_frame, expect_addr2 = [], None, False, False
                 continue
         if in_frame and scl[i] == 1 and scl[i - 1] == 0:     # sample on SCL rising
             if byte_start is None:
@@ -35,11 +37,19 @@ def _i2c_forward(scl, sda):
                 for b in bits[:8]:
                     val = (val << 1) | b
                 ack = (bits[8] == 0)
-                if expect_addr:
+                nak = '' if ack else 'N'
+                if expect_addr and (val & 0xF8) == 0xF0:     # 10-bit address, 1st byte (11110XX + R/W)
+                    rw = 'R' if (val & 1) else 'W'
+                    text = f"10b{((val >> 1) & 3):01d}xx{rw}{'A' if ack else 'N'}"; kind = 'addr'
+                    expect_addr, expect_addr2 = False, True
+                elif expect_addr:                            # 7-bit address + R/W
                     rw = 'R' if (val & 1) else 'W'
                     text = f"{val >> 1:02X}{rw}{'A' if ack else 'N'}"; kind = 'addr'
                     expect_addr = False
-                else:
+                elif expect_addr2:                           # 10-bit address, low 8 bits
+                    text = f"A{val:02X}{'A' if ack else 'N'}"; kind = 'addr'
+                    expect_addr2 = False
+                else:                                        # data byte
                     text = f"{val:02X}{'A' if ack else 'N'}"; kind = 'byte'
                 events.append({'start': byte_start, 'end': i, 'value': val,
                                'ack': ack, 'text': text, 'kind': kind})

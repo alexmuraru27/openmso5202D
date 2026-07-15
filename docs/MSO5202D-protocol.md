@@ -2307,6 +2307,13 @@ from the transport, not the decoder:
   dead firmware path — Section 6). So **UART = 1 line; SPI = SCLK + one data line**
   (MOSI *or* MISO, no full-duplex, no CS channel — bytes re-frame on an idle-clock gap);
   **I²C = SDA + SCL**. [verified]
+- **SPI missed-edge vs. real-gap — resolved from the analog clock.** Without CS, a gap of a
+  few bit-periods between clock edges is ambiguous: it can be a bandwidth-dropped clock pulse
+  (reconstruct the edge) OR a real inter-word transaction idle (start a new byte). Timing alone
+  can't tell them apart — no edge-triggered logic analyzer can. But a passive scope capture has
+  the raw clock waveform: inspect the MIDDLE of the gap — **flat at idle ⇒ real gap (reframe);
+  a sub-threshold swing ⇒ missed pulse (reconstruct)**. This fixes low-frequency continuous
+  streams (10 kHz: 0.25 → 0.94 ramp on hardware) with no regression on fast lines. [verified 2026-07-15]
 - **Short messages only** — the record is ≤ 3840 samples (no deep memory over USB), so a
   message must fit one screen. **Set the timebase** for the bit rate (recipe 10.2,
   ≈ 15–25 samples/bit). [verified]

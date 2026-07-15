@@ -32,8 +32,29 @@ def detect_sample_rising(clk, data):
     return not shift_on_rising                                # sample on the edge opposite the shift
 
 
+def _gap_has_pulse(clk_analog, a, b, med):
+    """When two detected clock edges are ~2..N periods apart, decide whether the clock actually
+    PULSED in the gap (a bandwidth-limited/rounded pulse that didn't cross the threshold → a MISSED
+    edge to reconstruct) or stayed FLAT at idle (a real inter-word transaction gap → reframe). This
+    is the one discriminator a passive scope capture has that edge-triggered hardware lacks: the raw
+    clock waveform. We inspect the MIDDLE of the gap (away from the transition tails at a/b): a real
+    idle stays near one level (small range); a missed pulse shows a swing. No idle-level/polarity
+    knowledge needed. Returns True if a pulse is present."""
+    m = max(1, int(round(med)))
+    seg = clk_analog[min(a + m // 2, b - 1):max(b - m // 2, a + 2)]
+    if len(seg) < 3:
+        seg = clk_analog[a + 1:b]
+    if len(seg) < 2:
+        return True
+    lo, hi = np.percentile(clk_analog, 1), np.percentile(clk_analog, 99)
+    swing = hi - lo
+    if swing < 1e-9:
+        return True
+    return (float(seg.max()) - float(seg.min())) > 0.4 * swing
+
+
 def decode_spi(clk, data, cpol=0, cpha=0, msb_first=True, cs=None, bits=8,
-               word_gap=10.0, max_missed=8, anchor='auto', auto_mode=False):
+               word_gap=10.0, max_missed=8, anchor='auto', auto_mode=False, clk_analog=None):
     """Decode an SPI data line clocked by `clk`. With clock idle level `cpol`, the sampling edge is
     rising iff cpol==cpha, else falling.
 
@@ -88,8 +109,15 @@ def decode_spi(clk, data, cpol=0, cpha=0, msb_first=True, cs=None, bits=8,
             gap = e - prev_edge
             n = int(round(gap / med)) if med else 1
             if 2 <= n <= max_missed and abs(gap - n * med) <= 0.5 * med:
-                for k in range(1, n):
-                    add(prev_edge + int(round(k * med)))
+                # A 2..N-period gap is EITHER missed clock edges (bandwidth-limited clock) OR a real
+                # short inter-word idle. Timing can't tell them apart — but the analog clock can: if
+                # it stayed flat, it's a real gap → reframe; if it pulsed, reconstruct the missed
+                # edge(s). Without the analog, fall back to always-reconstruct (the old behaviour).
+                if clk_analog is not None and not _gap_has_pulse(clk_analog, prev_edge, e, med):
+                    new_burst()
+                else:
+                    for k in range(1, n):
+                        add(prev_edge + int(round(k * med)))
             elif word_gap and gap > word_gap * med:
                 new_burst()
         prev_edge = e
@@ -184,6 +212,16 @@ def selftest():
     good = ramp_ratio(got) == 1.0 and got and got[-1] == 255 and len(got) > 200
     print(f"SPI  end-anchor  : {len(got)} bytes ramp={ramp_ratio(got):.3f} last={got[-1] if got else '-':>3}"
           f", {'OK' if good else 'FAIL'}")
+    ok &= good
+    # Analog gap disambiguation: from the raw clock waveform, a FLAT gap is a real inter-word idle
+    # (reframe) while a gap containing a sub-threshold PULSE is a missed edge (reconstruct).
+    flat = np.zeros(40); flat[:2] = 3.3; flat[-2:] = 3.3            # sharp edges at ends, idle between
+    pulsed = np.zeros(40); pulsed[:2] = 3.3; pulsed[18:22] = 3.3; pulsed[-2:] = 3.3   # a bump in the middle
+    fp_flat = _gap_has_pulse(flat, 0, 40, 10)
+    fp_pulse = _gap_has_pulse(pulsed, 0, 40, 10)
+    good = (not fp_flat) and fp_pulse
+    print(f"SPI  gap-disambig: flat->pulse={fp_flat}(want F) bump->pulse={fp_pulse}(want T), "
+          f"{'OK' if good else 'FAIL'}")
     ok &= good
     return ok
 
