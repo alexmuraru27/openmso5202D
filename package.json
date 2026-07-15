@@ -1,0 +1,13 @@
+{
+  "name": "openmso5202d",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Reverse-engineered driver + Tauri GUI for the Hantek MSO5202D oscilloscope",
+  "scripts": {
+    "bootstrap": "pnpm install && cargo fetch",
+    "build": "pnpm --filter openmso5202d-frontend tauri build",
+    "dev": "pnpm --filter openmso5202d-frontend tauri dev",
+    "playground": "cargo run -p mso5202d --bin playground",
+    "backend:check": "cargo test -p mso5202d && cargo clippy -p mso5202d"
+  }
+}

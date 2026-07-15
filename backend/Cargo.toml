@@ -1,0 +1,21 @@
+[package]
+name = "mso5202d"
+description = "USB transport + wire protocol driver for the Hantek MSO5202D oscilloscope (049f:505a)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mso5202d"
+path = "src/lib.rs"
+
+# The "hack main": a scratch binary for driving the driver by hand against real
+# hardware while building out higher layers. Run with `cargo run -p mso5202d --bin playground`.
+[[bin]]
+name = "playground"
+path = "src/bin/playground.rs"
+
+[dependencies]
+rusb = "0.9"        # libusb-1.0 bindings — detach/reset/claim/clear_halt/bulk transfer
+thiserror = "2"     # ergonomic error enum

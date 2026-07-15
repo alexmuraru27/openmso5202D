@@ -4,3 +4,14 @@ __pycache__/
 CLAUDE.md
 .plot_captures/
 .claude/
+
+# Rust / Cargo
+/target/
+**/target/
+
+# Node / pnpm
+node_modules/
+frontend/dist/
+
+# Tauri generated
+frontend/src-tauri/gen/

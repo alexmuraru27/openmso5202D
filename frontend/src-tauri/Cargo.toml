@@ -1,0 +1,22 @@
+[package]
+name = "openmso5202d"
+description = "openmso5202D — Tauri desktop app for the Hantek MSO5202D oscilloscope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The Tauri app is a library (the desktop shell links it) plus a thin binary entry point.
+[lib]
+name = "openmso5202d_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# NOTE: no `mso5202d` backend dependency yet. The frontend is intentionally left
+# unconnected; a dedicated backend-API layer will bridge to the driver later, and this is
+# where that dependency (plus serde for command payloads) will be re-added.
