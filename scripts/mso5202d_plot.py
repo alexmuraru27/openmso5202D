@@ -541,24 +541,16 @@ def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, channels=
     return None
 
 
-def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
-    """Grab ONE record from an already-prepared + stopped scope (the fast half). No reset/prep.
+def _trigger_record(sc, status=lambda m: None, wait_trig=25):
+    """Grab ONE trigger-aligned record via **SINGLE-SEQ** — the ONLY capture mechanism. We never
+    manually RUN→STOP to freeze a record (a manual stop is not trigger-aligned and can latch a
+    stale/partial buffer); every capture arms the single-seq and lets the scope stop itself on a
+    real trigger. Returns True once it confirms a captured/stopped state (TRIG-STATE ∈ {0,5}).
 
-    * `use_single=True` (deep): arm **SINGLE SEQ** — the scope triggers on the signal edge and
-      stops itself with a full-depth, trigger-aligned record; Force-Trig only as a last resort.
-    * `use_single=False` (4K live serial): **RUN → STOP freeze** — fills the window with the
-      continuous stream and freezes ONE simultaneous 2-channel acquisition (aligned CH1/CH2)."""
+    Ensures the scope is RUNNING and acquiring BEFORE arming SINGLE — a single-seq armed from a
+    STOPPED scope latches the stale/empty buffer (all-0xFF, no trace) instead of a fresh
+    acquisition. (No-op cost when already running; _run_stop only presses on a state mismatch.)"""
     from mso5202d_decode import _key
-    if not use_single:
-        status("capturing live signal (run → stop freeze)…")
-        _freeze(sc)
-        status("record captured (freeze).")
-        return
-    # Ensure the scope is RUNNING and acquiring the live signal BEFORE arming SINGLE.
-    # A single-seq armed from a STOPPED scope latches the stale/empty buffer it was
-    # holding (an all-0xFF record — no real trace) instead of a fresh acquisition.
-    # Start it running, let it acquire briefly, THEN arm the single-seq. (No-op cost
-    # when already running, since _run_stop only presses when the state disagrees.)
     if _is_stopped(sc):
         status("scope was stopped — starting it running before the single-seq…")
         _run_stop(sc, True)
@@ -580,16 +572,17 @@ def _trigger_record(sc, use_single, status=lambda m: None, wait_trig=25):
         time.sleep(0.4)
     status("record captured (single-seq)." if captured
            else "record may be incomplete (single-seq didn't confirm stop).")
+    return captured
 
 
 def trigger_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
-                    wait_trig=25, use_single=True, tb_target_ns=None, reset=True):
-    """Backward-compatible one-shot = prepare + trigger (used by tests/headless). The GUI
-    splits these into a Prepare button and a Capture button instead. `tb_target_ns` sets an
+                    wait_trig=25, tb_target_ns=None, reset=True):
+    """Backward-compatible one-shot = prepare + single-seq trigger (used by tests/headless). The
+    GUI splits these into a Prepare button and a Capture button instead. `tb_target_ns` sets an
     explicit SEC/DIV via keys (for a caller that knows the bit rate)."""
     prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset,
                     tb_target_ns=tb_target_ns)
-    _trigger_record(sc, use_single, status, wait_trig)
+    _trigger_record(sc, status, wait_trig)
 
 
 # Save/Recall → CSV softkey ids (verified 2026-07-10 by screenshotting the menu):
@@ -868,39 +861,21 @@ def _direct_acquire(sc, channels, status=lambda m: None):
     return out
 
 
-def _freeze(sc, min_fill_s=0.6):
-    """RUN → (let one full record fill) → STOP: freeze one live 2-channel acquisition. Waits
-    at least one record-window (= 19.2 × sec/div, read from HORIZ-TB) so a DEEP record at a
-    slow timebase actually fills before we stop — otherwise the freeze grabs a partial record.
-    STOP is confirmed via TRIG-STATE (in `_run_stop`). This is used for every capture (4K and
-    deep): SINGLE-SEQ stalls forever/armed at slow timebases even with Force (verified
-    2026-07-11), whereas a RUN→STOP freeze reliably reaches STOP and catches the live stream."""
-    from mso5202d import decode_settings, TB_TO_NS
-    from mso5202d_decode import _raw_settings
-    _run_stop(sc, True)
-    try:
-        tdiv_ns = TB_TO_NS.get(decode_settings(_raw_settings(sc)).get('HORIZ-TB'), 0)
-        fill = max(min_fill_s, 19.2 * tdiv_ns / 1e9 * 1.3)   # one window + 30% margin
-    except Exception:
-        fill = min_fill_s
-    time.sleep(min(fill, 6.0))                                # cap the wait at 6 s
-    _run_stop(sc, False)
-
-
 # deep record sample counts per depth code (verified: 40K→40064, 512K→400064; 1M inferred)
 _DEEP_SAMPLES = {0: 4064, 4: 40064, 6: 400064, 7: 4000064}
 
 
 def _probe_pulse_ns(sc, status=lambda m: None):
-    """Quick 4K freeze + direct read to measure the signal's **finest pulse** (ns). Used to
-    pick a deep timebase that spreads the record over many bit-periods. Returns None if no
-    channel carries a decodable signal."""
+    """Quick 4K SINGLE-SEQ capture + direct read to measure the signal's **finest pulse** (ns).
+    Used to pick a deep timebase that spreads the record over many bit-periods. Returns None if
+    no channel carries a decodable signal."""
     from mso5202d import decode_settings
     from mso5202d_decode import _raw_settings
     from serial_decode import threshold_volts
-    # Vertical is already set (V/div via keys in prepare_capture) — just freeze a 4K record and
-    # read it. No 0x11: a RUN→STOP freeze fills the screen buffer, read directly over 0x02.
-    _freeze(sc)
+    # Vertical is already set (V/div via keys in prepare_capture). Capture a 4K record the SAME
+    # way as every other capture — a SINGLE-SEQ trigger, never a manual RUN→STOP — then read the
+    # frozen screen buffer directly over 0x02.
+    _trigger_record(sc, status=lambda m: None, wait_trig=8)
     si_ns = decode_settings(_raw_settings(sc)).get('SAMPLE-INTERVAL-ns') or 0
     if not si_ns:
         return None
@@ -1026,7 +1001,7 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
     # (TRIG-STATE → 5/SINGLE, button red); we leave it STOPPED (don't toggle Run/Stop) so the
     # CSV saves read a stable frozen buffer and the Source cycles cleanly across CH1/CH2. (The
     # old 4K direct-0x02 fast path was removed for consistency — 4K now also goes via the card.)
-    _trigger_record(sc, use_single=True, status=status)
+    _trigger_record(sc, status=status)
 
     sh = Shell(scope=sc)                                 # share our USB handle for `ls`
     found = []; seen = set()
@@ -1042,6 +1017,20 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
         if not enabled:
             status("no channels enabled to save"); return found
         status("bringing back: " + ", ".join(_SRC_NAMES[t] for t in enabled))
+        # GUARD: only go to the Save/Recall menu once the single-seq has actually CAPTURED —
+        # TRIG-STATE must be a stopped/triggered state ({0,5}, button red). If it is still
+        # armed/running (no trigger caught), saving would write a stale/empty record. Nudge with
+        # Force-Trig, re-check, and abort the save if it never reaches a captured state.
+        if not _is_stopped(sc):
+            from mso5202d_decode import _key
+            status("not in triggered state after single-seq — forcing a trigger before saving…")
+            for _ in range(3):
+                _key(sc, KEY_FORCE); time.sleep(0.6)
+                if _is_stopped(sc):
+                    break
+            if not _is_stopped(sc):
+                status("scope never reached a captured/triggered state — NOT saving (no record)")
+                return found
         if not (_press_for_menu(sc, KEY_SR_MENU, 47, status)
                 and _press_for_menu(sc, FN_CSV, 48, status)):
             status("couldn't open the CSV menu"); return found

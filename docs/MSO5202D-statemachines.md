@@ -192,9 +192,17 @@ first need **one** Save press, not two (else a spurious extra file).
 - **Reset first (idempotency).** Default Setup (keyid 21) → known state (Source=CH1, CH2 off,
   4K, default TB); card-safe; confirm via `CONTROL-MENUID == 25`, settle ~1.5 s. A capture then
   never depends on how the panel was left (the CSV Source isn't in the settings blob).
+- **Single-seq is the ONLY capture mechanism — never a manual RUN→STOP.** A manual stop is not
+  trigger-aligned and can latch a stale/partial buffer; every record (4K, deep, and the auto-tb
+  probe) is a single-seq that lets the scope stop itself on a real trigger. Ensure the scope is
+  RUNNING before arming SINGLE (a single-seq armed from STOPPED latches the stale buffer).
 - **Single-seq stops at TRIG-STATE 5**, not 0 — the RUN/STOP button goes red at 5.
   `_STOPPED_STATES = {0,5}`. Misreading 5 as "running" made `_run_stop` toggle it back into RUN
   (the "512K kept running / only CH1" bug). Wait for state ∈ {0,5}; **never toggle Run/Stop after**.
+- **Verify the triggered/stopped state BEFORE the Save/Recall menu.** After the single-seq, check
+  `TRIG-STATE ∈ {0,5}` before opening the CSV menu — if it is still armed/running (no trigger
+  caught), Force-Trig a couple of times and, if it still never stops, **abort the save** rather
+  than write a stale/empty record. `[verified 2026-07-15]`
 - **V/div — raise it off the DS default.** Default Setup leaves **100 mV/div**, at which a 3.3 V
   logic signal is 33 divisions tall = **clipped off-screen** (Set-50% then can't measure it, and
   the decode is garbage). Step each enabled channel's V/div ± key (CH1 `1c`/`1d`, CH2 `22`/`23`)
@@ -239,6 +247,8 @@ more samples (40K over 200 µs/div is still ~5 SPI bytes). For many frames, slow
 `deep_dt = 19.2·TDIV/deep_samples` (40K→40064, 512K→400064), so for ~15–25 samples on the finest
 pulse set `TDIV = (pulse/target)·deep_samples/19.2`. `auto_tb=True` probes the pulse at 4K and
 picks it — verified 40K @ 20 kHz SPI: 5 → **101 bytes** (80 ms); 512K → **1012 bytes** (800 ms).
+The probe grabs its 4K measurement the **same way as every capture — a SINGLE-SEQ trigger, never
+a manual RUN→STOP** (see the rule below); it reads the frozen screen buffer over `0x02` after.
 
 ---
 
