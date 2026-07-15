@@ -1,0 +1,722 @@
+[
+ {
+  "freq": 10000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 100,
+  "tb_ns": 200000.0,
+  "dt_ns": 1000.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   81,
+   20
+  ],
+  "n_bytes": 5,
+  "ramp": 1.0,
+  "run": 5,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_10000hz_100spc_CH1.csv",
+   "spi_10000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 10000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 12,
+  "tb_ns": 1666666.7,
+  "dt_ns": 10000.0,
+  "act_spc": 10.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   809,
+   228
+  ],
+  "n_bytes": 50,
+  "ramp": 0.0,
+  "run": 1,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_10000hz_12spc_CH1.csv",
+   "spi_10000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 10000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 100,
+  "tb_ns": 2000000.0,
+  "dt_ns": 1000.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   802,
+   191
+  ],
+  "n_bytes": 50,
+  "ramp": 0.0,
+  "run": 1,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_10000hz_100spc_CH1.csv",
+   "spi_10000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 10000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 12,
+  "tb_ns": 16666666.7,
+  "dt_ns": 10000.0,
+  "act_spc": 10.0,
+  "swings": [
+   3.48,
+   3.48
+  ],
+  "edges": [
+   7986,
+   2037
+  ],
+  "n_bytes": 500,
+  "ramp": 0.255,
+  "run": 64,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_10000hz_12spc_CH1.csv",
+   "spi_10000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 10000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 100,
+  "tb_ns": 20000000.0,
+  "dt_ns": 1000.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.48
+  ],
+  "edges": [
+   7973,
+   1985
+  ],
+  "n_bytes": 500,
+  "ramp": 0.004,
+  "run": 2,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_10000hz_100spc_CH1.csv",
+   "spi_10000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 10000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 12,
+  "tb_ns": 166666666.7,
+  "dt_ns": 10000.0,
+  "act_spc": 10.0,
+  "swings": [
+   3.48,
+   3.48
+  ],
+  "edges": [
+   79735,
+   20072
+  ],
+  "n_bytes": 5002,
+  "ramp": 0.254,
+  "run": 64,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_10000hz_12spc_CH1.csv",
+   "spi_10000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 500000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 100,
+  "tb_ns": 4000.0,
+  "dt_ns": 20.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.44,
+   3.44
+  ],
+  "edges": [
+   81,
+   22
+  ],
+  "n_bytes": 5,
+  "ramp": 0.0,
+  "run": 1,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_500000hz_100spc_CH1.csv",
+   "spi_500000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 500000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 12,
+  "tb_ns": 33333.3,
+  "dt_ns": 200.0,
+  "act_spc": 10.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   777,
+   168
+  ],
+  "n_bytes": 48,
+  "ramp": 1.0,
+  "run": 48,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_500000hz_12spc_CH1.csv",
+   "spi_500000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 500000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 100,
+  "tb_ns": 40000.0,
+  "dt_ns": 20.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   770,
+   188
+  ],
+  "n_bytes": 47,
+  "ramp": 0.37,
+  "run": 18,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_500000hz_100spc_CH1.csv",
+   "spi_500000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 500000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 12,
+  "tb_ns": 333333.3,
+  "dt_ns": 200.0,
+  "act_spc": 10.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   7731,
+   1940
+  ],
+  "n_bytes": 482,
+  "ramp": 0.929,
+  "run": 448,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_500000hz_12spc_CH1.csv",
+   "spi_500000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 500000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 100,
+  "tb_ns": 400000.0,
+  "dt_ns": 20.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   7747,
+   1934
+  ],
+  "n_bytes": 484,
+  "ramp": 0.998,
+  "run": 483,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_500000hz_100spc_CH1.csv",
+   "spi_500000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 500000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 12,
+  "tb_ns": 3333333.3,
+  "dt_ns": 200.0,
+  "act_spc": 10.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   77411,
+   19425
+  ],
+  "n_bytes": 4837,
+  "ramp": 0.994,
+  "run": 4809,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_500000hz_12spc_CH1.csv",
+   "spi_500000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 2000000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 100,
+  "tb_ns": 1000.0,
+  "dt_ns": 5.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.44,
+   3.4
+  ],
+  "edges": [
+   81,
+   12
+  ],
+  "n_bytes": 5,
+  "ramp": 0.0,
+  "run": 1,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_2000000hz_100spc_CH1.csv",
+   "spi_2000000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 2000000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 12,
+  "tb_ns": 8333.3,
+  "dt_ns": 40.0,
+  "act_spc": 12.5,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   564,
+   173
+  ],
+  "n_bytes": 35,
+  "ramp": 0.0,
+  "run": 1,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_2000000hz_12spc_CH1.csv",
+   "spi_2000000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 2000000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 100,
+  "tb_ns": 10000.0,
+  "dt_ns": 5.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   701,
+   196
+  ],
+  "n_bytes": 43,
+  "ramp": 1.0,
+  "run": 43,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_2000000hz_100spc_CH1.csv",
+   "spi_2000000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 2000000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 12,
+  "tb_ns": 83333.3,
+  "dt_ns": 40.0,
+  "act_spc": 12.5,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   5699,
+   1386
+  ],
+  "n_bytes": 356,
+  "ramp": 0.997,
+  "run": 355,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_2000000hz_12spc_CH1.csv",
+   "spi_2000000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 2000000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 100,
+  "tb_ns": 100000.0,
+  "dt_ns": 5.0,
+  "act_spc": 100.0,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   7222,
+   1794
+  ],
+  "n_bytes": 450,
+  "ramp": 0.973,
+  "run": 438,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_2000000hz_100spc_CH1.csv",
+   "spi_2000000hz_100spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 2000000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 12,
+  "tb_ns": 833333.3,
+  "dt_ns": 40.0,
+  "act_spc": 12.5,
+  "swings": [
+   3.48,
+   3.44
+  ],
+  "edges": [
+   57517,
+   14425
+  ],
+  "n_bytes": 3594,
+  "ramp": 0.998,
+  "run": 3587,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_2000000hz_12spc_CH1.csv",
+   "spi_2000000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 20000000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 30,
+  "tb_ns": 333.3,
+  "dt_ns": 2.5,
+  "act_spc": 20.0,
+  "swings": [
+   2.72,
+   3.2
+  ],
+  "edges": [
+   203,
+   31
+  ],
+  "n_bytes": 12,
+  "ramp": 1.0,
+  "run": 12,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_20000000hz_30spc_CH1.csv",
+   "spi_20000000hz_30spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 20000000,
+  "depth": "4k",
+  "depth_code": 0,
+  "spc": 12,
+  "tb_ns": 833.3,
+  "dt_ns": 5.0,
+  "act_spc": 10.0,
+  "swings": [
+   2.68,
+   3.32
+  ],
+  "edges": [
+   406,
+   104
+  ],
+  "n_bytes": 25,
+  "ramp": 1.0,
+  "run": 25,
+  "sizes": [
+   4064,
+   4064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_20000000hz_12spc_CH1.csv",
+   "spi_20000000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 20000000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 30,
+  "tb_ns": 3333.3,
+  "dt_ns": 5.0,
+  "act_spc": 10.0,
+  "swings": [
+   2.68,
+   3.4
+  ],
+  "edges": [
+   3966,
+   1003
+  ],
+  "n_bytes": 247,
+  "ramp": 0.776,
+  "run": 192,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_20000000hz_30spc_CH1.csv",
+   "spi_20000000hz_30spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 20000000,
+  "depth": "40k",
+  "depth_code": 4,
+  "spc": 12,
+  "tb_ns": 8333.3,
+  "dt_ns": 5.0,
+  "act_spc": 10.0,
+  "swings": [
+   2.68,
+   3.4
+  ],
+  "edges": [
+   3964,
+   1003
+  ],
+  "n_bytes": 247,
+  "ramp": 0.776,
+  "run": 192,
+  "sizes": [
+   40064,
+   40064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_20000000hz_12spc_CH1.csv",
+   "spi_20000000hz_12spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 20000000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 30,
+  "tb_ns": 33333.3,
+  "dt_ns": 5.0,
+  "act_spc": 10.0,
+  "swings": [
+   2.72,
+   3.4
+  ],
+  "edges": [
+   39143,
+   9808
+  ],
+  "n_bytes": 2448,
+  "ramp": 0.999,
+  "run": 1810,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_20000000hz_30spc_CH1.csv",
+   "spi_20000000hz_30spc_CH2.csv"
+  ]
+ },
+ {
+  "freq": 20000000,
+  "depth": "512k",
+  "depth_code": 6,
+  "spc": 12,
+  "tb_ns": 83333.3,
+  "dt_ns": 5.0,
+  "act_spc": 10.0,
+  "swings": [
+   2.72,
+   3.4
+  ],
+  "edges": [
+   39259,
+   9855
+  ],
+  "n_bytes": 2454,
+  "ramp": 1.0,
+  "run": 2454,
+  "sizes": [
+   400064,
+   400064
+  ],
+  "size_ok": true,
+  "validated": true,
+  "files": [
+   "spi_20000000hz_12spc_CH1.csv",
+   "spi_20000000hz_12spc_CH2.csv"
+  ]
+ }
+]

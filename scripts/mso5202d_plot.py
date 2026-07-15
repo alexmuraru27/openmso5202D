@@ -904,7 +904,8 @@ def _save_file_only(sc, sh, before, seen, wait_s, status, filelist_open=False):
 
 
 def deep_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
-                 save_sources=None, wait_s=None, delete_after=False, reset=True, tb_target_ns=None):
+                 save_sources=None, wait_s=None, delete_after=False, reset=True, tb_target_ns=None,
+                 wait_trig=25):
     """One-shot capture = `prepare_capture()` then `capture_prepared()` (the GUI calls those
     two separately — a Prepare button + a re-pressable Capture button). Brings **every enabled
     channel** back to the PC tagged `r['source']` = 'CH1'/'CH2'/'LA', via the unified
@@ -919,11 +920,11 @@ def deep_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1,
     prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset,
                     tb_target_ns=tb_target_ns)
     return capture_prepared(sc, depth_code, status, save_sources=save_sources, la=la,
-                            wait_s=wait_s, delete_after=delete_after)
+                            wait_s=wait_s, delete_after=delete_after, wait_trig=wait_trig)
 
 
 def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, la=False,
-                     wait_s=None, delete_after=False):
+                     wait_s=None, delete_after=False, wait_trig=25):
     """**Capture** one record from an already-`prepare_capture()`d scope and bring **every
     enabled channel** back to the PC (tagged `r['source']`). Re-pressable — no reset, no
     re-configure. **One unified mechanism for every depth** (4K included): SINGLE-SEQ trigger
@@ -944,7 +945,7 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
     # (TRIG-STATE → 5/SINGLE, button red); we leave it STOPPED (don't toggle Run/Stop) so the
     # CSV saves read a stable frozen buffer and the Source cycles cleanly across CH1/CH2. (The
     # old 4K direct-0x02 fast path was removed for consistency — 4K now also goes via the card.)
-    _trigger_record(sc, status=status)
+    _trigger_record(sc, status=status, wait_trig=wait_trig)
 
     sh = Shell(scope=sc)                                 # share our USB handle for `ls`
     found = []; seen = set()
@@ -1002,8 +1003,9 @@ def capture_prepared(sc, depth_code, status=lambda m: None, save_sources=None, l
         saved = []
         for ch, name in picked:
             try:
-                r = parse_wavedata_csv(sc.read_file('/mnt/udisk/' + name, timeout=60000))
-                r['file'] = name; r['source'] = _SRC_NAMES[ch]
+                raw = sc.read_file('/mnt/udisk/' + name, timeout=60000)
+                r = parse_wavedata_csv(raw)
+                r['file'] = name; r['source'] = _SRC_NAMES[ch]; r['raw'] = raw
                 saved.append(r)
                 dt = r.get('dt_s')
                 status(f"  {name} = {_SRC_NAMES[ch]}: {r['size']} samples"
