@@ -2311,15 +2311,20 @@ from the transport, not the decoder:
   message must fit one screen. **Set the timebase** for the bit rate (recipe 10.2,
   ≈ 15–25 samples/bit). [verified]
 - **Threshold** the analog trace to logic: unwrap bytes → divisions
-  (`y_div = (int8(byte) − 16)/25`), then Schmitt-trigger at the midpoint of the detected
-  low/high rails. Use the **STOP-then-read** synchronized capture (recipe 10.6) so the
-  clock and data channels come from one frozen acquisition. [verified]
+  (`y_div = (int8(byte) − 16)/25`), then Schmitt-trigger against the signal's **local
+  envelope** — a sliding max/min over ~1.5 clock periods sets a per-sample midpoint, so a
+  fast line whose low level droops during active bursts (AC coupling / limited bandwidth)
+  still resets every cycle where a single global threshold would drop edges. Use the
+  **STOP-then-read** synchronized capture (recipe 10.6) so the clock and data channels come
+  from one frozen acquisition. [verified]
 - **Some frozen acquisitions come back glitched** (more so at slow timebases) — re-capture;
   the decoders are deterministic. [verified]
 
 Verified bit-rate ranges (ESP32 sources, ramp decoded byte-for-byte): UART 8N1
-**9600 – 115200 baud**; SPI mode 0 MSB **10 kHz – 2 MHz SCLK**; I²C **~17 – 167 kHz SCL**
-(source ceiling; the edge-driven decoder has no inherent limit). [verified]
+**9600 – 115200 baud**; SPI mode 0 MSB **10 kHz – 20 MHz SCLK** (20 MHz decoded from a
+512K deep capture at ~10 samples/clock via the local-envelope threshold); I²C
+**~17 – 167 kHz SCL** (source ceiling; the edge-driven decoder has no inherent limit).
+[verified]
 
 ## 11. Hardware & device background (appendix)
 

@@ -28,70 +28,107 @@ from mso5202d_plot import to_divs
 
 
 # --- analog → digital ------------------------------------------------------------
-def _schmitt(sig, lo_th, hi_th, start_high=None):
-    """Schmitt-trigger a continuous signal into a boolean logic trace. Two
-    thresholds give hysteresis so ringing/noise near the midpoint doesn't chatter
-    into phantom edges."""
+def _schmitt_arr(sig, lo_th, hi_th, start_high=None):
+    """Schmitt trigger with per-sample (array) or scalar thresholds, vectorized.
+    A sample above `hi_th` forces the state high, below `lo_th` forces it low, and
+    in between the state holds — so the logic trace is just the forward-fill of the
+    last forcing sample. Same result as a sequential Schmitt loop but O(n)
+    with no Python loop, which matters for the local-envelope path where the
+    thresholds are full-length arrays over a deep (100k+ sample) capture."""
+    sig = np.asarray(sig, dtype=float)
     n = len(sig)
-    out = np.empty(n, dtype=bool)
-    state = (sig[0] > (lo_th + hi_th) / 2) if start_high is None else start_high
-    for i in range(n):
-        v = sig[i]
-        if state and v < lo_th:
-            state = False
-        elif not state and v > hi_th:
-            state = True
-        out[i] = state
+    out = np.zeros(n, dtype=bool)
+    if n == 0:
+        return out
+    ev = np.zeros(n, dtype=np.int8)
+    ev[sig > hi_th] = 1
+    ev[sig < lo_th] = -1
+    last = np.maximum.accumulate(np.where(ev != 0, np.arange(n), -1))
+    have = last >= 0
+    out[have] = ev[last[have]] == 1
+    if not have.all():                    # before the first forcing sample
+        lo0 = lo_th[0] if np.ndim(lo_th) else lo_th
+        hi0 = hi_th[0] if np.ndim(hi_th) else hi_th
+        out[~have] = (sig[0] > (lo0 + hi0) / 2) if start_high is None else start_high
     return out
 
 
 def _schmitt_auto(sig, frac=0.5, hysteresis=0.3):
-    """Schmitt-trigger an arbitrary-unit analog array into a boolean logic trace,
-    picking the thresholds automatically. Estimates the low/high rails robustly
-    with 5th/95th percentiles, then triggers at `frac` of the way between them with
-    a `hysteresis` band (fraction of the swing). `hysteresis=0` gives a plain
-    comparator. Returns a flat False trace for an empty or flat-line input."""
+    """Global Schmitt trigger: estimate the low/high rails as the glitch-robust full range
+    (1st/99.9th percentiles ≈ min/max) and trigger at `frac` of the way between them (the
+    midpoint at frac=0.5) with a `hysteresis` band. A single fixed threshold for the whole
+    record — correct for clean signals and the fallback for lines too short to gauge a period.
+    Returns a flat False trace for an empty or flat-line input."""
     sig = np.asarray(sig, dtype=float)
     if not len(sig):
         return np.zeros(0, dtype=bool)
-    lo, hi = np.percentile(sig, 5), np.percentile(sig, 95)
-    # Sparse/bursty signals (e.g. a framed serial line that is idle most of the record — high
-    # bit rate with a long gap) sit at ONE rail for >90 % of samples, so the 95th percentile
-    # falls in the idle band, not on the active rail, and the threshold lands in the idle noise
-    # → the whole record decodes to garbage. Detect that (the 5–95 % swing is a small fraction
-    # of the full glitch-robust range) and use the full range so the threshold sits between the
-    # two real logic levels. [verified 2026-07-15: this is what makes 20 MHz framed SPI decode.]
-    full_lo, full_hi = np.percentile(sig, 0.1), np.percentile(sig, 99.9)
-    if (hi - lo) < 0.5 * (full_hi - full_lo):
-        lo, hi = full_lo, full_hi
+    lo, hi = np.percentile(sig, 0.1), np.percentile(sig, 99.9)
     if hi - lo < 1e-12:                   # flat line — no signal
         return np.zeros(len(sig), dtype=bool)
     mid = lo + (hi - lo) * frac
     band = (hi - lo) * hysteresis / 2
-    return _schmitt(sig, mid - band, mid + band)
+    return _schmitt_arr(sig, mid - band, mid + band)
 
 
-def threshold(y_bytes, pos, frac=0.5, hysteresis=0.3):
+def _schmitt_local(sig, hyst_frac=0.2, floor_frac=0.12):
+    """Digitize an analog array by thresholding against its LOCAL envelope instead of one
+    global level. A sliding max/min over ~1.5 clock periods tracks the signal's own high and
+    low as they drift, and the trigger sits at the LOCAL midpoint with a hysteresis band scaled
+    to the local swing (never below `floor_frac` of the full range, so idle noise can't chatter).
+
+    This is what lets a distorted fast line decode. When a 20 MHz clock's low droops to ~1 V
+    during active bursts (AC coupling / limited bandwidth) while its idle level is 0 V, a single
+    global threshold sits above that drooped low, so the Schmitt never resets between cycles and
+    silently drops ~20 % of the edges. The local midpoint follows the droop and recovers every
+    one — the eye does the same thing, tracking the waveform rather than a fixed line.
+    [verified 2026-07-15: 20 MHz SPI → a clean 100 % ramp, no edge reconstruction needed.]
+
+    Falls back to the global midpoint for a line with too few transitions to gauge a period
+    (a lone UART frame, a mostly-DC line). Empty/flat input → flat False trace."""
+    from scipy.ndimage import maximum_filter1d, minimum_filter1d
+    sig = np.asarray(sig, dtype=float)
+    n = len(sig)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    lo, hi = np.percentile(sig, 0.1), np.percentile(sig, 99.9)
+    span = hi - lo
+    if span < 1e-12:                      # flat line — no signal
+        return np.zeros(n, dtype=bool)
+    # First pass: a loose global Schmitt just to gauge the shortest period from the
+    # spacing of its transitions (≈ 2 per clock period).
+    g = _schmitt_arr(sig, lo + span * 0.35, lo + span * 0.65)
+    tr = np.flatnonzero(np.diff(g.astype(np.int8)) != 0)
+    if len(tr) < 4:                       # too few edges to be periodic → global is fine
+        return _schmitt_auto(sig)
+    period = float(np.median(np.diff(tr))) * 2.0
+    win = max(3, int(round(period * 1.5)))
+    loc_hi = maximum_filter1d(sig, win, mode='nearest')
+    loc_lo = minimum_filter1d(sig, win, mode='nearest')
+    mid = (loc_hi + loc_lo) * 0.5
+    band = np.maximum((loc_hi - loc_lo) * hyst_frac, span * floor_frac)
+    return _schmitt_arr(sig, mid - band, mid + band)
+
+
+def threshold(y_bytes, pos):
     """Raw waveform bytes + the channel's VERT-POS → boolean logic trace.
 
     Unwraps to divisions (to_divs), so the threshold sees the same "up = higher
-    voltage" trace the plotter draws, then Schmitt-triggers at the auto-picked
-    midpoint of the detected low/high rails. Returns a bool ndarray (True = high).
-    For a capture that is already in volts (a deep-capture CSV column), use
-    threshold_volts() instead."""
+    voltage" trace the plotter draws, then digitizes against the local signal
+    envelope (_schmitt_local). Returns a bool ndarray (True = high). For a capture
+    already in volts (a deep-capture CSV column), use threshold_volts()."""
     y_bytes = np.asarray(y_bytes, dtype=np.uint8)
     if not len(y_bytes):
         return np.zeros(0, dtype=bool)
-    return _schmitt_auto(to_divs(y_bytes, pos), frac, hysteresis)
+    return _schmitt_local(to_divs(y_bytes, pos))
 
 
-def threshold_volts(volts, frac=0.5, hysteresis=0.3):
+def threshold_volts(volts):
     """Threshold an already-in-volts analog array (a front-panel Save→CSV deep
     capture, whose value column is volts — MSO5202D-protocol.md §7.5) into a
-    boolean logic trace. Same auto-Schmitt estimator as threshold(), minus the
-    byte→divisions unwrap (the CSV is already scope-calibrated volts). Lets the
-    UART/SPI/I²C decoders run on deep captures, not just the 3840-sample screen."""
-    return _schmitt_auto(volts, frac, hysteresis)
+    boolean logic trace, digitizing against the local signal envelope
+    (_schmitt_local), minus the byte→divisions unwrap (the CSV is already
+    scope-calibrated volts). Lets the UART/SPI/I²C decoders run on deep captures."""
+    return _schmitt_local(volts)
 
 
 def _edges(d):
@@ -161,7 +198,7 @@ def decode_uart(digital, sample_interval_ns=None, baud=None,
 
 # --- SPI -------------------------------------------------------------------------
 def decode_spi(clk, data, cpol=0, cpha=0, msb_first=True, cs=None, bits=8,
-               word_gap=1.8):
+               word_gap=10.0, max_missed=8):
     """Decode an SPI data line clocked by `clk`. Data is sampled on the leading
     (cpha=0) or trailing (cpha=1) clock edge; with clock idle level `cpol` that
     resolves to the rising edge iff cpol==cpha, else the falling edge.
@@ -185,29 +222,47 @@ def decode_spi(clk, data, cpol=0, cpha=0, msb_first=True, cs=None, bits=8,
 
     out = []
     buf, pos = [], []
-    prev_active = True
-    prev_edge = None
-    for e in edges:
-        if cs_arr is not None:
-            active = cs_arr[e] == 0          # active-low CS asserted
-            if not active:
-                buf, pos = [], []            # deselected — drop partial word
-                prev_active = False
-                continue
-            if not prev_active:              # just (re)selected — fresh word
-                buf, pos = [], []
-            prev_active = True
-        elif med and word_gap and prev_edge is not None and (e - prev_edge) > word_gap * med:
-            buf, pos = [], []                # idle gap → drop partial, start a new word
-        prev_edge = e
-        buf.append(dat[e]); pos.append(e)
+
+    def _sample(idx):                        # sample data at a (real or reconstructed) clock edge
+        buf.append(dat[min(idx, len(dat) - 1)]); pos.append(idx)
         if len(buf) == bits:
             val = 0
             for j, b in enumerate(buf):
                 val = (val << 1) | b if msb_first else val | (b << j)
             out.append({'start': pos[0], 'end': pos[-1], 'value': val,
                         'text': f"{val:02X}", 'kind': 'byte'})
-            buf, pos = [], []
+            buf.clear(); pos.clear()
+
+    prev_active = True
+    prev_edge = None
+    for e in edges:
+        if cs_arr is not None:
+            active = cs_arr[e] == 0          # active-low CS asserted
+            if not active:
+                buf.clear(); pos.clear()     # deselected — drop partial word
+                prev_active = False
+                continue
+            if not prev_active:              # just (re)selected — fresh word
+                buf.clear(); pos.clear()
+            prev_active = True
+        elif med and prev_edge is not None:
+            gap = e - prev_edge
+            n = int(round(gap / med)) if med else 1
+            # A gap of n ≈ 2..max_missed clock periods with gap ≈ n·med = MISSED clock edges — a
+            # distorted / bandwidth-limited clock whose narrow pulses didn't cross the threshold.
+            # Reconstruct the (n-1) missing edges (sampling data at the expected positions) so the
+            # byte framing doesn't slip a bit. A much larger gap (> word_gap·med) is a real idle
+            # between words → reframe (drop the partial word). `max_missed` (8) and `word_gap` (10)
+            # split the two: real inter-word idles are many bit-periods (the framed generator uses
+            # ~16), so dropouts of ≤8 periods reconstruct and true gaps reframe.
+            # [verified 2026-07-15: recovers a distorted 20 MHz SPI clock]
+            if 2 <= n <= max_missed and abs(gap - n * med) <= 0.5 * med:
+                for k in range(1, n):
+                    _sample(prev_edge + int(round(k * med)))
+            elif word_gap and gap > word_gap * med:
+                buf.clear(); pos.clear()     # idle gap → drop partial, start a new word
+        prev_edge = e
+        _sample(e)
     return out
 
 
@@ -321,7 +376,7 @@ def _synth_i2c(values, spb=10, addr=0x50, rw=0):
     seg(1, 1, spb)                                          # idle
     seg(1, 0, spb)                                          # START: SDA↓ while SCL high
     frames = [(addr << 1) | rw] + list(values)
-    for fi, byte in enumerate(frames):
+    for byte in frames:
         for b in range(7, -1, -1):                          # 8 data bits MSB-first
             bit = (byte >> b) & 1
             seg(0, bit, spb // 2)                           # SDA set while SCL low
@@ -376,7 +431,9 @@ def _selftest():
 
     # SPI — gap-framed stream, and the same truncated at a mid-byte start (the
     # real-capture hazard): the leading partial byte must be dropped, rest intact.
-    clk, dat = _synth_spi(ramp, spb=10, byte_gap=20)         # ≥2 bit-period idle gap
+    # A realistic inter-word idle (~15 bit-periods, like the generator's framed gap) —
+    # distinct from the ≤8-period clock dropouts the decoder reconstructs.
+    clk, dat = _synth_spi(ramp, spb=10, byte_gap=150)
     got = [o['value'] for o in decode_spi(clk, dat)]
     good = (got == ramp)
     print(f"SPI  gap-framed  : {len(got)} bytes, {'OK' if good else 'FAIL'}")
