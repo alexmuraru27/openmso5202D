@@ -240,16 +240,33 @@ def _set_timebase_via_keys(sc, target_tdiv_ns, status=lambda m: None):
     status(f"  SEC/DIV {got} ns/div" + (f" (target ~{int(target_tdiv_ns)})" if got else ""))
 
 
-def _pick_deep_tdiv_ns(pulse_ns, deep_samples, target_samples=15):
-    """Target SEC/DIV (ns/div) so the DEEP record puts ~target_samples on the finest pulse:
-    deep_dt = 19.2·TDIV/deep_samples; deep_dt = pulse/target → TDIV = (pulse/target)·deep/19.2."""
-    return (pulse_ns / target_samples) * deep_samples / 19.2
+# Samples per clock/bit the deep record targets — enough to decode with integrity. At the max
+# signal frequency the fastest edges get this many samples; slower content gets proportionally more.
+_SAMPLES_PER_CLOCK = 12
 
 
-def deep_tdiv_for_bit(bit_ns, deep_samples=40064, target_samples=18):
-    """Target SEC/DIV (ns/div) for a KNOWN bit period (a caller that set the generator knows the
-    rate), so the deep record puts ~target_samples per bit — no signal probe needed."""
+def deep_tdiv_for_bit(bit_ns, deep_samples=40064, target_samples=_SAMPLES_PER_CLOCK):
+    """Target SEC/DIV (ns/div) for a KNOWN highest bit/clock period, so the deep record puts
+    ~`target_samples` samples per clock (12 ≈ enough to decode with integrity — e.g. 20 MHz → ~10
+    samples/clock at this scope's deep sample-rate ceiling). deep_dt = 19.2·TDIV/deep_samples and
+    we want deep_dt = period/target → TDIV = period·deep_samples/(19.2·target). Caller supplies the
+    max signal frequency (`bit_ns = 1e9/max_hz`); no signal probe needed."""
     return bit_ns * deep_samples / (19.2 * target_samples)
+
+
+def _parse_freq(text):
+    """Parse a frequency string → Hz, or None. Accepts '20M', '20MHz', '20000000', '20e6',
+    '115200', '1.5M', '400k', '3.4MHz' (case-insensitive; k/M/G suffix, optional 'Hz')."""
+    import re
+    if not text:
+        return None
+    m = re.fullmatch(r'\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*([kKmMgG]?)\s*(?:[hH][zZ])?\s*', text)
+    if not m:
+        return None
+    val = float(m.group(1))
+    mult = {'': 1, 'k': 1e3, 'm': 1e6, 'g': 1e9}[m.group(2).lower()]
+    hz = val * mult
+    return hz if hz > 0 else None
 
 
 def _wavedata_num(name):
@@ -474,7 +491,7 @@ def _run_stop(sc, want_run, tries=8):
 
 
 def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
-                    reset=True, auto_tb=False, tb_target_ns=None):
+                    reset=True, tb_target_ns=None):
     """**Prepare** the scope for capture — the idempotent SETUP half (run once). **KEY-ONLY: no
     0x11 settings writes.** The settings block is only READ (0x01) to verify each step; every
     change is a front-panel key, so the firmware runs the real side-effects (LED, on-screen radios,
@@ -485,8 +502,9 @@ def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, channels=
     Edge/CH1/Auto, TRIG-VPOS 0 which already triggers a 3.3 V signal, CH1 on, 100 mV/div, 4K) →
     turn the wanted channels on (CH buttons) → raise each channel's V/div to 1 V (V/div ± keys, off
     the clipped 100 mV default) → set the store depth (Acquire F5 walk) → set SEC/DIV (± keys) from
-    an explicit `tb_target_ns` (a caller that set the generator knows the rate) or an `auto_tb`
-    signal probe. Leaves the scope running/ready; call `capture_prepared()`. Returns None."""
+    `tb_target_ns` (the caller supplies it — compute it from the max signal frequency you want to
+    resolve, e.g. `deep_tdiv_for_bit(1e9/max_hz, deep_samples, samples_per_clock)`). Leaves the
+    scope running/ready; call `capture_prepared()`. Returns None."""
     from mso5202d import ACQ_DEPTH_NAMES
     if reset:
         _default_setup(sc, status)                     # known state via a real key (side-effects incl. card)
@@ -520,20 +538,9 @@ def prepare_capture(sc, depth_code, status=lambda m: None, setup=True, channels=
             if _set_depth_via_keys(sc, depth_code, status):
                 ok = True; break
             sc._resync()
-    # Timebase via SEC/DIV keys — an explicit target (known bit rate) wins; else probe the signal.
-    if not la:
-        target = tb_target_ns
-        if target is None and auto_tb and depth_code != 0:
-            status("probing the signal to pick a timebase…")
-            pulse = _probe_pulse_ns(sc, status)        # transient 4K freeze to measure, then resumes
-            if pulse:
-                target = _pick_deep_tdiv_ns(pulse, _DEEP_SAMPLES.get(depth_code, 40064))
-                status(f"finest pulse ≈ {pulse/1000:.1f} µs → SEC/DIV ~{target/1e6:.2f} ms/div")
-            else:
-                status("no signal to probe — keeping the current timebase")
-            _run_stop(sc, True)                        # the probe froze the scope — resume RUN
-        if target:
-            _set_timebase_via_keys(sc, target, status)
+    # Timebase via SEC/DIV keys — the caller supplies tb_target_ns (from the max signal frequency).
+    if not la and tb_target_ns:
+        _set_timebase_via_keys(sc, tb_target_ns, status)
     status(f"depth {'confirmed' if ok else 'NOT confirmed'}: "
            f"{ACQ_DEPTH_NAMES.get(0 if la else depth_code)}"
            + ("  (LA clamps deep memory to 4K)" if la and depth_code else ""))
@@ -826,81 +833,9 @@ def download_wavedata(sc, dest, status=lambda m: None):
     return saved
 
 
-def _direct_acquire(sc, channels, status=lambda m: None):
-    """Read each analog channel (0=CH1, 1=CH2) DIRECTLY from the one frozen buffer over
-    `0x02 01 <ch>` — the two reads hit the same stopped acquisition so CH1/CH2 are
-    inter-channel **aligned** (verified: SPI clk+data decode cleanly this way). This is
-    the reliable capture path for a screen-depth (4K) record: no SD card, no CSV, no
-    fragile Source-cycling. Deep records (40K+) and LA still need the CSV route — `0x02`
-    only serves the 3840-sample screen buffer and `02 01 05` (LA) is broken. Returns
-    result dicts (`source`/`volts`/`dt_s`/`size`/`is_la=False`), same shape as the CSV path."""
-    from mso5202d import decode_settings
-    from mso5202d_decode import _raw_settings
-    s = decode_settings(_raw_settings(sc))
-    dt = (s.get('SAMPLE-INTERVAL-ns') or 0) * 1e-9
-    out = []
-    for ch in channels:
-        try:
-            # The 0x02 acquire is one-deep pipelined: the FIRST read after switching the
-            # channel byte returns the *previously selected* channel's buffer, the second
-            # returns this channel (verified 2026-07-11 — without this CH1/CH2 come back
-            # byte-identical). Read twice on a stopped scope, keep the second.
-            sc.read_waveform(ch)
-            w = np.frombuffer(sc.read_waveform(ch), dtype=np.uint8)
-        except Exception as e:
-            status(f"  {_SRC_NAMES[ch]}: read failed ({e})"); continue
-        if not len(w):
-            status(f"  {_SRC_NAMES[ch]}: empty read"); continue
-        pos = s.get(f'VERT-CH{ch + 1}-POS') or 0
-        vdiv_mv = s.get(f'CH{ch + 1}-VDIV-mV') or 1000
-        volts = to_divs(w, pos) * (vdiv_mv / 1000.0)       # divisions → volts
-        out.append({'source': _SRC_NAMES[ch], 'volts': volts, 'dt_s': dt or None,
-                    'size': len(w), 'is_la': False})
-        status(f"  {_SRC_NAMES[ch]}: {len(w)} samples direct"
-               + (f", {dt * 1e9:.1f} ns/sample" if dt else ""))
-    return out
-
-
-# deep record sample counts per depth code (verified: 40K→40064, 512K→400064; 1M inferred)
+# deep record sample counts per depth code (verified: 40K→40064, 512K→400064; 1M inferred).
+# Used to compute the timebase for a target samples-per-clock from the max signal frequency.
 _DEEP_SAMPLES = {0: 4064, 4: 40064, 6: 400064, 7: 4000064}
-
-
-def _probe_pulse_ns(sc, status=lambda m: None):
-    """Quick 4K SINGLE-SEQ capture + direct read to measure the signal's **finest pulse** (ns).
-    Used to pick a deep timebase that spreads the record over many bit-periods. Returns None if
-    no channel carries a decodable signal."""
-    from mso5202d import decode_settings
-    from mso5202d_decode import _raw_settings
-    from serial_decode import threshold_volts
-    # Vertical is already set (V/div via keys in prepare_capture). Capture a 4K record the SAME
-    # way as every other capture — a SINGLE-SEQ trigger, never a manual RUN→STOP — then read the
-    # frozen screen buffer directly over 0x02.
-    _trigger_record(sc, status=lambda m: None, wait_trig=8)
-    si_ns = decode_settings(_raw_settings(sc)).get('SAMPLE-INTERVAL-ns') or 0
-    if not si_ns:
-        return None
-    shortest = None
-    for r in _direct_acquire(sc, [0, 1], lambda m: None):
-        d = threshold_volts(np.asarray(r['volts'])).astype(int)
-        edges = np.flatnonzero(np.diff(d))
-        if len(edges) < 4:
-            continue
-        runs = np.diff(edges)
-        if len(runs):
-            p = max(int(np.percentile(runs, 5)), 1) * si_ns   # robust shortest run → ns
-            shortest = p if shortest is None else min(shortest, p)
-    return shortest
-
-
-def _pick_deep_tb(pulse_ns, deep_samples, target_samples=15):
-    """Choose the TB index so the DEEP record puts ~target_samples on the finest pulse. The
-    deep record spans the same window as the screen (≈19.2·TDIV) but with `deep_samples`
-    points, so deep_dt = 19.2·TDIV/deep_samples; set deep_dt = pulse/target → ideal TDIV =
-    (pulse/target)·deep_samples/19.2. Pick the nearest available index (≥6)."""
-    from mso5202d import TB_TO_NS
-    ideal_tdiv = (pulse_ns / target_samples) * deep_samples / 19.2
-    cands = {i: v for i, v in TB_TO_NS.items() if i >= 6}
-    return min(cands, key=lambda i: abs(cands[i] - ideal_tdiv))
 
 
 def _wait_save_done(sc, status=lambda m: None, timeout=120):
@@ -961,20 +896,20 @@ def _save_file_only(sc, sh, before, seen, wait_s, status, filelist_open=False):
 
 
 def deep_capture(sc, depth_code, status=lambda m: None, setup=True, channels=(1, 2), la=False,
-                 save_sources=None, wait_s=None, delete_after=False, reset=True, auto_tb=False):
+                 save_sources=None, wait_s=None, delete_after=False, reset=True, tb_target_ns=None):
     """One-shot capture = `prepare_capture()` then `capture_prepared()` (the GUI calls those
     two separately — a Prepare button + a re-pressable Capture button). Brings **every enabled
     channel** back to the PC tagged `r['source']` = 'CH1'/'CH2'/'LA', via the unified
     SINGLE-SEQ → Save→CSV → read-back mechanism (see `capture_prepared`).
 
     `reset` (default True) does a **Default Setup** first so the capture is idempotent (known
-    state, independent of how the panel was left). `auto_tb` (deep only) probes the signal and
-    picks a slower timebase so the deep record spreads over many bit-periods (more frames to
-    scroll). `save_sources` forces an explicit list of source indices (0=CH1,1=CH2,2=LA); with
-    `delete_after`, clears the card once everything is read back. **Needs the SD card mounted.**
+    state, independent of how the panel was left). `tb_target_ns` sets the SEC/DIV — compute it
+    from the max signal frequency you want to resolve (`deep_tdiv_for_bit(1e9/max_hz, deep_samples,
+    samples_per_clock)`). `save_sources` forces an explicit list of source indices (0=CH1,1=CH2,
+    2=LA); with `delete_after`, clears the card once read back. **Needs the SD card mounted.**
     Worker-thread only."""
     prepare_capture(sc, depth_code, status, setup=setup, channels=channels, la=la, reset=reset,
-                    auto_tb=auto_tb)
+                    tb_target_ns=tb_target_ns)
     return capture_prepared(sc, depth_code, status, save_sources=save_sources, la=la,
                             wait_s=wait_s, delete_after=delete_after)
 
@@ -1275,7 +1210,7 @@ class CaptureWorker(threading.Thread):
             self._status("no scope connected"); return
         prepare_capture(self.sc, kw['depth_code'], status=self._status,
                         setup=kw.get('setup', True), channels=kw.get('channels', (1, 2)),
-                        reset=kw.get('reset', True), auto_tb=kw.get('auto_tb', False))
+                        reset=kw.get('reset', True), tb_target_ns=kw.get('tb_target_ns'))
         self._emit('prepared', kw['depth_code'])         # → enable the Capture button
 
     def _cmd_capture(self, kw):
@@ -1385,6 +1320,16 @@ class DecoderApp:
         depth_cb.pack(fill=tk.X)
         # Changing the depth invalidates the prepared state → must Prepare again.
         depth_cb.bind('<<ComboboxSelected>>', lambda e: self._set_prepared(False))
+        # MAX signal frequency (the fastest clock/bit rate you want to resolve). Prepare sets the
+        # SEC/DIV so the deep record gives ~10–12 samples on that fastest edge — enough to decode
+        # with integrity (e.g. 20M → ~10 samples/clock). Accepts 20M, 20MHz, 115200, 1.5M, 400k.
+        tk.Label(g, text="MAX_SIGNAL_FRQ (timebase, e.g. 20M / 115200):",
+                 bg=BG, fg=FG, font=('TkDefaultFont', 7)).pack(anchor='w')
+        self.v_maxfreq = tk.StringVar(value='2M')
+        mf = ttk.Entry(g, textvariable=self.v_maxfreq, width=12)
+        mf.pack(fill=tk.X)
+        # A changed target means a different timebase → require Prepare again.
+        self.v_maxfreq.trace_add('write', lambda *a: self._set_prepared(False))
         # Prepare ALWAYS does a Default Setup first (idempotent, card-safe) — no user toggle.
         # Which channels to prepare + capture (on, 1×, DC, 1 V/div). Untick to leave a channel off.
         self.v_setup = tk.BooleanVar(value=True)          # configure channels at all (kept for API)
@@ -1471,8 +1416,9 @@ class DecoderApp:
             pass
 
     def _do_prepare(self):
-        """① Prepare — reset (idempotent) + configure the scope for the selected depth, and
-        (auto) spread a deep record's timebase for the selected protocol. Enables Capture."""
+        """① Prepare — reset (idempotent) + configure the scope for the selected depth, and set the
+        SEC/DIV from the MAX_SIGNAL_FRQ field so the record resolves the fastest edges (~10–12
+        samples/clock). Enables Capture."""
         if not self.scope_present:
             self.status.set("no scope connected — use Load CSV instead"); return
         code = dict(DEEP_DEPTHS)[self.v_depth.get()]
@@ -1481,13 +1427,21 @@ class DecoderApp:
             self.status.set("tick at least one channel (CH1/CH2) to prepare"); return
         if code == 7 and len(channels) > 1:              # 1M store depth is single-channel only
             self.status.set("1M is single-channel only — untick CH1 or CH2 (or pick 512K)"); return
+        # Timebase from the max signal frequency the user wants to resolve (e.g. 20 MHz). The
+        # deep record is set so the fastest clock gets ~SAMPLES_PER_CLOCK samples — enough to
+        # decode with integrity. Blank/invalid → leave the timebase alone.
+        tb_target_ns = None
+        max_hz = _parse_freq(self.v_maxfreq.get())
+        if max_hz:
+            tb_target_ns = deep_tdiv_for_bit(1e9 / max_hz, _DEEP_SAMPLES.get(code, 40064),
+                                             target_samples=_SAMPLES_PER_CLOCK)
+        elif self.v_maxfreq.get().strip():
+            self.status.set(f"can't parse MAX_SIGNAL_FRQ '{self.v_maxfreq.get()}' (e.g. 20M, 115200)"); return
         self._set_prepared(False)
         self.status.set("preparing…")
-        # auto_tb (deep only): spread the record over more time when decoding a protocol so
-        # there are many frames to scroll through, instead of the same ~4 ms window as 4K.
         self.worker.submit('prepare', depth_code=code, setup=self.v_setup.get(), channels=channels,
                            reset=True,      # Prepare always Default-Setups first (idempotent, card-safe)
-                           auto_tb=(code != 0 and self.v_proto.get() != 'none'))
+                           tb_target_ns=tb_target_ns)
 
     def _do_capture(self):
         """② Capture — instantly grab a single-seq record from the prepared scope. Re-pressable."""

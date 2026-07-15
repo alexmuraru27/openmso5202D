@@ -193,9 +193,9 @@ first need **one** Save press, not two (else a spurious extra file).
   4K, default TB); card-safe; confirm via `CONTROL-MENUID == 25`, settle ~1.5 s. A capture then
   never depends on how the panel was left (the CSV Source isn't in the settings blob).
 - **Single-seq is the ONLY capture mechanism — never a manual RUN→STOP.** A manual stop is not
-  trigger-aligned and can latch a stale/partial buffer; every record (4K, deep, and the auto-tb
-  probe) is a single-seq that lets the scope stop itself on a real trigger. Ensure the scope is
-  RUNNING before arming SINGLE (a single-seq armed from STOPPED latches the stale buffer).
+  trigger-aligned and can latch a stale/partial buffer; every record (4K and deep) is a single-seq
+  that lets the scope stop itself on a real trigger. Ensure the scope is RUNNING before arming
+  SINGLE (a single-seq armed from STOPPED latches the stale buffer).
 - **Single-seq stops at TRIG-STATE 5**, not 0 — the RUN/STOP button goes red at 5.
   `_STOPPED_STATES = {0,5}`. Misreading 5 as "running" made `_run_stop` toggle it back into RUN
   (the "512K kept running / only CH1" bug). Wait for state ∈ {0,5}; **never toggle Run/Stop after**.
@@ -240,15 +240,21 @@ first need **one** Save press, not two (else a spurious extra file).
 - **LA over CSV:** Source=LA exports the 16-channel pod (`#threshold` header → `is_la`); LA forces
   the record to 4K (deep memory is analog-only).
 
-### 3.0.2 Timebase spread — more frames `[verified 2026-07-11]`
+### 3.0.2 Timebase from the max signal frequency `[verified 2026-07-15]`
 
-Deep memory at a fixed timebase = the **same time window** as the screen (≈ `19.2 × TDIV`), just
-more samples (40K over 200 µs/div is still ~5 SPI bytes). For many frames, slow the timebase:
-`deep_dt = 19.2·TDIV/deep_samples` (40K→40064, 512K→400064), so for ~15–25 samples on the finest
-pulse set `TDIV = (pulse/target)·deep_samples/19.2`. `auto_tb=True` probes the pulse at 4K and
-picks it — verified 40K @ 20 kHz SPI: 5 → **101 bytes** (80 ms); 512K → **1012 bytes** (800 ms).
-The probe grabs its 4K measurement the **same way as every capture — a SINGLE-SEQ trigger, never
-a manual RUN→STOP** (see the rule below); it reads the frozen screen buffer over `0x02` after.
+The record's SEC/DIV sets the sample interval (`deep_dt = 19.2·TDIV/deep_samples`, 40K→40064,
+512K→400064), which is a **trade-off**: too coarse → too few samples/clock → aliased/undecodable;
+too fine → the window (`19.2·TDIV`) holds too few bytes. Aim for **~10–12 samples per clock** on
+the fastest edge. **The caller supplies the highest frequency to resolve** (the GUI's
+`MAX_SIGNAL_FRQ` field, e.g. `20M`) and we compute:
+`TDIV = (1e9/max_hz)·deep_samples / (19.2·samples_per_clock)` — `deep_tdiv_for_bit()`, set closed-
+loop via the SEC/DIV ± keys. No signal probe: the earlier `auto_tb` (which single-seq-captured a
+4K record and measured the finest pulse via `_direct_acquire`/`_probe_pulse_ns`) was **removed** —
+you know the rate, so you state it. Two limits fall out of the sample-rate behaviour (§below):
+past the ADC ceiling a finer SEC/DIV stops helping (200 ns/div = 8 ns/div → same CSV); and zooming
+out drops the rate (`rate = min(ADC_max, depth/window)`) — 1 ms/div on 40K is only ~2 MSa/s.
+Examples: 40K @ 20 kHz → **101 bytes**; 512K @ 20 kHz → **1012 bytes**; MAX_SIGNAL_FRQ 2M @ 40K →
+87 µs/div, 12.5 samples/clock, ramp decodes clean.
 
 ---
 

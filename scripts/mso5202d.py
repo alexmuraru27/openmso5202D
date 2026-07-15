@@ -591,10 +591,15 @@ def decode_settings(payload: bytes) -> dict:
     d['CH2-VDIV-mV'] = VB_TO_MV.get(d['VERT-CH2-VB'])
     d['TDIV-ns'] = TB_TO_NS.get(d['HORIZ-WIN-TB'])       # knob / displayed
     d['TDIV-ACQ-ns'] = TB_TO_NS.get(d['HORIZ-TB'])       # real acquisition TB
-    # Horizontal calibration: 200 samples/div (spec, hw-confirmed).
+    # Sample interval of the **screen buffer** (0x02, 3840 samples) = TDIV / 200 samples-per-div.
+    # NOTE this is the SCREEN rate only, and it is a simple derivation that is NOT valid at fast
+    # timebases: past the ADC ceiling (~1 GSa/s single / 500 MSa/s dual) TDIV/200 would exceed the
+    # real rate (e.g. 2 ns/div → 0.01 ns/sample = 100 GSa/s, impossible — the scope actually
+    # clamps at the ADC max). It is also NOT the deep-record rate — a Save→CSV deep capture carries
+    # its own true interval in the `#timebase` header (parse_wavedata_csv). Used only by the
+    # screen-buffer decoders. (The unused SAMPLERATE-HZ derivation was removed 2026-07-15.)
     tdiv = d['TDIV-ns']
     d['SAMPLE-INTERVAL-ns'] = tdiv / SAMPLES_PER_DIV if tdiv else None
-    d['SAMPLERATE-HZ'] = SAMPLES_PER_DIV / (tdiv * 1e-9) if tdiv else None
     # Trigger level & slope thresholds (volts) = (field - source POS) * vdiv / 25,
     # since the position/level fields are in 1/25-division units (verified vs
     # scope for the level, and for the slope V1/V2 at CH1 5V/div: +12V/-36V).
@@ -624,7 +629,7 @@ if __name__ == '__main__':
     print("settings:", {k: d[k] for k in (
         'VERT-CH1-DISP', 'VERT-CH1-VB', 'CH1-VDIV-mV', 'VERT-CH2-DISP',
         'CH2-VDIV-mV', 'TRIG-STATE', 'TRIG-VPOS', 'TRIG-LEVEL-mV',
-        'TRIG-FREQUENCY', 'HORIZ-TB', 'TDIV-ns', 'SAMPLERATE-HZ')})
+        'TRIG-FREQUENCY', 'HORIZ-TB', 'TDIV-ns', 'SAMPLE-INTERVAL-ns')})
     w = s.read_waveform(0)
     print(f"waveform: {len(w)} samples, min={min(w)} max={max(w)}")
     s.close()
