@@ -8,7 +8,7 @@
 //! | 3 | [`control`] | **Business logic** — plans of semantic operations, closed-loop |
 //! | 2 | [`device`] | **Device operations** — keys, knobs, settings, screen, files, shell |
 //! | 1 | [`usb`] | USB transport — connect, bind, transact |
-//! | 0 | [`protocol`], [`settings`] | Wire format and data layout (pure logic) |
+//! | 0 | [`protocol`], [`settings`], [`waveform`], [`decoder`] | Wire format, data layout, decoding (pure logic) |
 //!
 //! [`Device`] is the entry point:
 //!
@@ -33,12 +33,14 @@
 //! detection. No write path is exposed here by design.
 
 pub mod control;
+pub mod decoder;
 pub mod device;
 pub mod error;
 pub mod logging;
 pub mod protocol;
 pub mod settings;
 pub mod usb;
+pub mod waveform;
 
 pub use control::{execute, Context, Op, ProgressEvent, ProgressSink, StepState};
 pub use device::{Device, FileEntry, Key, Knob, Screenshot, Turn};

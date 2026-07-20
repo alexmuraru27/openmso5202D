@@ -16,8 +16,11 @@ from mso5202d import parse_wavedata_csv
 from mso5202d_plot import decode_capture
 
 PROTOS = ('spi', 'uart', 'i2c')
-CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'decoder_tests')
-SCORES = os.path.join(CORPUS, 'decode_scores.json')
+# The wave corpus lives under scope_dump/ so both the Python and the Rust test suites
+# score against the same captures; the baseline stays next to the decoder it measures.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+CORPUS = os.path.abspath(os.path.join(_HERE, '..', '..', 'scope_dump', 'decoder_corpus'))
+SCORES = os.path.join(_HERE, 'decode_scores.json')
 
 
 def ramp_ratio(vals):

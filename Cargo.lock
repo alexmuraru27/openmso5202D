@@ -1753,6 +1753,7 @@ name = "mso5202d"
 version = "0.1.0"
 dependencies = [
  "rusb",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "tracing-appender",

@@ -1,0 +1,322 @@
+{
+  "i2c/10000/40k/100spc": {
+    "bytes": 29,
+    "depth": "40k",
+    "freq": 10000,
+    "proto": "i2c",
+    "ramp": 0.0,
+    "spc": 100
+  },
+  "i2c/10000/40k/12spc": {
+    "bytes": 253,
+    "depth": "40k",
+    "freq": 10000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "i2c/10000/512k/100spc": {
+    "bytes": 262,
+    "depth": "512k",
+    "freq": 10000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "i2c/10000/512k/12spc": {
+    "bytes": 2787,
+    "depth": "512k",
+    "freq": 10000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "i2c/1000000/40k/100spc": {
+    "bytes": 7,
+    "depth": "40k",
+    "freq": 1000000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "i2c/1000000/40k/12spc": {
+    "bytes": 50,
+    "depth": "40k",
+    "freq": 1000000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "i2c/1000000/512k/100spc": {
+    "bytes": 67,
+    "depth": "512k",
+    "freq": 1000000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "i2c/1000000/512k/12spc": {
+    "bytes": 686,
+    "depth": "512k",
+    "freq": 1000000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "i2c/400000/40k/100spc": {
+    "bytes": 11,
+    "depth": "40k",
+    "freq": 400000,
+    "proto": "i2c",
+    "ramp": 0.6,
+    "spc": 100
+  },
+  "i2c/400000/40k/12spc": {
+    "bytes": 123,
+    "depth": "40k",
+    "freq": 400000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "i2c/400000/512k/100spc": {
+    "bytes": 99,
+    "depth": "512k",
+    "freq": 400000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "i2c/400000/512k/12spc": {
+    "bytes": 1446,
+    "depth": "512k",
+    "freq": 400000,
+    "proto": "i2c",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "spi/10000/40k/100spc": {
+    "bytes": 50,
+    "depth": "40k",
+    "freq": 10000,
+    "proto": "spi",
+    "ramp": 0.0,
+    "spc": 100
+  },
+  "spi/10000/40k/12spc": {
+    "bytes": 498,
+    "depth": "40k",
+    "freq": 10000,
+    "proto": "spi",
+    "ramp": 0.889,
+    "spc": 12
+  },
+  "spi/10000/512k/100spc": {
+    "bytes": 497,
+    "depth": "512k",
+    "freq": 10000,
+    "proto": "spi",
+    "ramp": 0.946,
+    "spc": 100
+  },
+  "spi/10000/512k/12spc": {
+    "bytes": 4982,
+    "depth": "512k",
+    "freq": 10000,
+    "proto": "spi",
+    "ramp": 0.987,
+    "spc": 12
+  },
+  "spi/2000000/40k/100spc": {
+    "bytes": 43,
+    "depth": "40k",
+    "freq": 2000000,
+    "proto": "spi",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "spi/2000000/40k/12spc": {
+    "bytes": 356,
+    "depth": "40k",
+    "freq": 2000000,
+    "proto": "spi",
+    "ramp": 0.997,
+    "spc": 12
+  },
+  "spi/2000000/512k/100spc": {
+    "bytes": 450,
+    "depth": "512k",
+    "freq": 2000000,
+    "proto": "spi",
+    "ramp": 0.973,
+    "spc": 100
+  },
+  "spi/2000000/512k/12spc": {
+    "bytes": 3594,
+    "depth": "512k",
+    "freq": 2000000,
+    "proto": "spi",
+    "ramp": 0.998,
+    "spc": 12
+  },
+  "spi/20000000/40k/12spc": {
+    "bytes": 247,
+    "depth": "40k",
+    "freq": 20000000,
+    "proto": "spi",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "spi/20000000/40k/30spc": {
+    "bytes": 247,
+    "depth": "40k",
+    "freq": 20000000,
+    "proto": "spi",
+    "ramp": 1.0,
+    "spc": 30
+  },
+  "spi/20000000/512k/12spc": {
+    "bytes": 2454,
+    "depth": "512k",
+    "freq": 20000000,
+    "proto": "spi",
+    "ramp": 1.0,
+    "spc": 12
+  },
+  "spi/20000000/512k/30spc": {
+    "bytes": 2448,
+    "depth": "512k",
+    "freq": 20000000,
+    "proto": "spi",
+    "ramp": 0.999,
+    "spc": 30
+  },
+  "spi/500000/40k/100spc": {
+    "bytes": 47,
+    "depth": "40k",
+    "freq": 500000,
+    "proto": "spi",
+    "ramp": 0.37,
+    "spc": 100
+  },
+  "spi/500000/40k/12spc": {
+    "bytes": 482,
+    "depth": "40k",
+    "freq": 500000,
+    "proto": "spi",
+    "ramp": 0.929,
+    "spc": 12
+  },
+  "spi/500000/512k/100spc": {
+    "bytes": 484,
+    "depth": "512k",
+    "freq": 500000,
+    "proto": "spi",
+    "ramp": 0.998,
+    "spc": 100
+  },
+  "spi/500000/512k/12spc": {
+    "bytes": 4837,
+    "depth": "512k",
+    "freq": 500000,
+    "proto": "spi",
+    "ramp": 0.994,
+    "spc": 12
+  },
+  "uart/115200/40k/100spc": {
+    "bytes": 45,
+    "depth": "40k",
+    "freq": 115200,
+    "proto": "uart",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "uart/115200/40k/12spc": {
+    "bytes": 184,
+    "depth": "40k",
+    "freq": 115200,
+    "proto": "uart",
+    "ramp": 0.989,
+    "spc": 12
+  },
+  "uart/115200/512k/100spc": {
+    "bytes": 921,
+    "depth": "512k",
+    "freq": 115200,
+    "proto": "uart",
+    "ramp": 0.984,
+    "spc": 100
+  },
+  "uart/115200/512k/12spc": {
+    "bytes": 4608,
+    "depth": "512k",
+    "freq": 115200,
+    "proto": "uart",
+    "ramp": 0.983,
+    "spc": 12
+  },
+  "uart/921600/40k/100spc": {
+    "bytes": 36,
+    "depth": "40k",
+    "freq": 921600,
+    "proto": "uart",
+    "ramp": 0.971,
+    "spc": 100
+  },
+  "uart/921600/40k/12spc": {
+    "bytes": 361,
+    "depth": "40k",
+    "freq": 921600,
+    "proto": "uart",
+    "ramp": 0.683,
+    "spc": 12
+  },
+  "uart/921600/512k/100spc": {
+    "bytes": 366,
+    "depth": "512k",
+    "freq": 921600,
+    "proto": "uart",
+    "ramp": 0.868,
+    "spc": 100
+  },
+  "uart/921600/512k/12spc": {
+    "bytes": 7136,
+    "depth": "512k",
+    "freq": 921600,
+    "proto": "uart",
+    "ramp": 0.735,
+    "spc": 12
+  },
+  "uart/9600/40k/100spc": {
+    "bytes": 38,
+    "depth": "40k",
+    "freq": 9600,
+    "proto": "uart",
+    "ramp": 1.0,
+    "spc": 100
+  },
+  "uart/9600/40k/12spc": {
+    "bytes": 384,
+    "depth": "40k",
+    "freq": 9600,
+    "proto": "uart",
+    "ramp": 0.982,
+    "spc": 12
+  },
+  "uart/9600/512k/100spc": {
+    "bytes": 383,
+    "depth": "512k",
+    "freq": 9600,
+    "proto": "uart",
+    "ramp": 0.984,
+    "spc": 100
+  },
+  "uart/9600/512k/12spc": {
+    "bytes": 3839,
+    "depth": "512k",
+    "freq": 9600,
+    "proto": "uart",
+    "ramp": 1.0,
+    "spc": 12
+  }
+}
