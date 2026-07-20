@@ -37,8 +37,6 @@ pub const LEADER_CMD: u8 = 0x43;
 pub mod selector {
     /// Data channel (`0x53`): read the 213-byte settings block. Echo `0x81`.
     pub const SETTINGS: u8 = 0x01;
-    /// Data channel: acquire a waveform block, `02 01 <channel>`. Echo `0x82`.
-    pub const ACQUIRE: u8 = 0x02;
     /// Data channel: read a file off the scope's filesystem. Echo `0x90`.
     pub const FILE_READ: u8 = 0x10;
     /// Data channel: inject a front-panel key event, `13 <keyid> <state>`. Echo `0x93`.

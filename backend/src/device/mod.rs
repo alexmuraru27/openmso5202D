@@ -192,6 +192,14 @@ impl Device {
     ///
     /// The reply spans as many frames as needed, so this handles files far larger than the
     /// 64 KB single-frame cap — an exported deep-capture CSV of several megabytes included.
+    ///
+    /// # Short reads are not errors
+    ///
+    /// The protocol declares no total length, so this returns whatever the scope streamed.
+    /// Some paths cannot be served at all — the running application binary `/dso_bin`
+    /// answers with a single byte however long you wait — and a stream cut short mid-way
+    /// yields a partial file rather than a failure. For transfers where truncation would
+    /// matter, cross-check the length against the size from [`Device::list_dir`].
     pub fn download(&self, path: &str) -> Result<Vec<u8>> {
         let mut request = vec![selector::FILE_READ, 0x00];
         request.extend_from_slice(path.as_bytes());

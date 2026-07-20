@@ -628,6 +628,14 @@ path is a plain absolute path, e.g. `/protocol.inf`, `/help.db`,
 - **Checksum on the request:** `0x10` is the one selector for which the vendor
   always sends the **`0x66` wildcard** checksum. A correctly computed checksum is
   **also accepted** — both forms work. [verified] (confirmed on hardware this session)
+- **Not every path is servable.** A path the firmware will not read back answers
+  with a **1-byte reply** rather than an error or an empty stream, and no amount of
+  waiting changes it: `/dso_bin` (the 4 454 536-byte running acquisition binary)
+  returns 1 byte with both a 4 s and a 30 s per-frame timeout. Since the reply
+  carries no declared length, a reader cannot distinguish this from a complete
+  short file except by the `sum8` end-marker or an independent size (`ls`).
+  Regular data files of the same order stream normally — `/help.db` (911 360 B)
+  reads back byte-exact at ~865 KB/s. [verified 2026-07-20]
 
 **Echo:** `0x90`.
 

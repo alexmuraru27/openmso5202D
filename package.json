@@ -8,6 +8,7 @@
     "build": "pnpm --filter openmso5202d-frontend tauri build",
     "dev": "pnpm --filter openmso5202d-frontend tauri dev",
     "playground": "cargo run -p mso5202d --bin playground",
-    "backend:check": "cargo test -p mso5202d && cargo clippy -p mso5202d"
+    "backend:check": "cargo test -p mso5202d && cargo clippy -p mso5202d",
+    "backend:hwtest": "cargo test -p mso5202d --test hardware -- --ignored --nocapture"
   }
 }
