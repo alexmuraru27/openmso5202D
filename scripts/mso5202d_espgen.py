@@ -44,7 +44,8 @@ PROTO_DESC = {
     "uart": "TX=CH1/GPIO22, 8N1, CH2 unused (HW peripheral)",
     "i2c": "SCL=CH1/GPIO22, SDA=CH2/GPIO23, self-ACK (bit-banged)",
 }
-MODES = ("single", "continuous")
+MODES = ("single", "continuous", "triggered")
+PATTERNS = ("ramp", "prbs")
 MODE_DESC = {
     "single": "framed bytes with idle gaps — decoder-friendly (burst 1, auto gap)",
     "continuous": "solid near-gapless stream — for viewing (burst 64, gap 0)",
@@ -131,9 +132,15 @@ class EspGen:
         line, _, self._rx = self._rx.partition(b"\n")
         return line
 
-    def query(self, cmd: str) -> dict:
-        """Send one command; return the first JSON object the board replies with."""
-        deadline = time.time() + self.timeout
+    def query(self, cmd: str, timeout: float | None = None) -> dict:
+        """Send one command; return the first JSON object the board replies with.
+
+        `timeout` overrides the default, for commands the board answers only after
+        doing real work — `trigger` replies once the whole burst has been sent,
+        which at a slow line rate takes seconds.
+        """
+        timeout = self.timeout if timeout is None else timeout
+        deadline = time.time() + timeout
         self._rx = b""
         termios.tcflush(self.fd, termios.TCIFLUSH)
         os.write(self.fd, (cmd + "\n").encode())
@@ -150,7 +157,7 @@ class EspGen:
                 continue
             if isinstance(obj, dict):
                 return obj
-        raise TimeoutError(f"no JSON reply to {cmd!r} within {self.timeout:.1f}s")
+        raise TimeoutError(f"no JSON reply to {cmd!r} within {timeout:.1f}s")
 
 
 def fmt_hz(hz) -> str:
@@ -208,6 +215,8 @@ def running_settings(st: dict) -> dict:
         "mode": mode,
         "burst": st.get("burst"),
         "gap_us": st.get("gap_us"),
+        "pattern": st.get("pattern"),
+        "triggered": st.get("triggered"),
     }
 
 
@@ -252,6 +261,16 @@ def main():
     p_burst.add_argument("n", type=int)
     p_gap = sub.add_parser("gap", help="idle microseconds between transactions (0=continuous, or 'auto')")
     p_gap.add_argument("us", help="microseconds, or 'auto'")
+    p_trig = sub.add_parser("trigger",
+                            help="send exactly n bytes ONCE, then fall silent "
+                                 "(puts the generator in triggered mode)")
+    p_trig.add_argument("n", type=int, help="bytes to send (1..8192)")
+    p_trig.add_argument("start", type=int, nargs="?", default=0,
+                        help="start offset into the pattern (default 0) — vary it "
+                             "per capture so different runs cover different bytes")
+    p_pat = sub.add_parser("pattern", help="byte sequence the generator sends")
+    p_pat.add_argument("name", choices=PATTERNS,
+                       help="ramp (0x00,0x01,...) or prbs (hash of the byte index)")
 
     args = ap.parse_args()
     port = args.port or find_port()
@@ -285,6 +304,12 @@ def main():
             reply = gen.query(f"burst {args.n}")
         elif args.cmd == "gap":
             reply = gen.query(f"gap {args.us}")
+        elif args.cmd == "trigger":
+            # The firmware replies only once the whole burst has gone out, so this
+            # returns when the transmission is complete — no guessed delay needed.
+            reply = gen.query(f"trigger {args.n} {args.start}", timeout=30.0)
+        elif args.cmd == "pattern":
+            reply = gen.query(f"pattern {args.name}")
         else:
             reply = gen.query("status")
     except TimeoutError as e:

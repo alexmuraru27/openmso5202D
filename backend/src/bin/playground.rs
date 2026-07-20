@@ -60,7 +60,8 @@ fn run() -> Result<()> {
         Op::SetVoltsPerDiv { channel: 1, millivolts: 1000 },
         Op::SetTimePerDiv { nanoseconds: 2000 },
         Op::SetDepth { depth: StoreDepth::K4 },
-        Op::CaptureSingle,
+        Op::ArmSingle,
+        Op::WaitCaptured { timeout_s: 20 },
         Op::SaveCsv { source: CsvSource::Ch1 },
         Op::Download { source: CsvSource::Ch1 },
     ];

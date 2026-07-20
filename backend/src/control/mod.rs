@@ -167,12 +167,6 @@ fn expected_csv_bytes(depth: StoreDepth) -> u64 {
 /// Longest to wait for the busy banner to clear.
 const BANNER_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long to wait for a single sequence to capture before forcing a trigger.
-const TRIGGER_FORCE_AFTER: Duration = Duration::from_secs(4);
-
-/// Longest to wait for a single sequence to reach a captured state.
-const TRIGGER_TIMEOUT: Duration = Duration::from_secs(25);
-
 /// Where the scope mounts the removable card.
 const CARD_PATH: &str = "/mnt/udisk";
 
@@ -379,7 +373,8 @@ fn run(context: &Context, op: &Op) -> Result<()> {
         Op::SetTimePerDiv { nanoseconds } => set_time_per_div(device, nanoseconds),
         Op::SetTriggerLevel { position } => set_trigger_level(device, position),
         Op::SetDepth { depth } => set_depth(device, depth),
-        Op::CaptureSingle => capture_single(device),
+        Op::ArmSingle => arm_single(device),
+        Op::WaitCaptured { timeout_s } => wait_captured(device, Duration::from_secs(timeout_s)),
         Op::SaveCsv { source } => save_csv(context, source),
         Op::Download { source } => download(context, source),
         Op::ClearCard => clear_card(context),
@@ -426,6 +421,12 @@ fn set_probe(device: &Device, channel: u8, probe: Probe) -> Result<()> {
         .factor()
         .ok_or_else(|| Error::Unexpected(format!("probe {probe:?} has no known code")))?;
 
+    // The only way to open a channel's menu is its front-panel button, and that button
+    // also TOGGLES the channel on or off. So note the display state first and put it back
+    // afterwards — otherwise setting the probe silently turns the channel off, and the
+    // next operation on it fails with a channel that "is not enabled".
+    let was_shown = device.read_settings()?.channel_shown(channel);
+
     converge::open_menu(device, channel_key(channel)?, &[channel_menu(channel)?])?;
     let field = format!("VERT-CH{channel}-PROBE");
     let code = probe_code(probe)?;
@@ -436,6 +437,11 @@ fn set_probe(device: &Device, channel: u8, probe: Probe) -> Result<()> {
         |settings| settings.field(&field).map(|value| value as i64),
         code,
     )?;
+
+    if device.read_settings()?.channel_shown(channel) != was_shown {
+        debug!(channel, "restoring channel display after opening its menu");
+        set_channel(device, channel, was_shown)?;
+    }
     debug!(channel, target, "probe set");
     Ok(())
 }
@@ -500,42 +506,45 @@ fn set_depth(device: &Device, depth: StoreDepth) -> Result<()> {
 
 // --- capture and export -----------------------------------------------------
 
-/// Arm a single sequence and wait for the scope to capture and stop itself.
+/// Arm a single sequence, leaving it armed.
 ///
-/// The scope must be **running** first: a single sequence armed from a stopped scope
-/// latches the stale buffer instead of acquiring afresh. If no edge arrives within a few
-/// seconds a trigger is forced once, so a quiet signal still yields a record.
-///
-/// Afterwards the scope is left **stopped** — that is the captured state, and pressing
-/// run/stop here would start it running again and discard the record.
-fn capture_single(device: &Device) -> Result<()> {
+/// The scope must be running first: a single sequence armed from a stopped scope latches
+/// the stale buffer instead of acquiring afresh.
+fn arm_single(device: &Device) -> Result<()> {
     if device.read_settings()?.trig_state().is_stopped() {
         debug!("scope was stopped — starting it before arming");
         device.press(Key::RunStop)?;
         sleep(converge::SETTLE);
     }
-
     device.press(Key::Single)?;
     sleep(Duration::from_millis(500));
 
+    // Confirm it is actually waiting for a trigger rather than already stopped, so a
+    // stimulus released now cannot arrive before the scope is listening.
+    let state = device.read_settings()?.trig_state();
+    if state.is_stopped() {
+        return Err(Error::Unexpected(format!(
+            "scope is {state:?} straight after arming — it did not stay armed"
+        )));
+    }
+    debug!(?state, "armed");
+    Ok(())
+}
+
+/// Wait for an armed single sequence to fire and stop.
+fn wait_captured(device: &Device, timeout: Duration) -> Result<()> {
     let started = Instant::now();
-    let mut forced = false;
-    while started.elapsed() < TRIGGER_TIMEOUT {
+    while started.elapsed() < timeout {
         let state = device.read_settings()?.trig_state();
         if state.is_stopped() {
-            debug!(?state, "single sequence captured");
+            debug!(?state, elapsed_ms = started.elapsed().as_millis() as u64, "captured");
             return Ok(());
         }
-        if !forced && started.elapsed() > TRIGGER_FORCE_AFTER {
-            debug!("no trigger yet — forcing one");
-            device.press(Key::ForceTrigger)?;
-            forced = true;
-        }
-        sleep(Duration::from_millis(400));
+        sleep(Duration::from_millis(200));
     }
-    Err(Error::Unexpected(
-        "single sequence never reached a captured state — nothing to save".into(),
-    ))
+    Err(Error::Unexpected(format!(
+        "no trigger within {timeout:?} — the signal never crossed the trigger level"
+    )))
 }
 
 /// Export the captured record for `source` to the memory card.
@@ -604,11 +613,13 @@ fn download(context: &Context, source: CsvSource) -> Result<()> {
 
     let data = device.download_with(&path, |done| context.advance(done, expected))?;
 
-    // The transfer declares no length, so a truncated read looks like a short file. The
-    // card's own size is the independent check that catches it.
-    if data.len() as u64 != expected {
+    // The transfer declares no length, so the real danger is a **truncated** read looking
+    // like a short file. The card's own size catches that. A read that is a byte or two
+    // LONGER than the card's size is not truncation — the size was sampled just before the
+    // file's final flush settled — so only a genuine shortfall is an error.
+    if (data.len() as u64) < expected {
         return Err(Error::Unexpected(format!(
-            "{path}: downloaded {} bytes but the card reports {expected}",
+            "{path}: downloaded {} bytes but the card reports {expected} — truncated",
             data.len()
         )));
     }

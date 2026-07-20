@@ -118,8 +118,44 @@ static uint32_t freqFor[3] = {1000000, 115200, 100000}; // defaults per protocol
 
 static uint8_t curProto = PROTO;
 static uint32_t curFreq = 1000000;
-static uint8_t value = 0; // ramp byte
 static uint32_t nextSerial = 0;
+
+// ---- deterministic test pattern -------------------------------------------
+// The host computes the SAME sequence from the byte index, so a capture can be
+// graded byte-for-byte rather than by a heuristic. Two patterns:
+//   ramp - 0x00,0x01,0x02,... Matches the historic corpus, but a decode that is
+//          shifted by a byte, or has dropped one, still LOOKS like a ramp.
+//   prbs - a hash of the index. Every byte depends on its position, so any
+//          misalignment or dropped byte is immediately visible, and the varied
+//          bit patterns exercise long same-bit runs and fast toggling that a
+//          monotonic ramp never produces.
+enum PatMode
+{
+    PAT_RAMP = 0,
+    PAT_PRBS = 1
+};
+static uint8_t patMode = PAT_RAMP;
+static uint32_t patIndex = 0;
+
+static uint8_t patternByte(uint32_t i)
+{
+    if (patMode == PAT_RAMP)
+        return (uint8_t)i;
+    // 32-bit integer hash; the host mirrors this exactly with wrapping arithmetic.
+    uint32_t x = i * 2654435761u;
+    x ^= x >> 15;
+    x *= 2246822519u;
+    x ^= x >> 13;
+    return (uint8_t)x;
+}
+
+// ---- triggered (one-shot) mode --------------------------------------------
+// The generator stays SILENT until the host asks for a burst. That gives the
+// scope a clean idle line to arm a single sequence against, and makes the
+// captured record hold exactly the requested bytes starting at pattern index 0 -
+// so the expected sequence is known and the decode can be graded exactly.
+static bool triggeredMode = false;
+static const uint32_t TRIGGER_MAX = 8192;
 
 // I2C bit-bang timing (derived from curFreq when the protocol is I2C).
 static uint32_t i2cQuarterUs = 5;
@@ -155,11 +191,10 @@ HardwareSerial uart(1);
 // ---- per-protocol peripheral start/stop + one transmit "unit" ----
 static void spiStart() { spi.begin(CH1, -1, CH2, -1); } // SCK=22, MOSI=23
 static void spiStop() { spi.end(); }
-static void spiUnit()
+static void spiUnit(uint16_t n)
 {
-    uint16_t n = effBurst();
     for (uint16_t i = 0; i < n; i++)
-        txbuf[i] = value++;
+        txbuf[i] = patternByte(patIndex++);
     spi.beginTransaction(SPISettings(curFreq, MSBFIRST, SPI_MODE0));
     spi.writeBytes(txbuf, n); // n bytes, continuous SCLK, no inter-byte gap
     spi.endTransaction();
@@ -167,11 +202,10 @@ static void spiUnit()
 
 static void uartStart() { uart.begin(curFreq, SERIAL_8N1, -1, CH1); } // TX=22
 static void uartStop() { uart.end(); }
-static void uartUnit()
+static void uartUnit(uint16_t n)
 {
-    uint16_t n = effBurst();
     for (uint16_t i = 0; i < n; i++)
-        txbuf[i] = value++;
+        txbuf[i] = patternByte(patIndex++);
     uart.write(txbuf, n); // back-to-back frames (no idle between bytes)
     if (effGap() > 0)
         uart.flush(); // only wait for drain when a gap follows
@@ -209,17 +243,16 @@ static void i2cStart()
     digitalWrite(CH2, HIGH);
 }
 static void i2cStop() {}
-static void i2cUnit()
+static void i2cUnit(uint16_t n)
 {
     static const uint8_t ADDR = 0x50;
-    uint16_t n = effBurst();
     sdaSet(1);
     sclSet(1);
     sdaSet(0);
     sclSet(0); // START
     i2cByte((ADDR << 1) | 0);
     for (uint16_t k = 0; k < n; k++)
-        i2cByte(value++); // n ramp bytes / transaction
+        i2cByte(patternByte(patIndex++)); // n pattern bytes / transaction
     sdaSet(0);
     sclSet(1);
     sdaSet(1); // STOP
@@ -267,14 +300,27 @@ static uint32_t achievedFreq()
     return curFreq;
 }
 
-static void serialUnit()
+static void serialUnit(uint16_t n)
 {
     if (curProto == P_SPI)
-        spiUnit();
+        spiUnit(n);
     else if (curProto == P_UART)
-        uartUnit();
+        uartUnit(n);
     else
-        i2cUnit();
+        i2cUnit(n);
+}
+
+// Send `total` bytes back to back, chunked to the transmit buffer. Blocking: a
+// one-shot burst is short, and the reply not arriving until it has all gone out
+// is exactly the synchronisation the host wants.
+static void txBurst(uint32_t total)
+{
+    while (total > 0)
+    {
+        uint16_t chunk = (total > BURST_MAX) ? BURST_MAX : (uint16_t)total;
+        serialUnit(chunk);
+        total -= chunk;
+    }
 }
 
 static void stopCurrent()
@@ -305,7 +351,7 @@ static void setProto(uint8_t p)
     curFreq = freqFor[p];
     startCurrent();
     applyFreqInternal();
-    value = 0;
+    patIndex = 0;
     nextSerial = micros() + effGap();
 }
 
@@ -358,9 +404,9 @@ static void printStatus()
 {
     uint8_t p = curProto;
     Serial.printf("{\"ok\":true,\"proto\":\"%s\",\"freq\":%lu,\"freq_achieved\":%lu,"
-                  "\"min\":%lu,\"max\":%lu,\"value\":%u,\"protos\":[\"spi\",\"uart\",\"i2c\"],",
+                  "\"min\":%lu,\"max\":%lu,\"next_index\":%lu,\"protos\":[\"spi\",\"uart\",\"i2c\"],",
                   PROTO_NAME[p], (unsigned long)curFreq, (unsigned long)achievedFreq(), (unsigned long)FREQ_TAB[p][0],
-                  (unsigned long)FREQ_TAB[p][FREQ_N[p] - 1], value);
+                  (unsigned long)FREQ_TAB[p][FREQ_N[p] - 1], (unsigned long)patIndex);
     // `tables` carries every protocol's ladder; the active one is tables[proto],
     // so no separate redundant "table" field.
     Serial.print("\"tables\":{\"spi\":");
@@ -374,6 +420,7 @@ static void printStatus()
     uint32_t g = effGap();
     Serial.printf("\"burst\":%u,\"gap_us\":%lu,\"continuous\":%s,\"mode\":\"%s\",", effBurst(), (unsigned long)g, g == 0 ? "true" : "false",
                   g == 0 ? "continuous" : "framed");
+    Serial.printf("\"pattern\":\"%s\",\"triggered\":%s,", patMode == PAT_RAMP ? "ramp" : "prbs", triggeredMode ? "true" : "false");
     Serial.print("\"la\":{\"channels\":16,\"fmt\":\"f_N=1000/(N+1)Hz\"}}\n");
 }
 
@@ -400,7 +447,8 @@ static void handleCommand(char *line)
     {
         Serial.print("{\"ok\":true,\"help\":\"cmds: id | status | range/list | "
                      "proto <spi|uart|i2c> | freq <hz> | set <proto> <hz> | "
-                     "burst <1..256> | gap <us|auto> | mode <single|continuous>. "
+                     "burst <1..256> | gap <us|auto> | mode <single|continuous|triggered> | "
+                     "pattern <ramp|prbs> | trigger <n>. "
                      "freq is SPI SCLK / UART baud / I2C SCL, snapped to the nearest "
                      "table entry (see 'list'). burst=bytes per transaction, gap=idle "
                      "us between them (0=continuous). replies are JSON.\"}\n");
@@ -513,27 +561,80 @@ static void handleCommand(char *line)
         printStatus();
         return;
     }
+    // One-shot: send exactly n bytes now, then fall silent again. Replies only
+    // once the whole burst has gone out, so the host knows the capture window is
+    // over without having to guess a delay.
+    if (!strcasecmp(tok, "trigger"))
+    {
+        char *a = strtok(NULL, " \t");
+        char *b = strtok(NULL, " \t"); // optional start offset into the pattern
+        uint32_t n = a ? strtoul(a, NULL, 0) : 0;
+        uint32_t start = b ? strtoul(b, NULL, 0) : 0;
+        if (n < 1 || n > TRIGGER_MAX)
+        {
+            replyErr("trigger <1..8192> [start]");
+            return;
+        }
+        triggeredMode = true; // silent before and after the burst
+        // Start at the requested pattern index rather than always 0, so different
+        // captures cover different byte sequences instead of all beginning the same.
+        patIndex = start;
+        txBurst(n);
+        Serial.printf("{\"ok\":true,\"sent\":%lu,\"start\":%lu,\"pattern\":\"%s\",\"proto\":\"%s\",\"freq\":%lu}\n",
+                      (unsigned long)n, (unsigned long)start, patMode == PAT_RAMP ? "ramp" : "prbs", PROTO_NAME[curProto],
+                      (unsigned long)curFreq);
+        return;
+    }
+
+    if (!strcasecmp(tok, "pattern"))
+    {
+        char *a = strtok(NULL, " \t");
+        if (!a)
+        {
+            replyErr("pattern <ramp|prbs>");
+            return;
+        }
+        if (!strcasecmp(a, "ramp"))
+            patMode = PAT_RAMP;
+        else if (!strcasecmp(a, "prbs"))
+            patMode = PAT_PRBS;
+        else
+        {
+            replyErr("pattern must be ramp|prbs");
+            return;
+        }
+        patIndex = 0;
+        printStatus();
+        return;
+    }
+
     if (!strcasecmp(tok, "mode"))
     {
         char *a = strtok(NULL, " \t");
         if (!a)
         {
-            replyErr("mode <single|continuous>");
+            replyErr("mode <single|continuous|triggered>");
             return;
         }
         if (!strcasecmp(a, "single") || !strcasecmp(a, "framed"))
         {
             userBurst = -1;
             userGap = -1; // per-proto default + auto gap
+            triggeredMode = false;
         }
         else if (!strcasecmp(a, "cont") || !strcasecmp(a, "continuous") || !strcasecmp(a, "stream"))
         {
             userBurst = 64;
             userGap = 0; // long bursts, no idle gap
+            triggeredMode = false;
+        }
+        else if (!strcasecmp(a, "triggered") || !strcasecmp(a, "idle") || !strcasecmp(a, "armed"))
+        {
+            triggeredMode = true; // silent until `trigger <n>`
         }
         else
         {
-            replyErr("mode must be single|continuous");
+            replyErr("mode must be single|continuous|triggered");
             return;
         }
         printStatus();
@@ -583,7 +684,9 @@ void setup()
 
     Serial.println("\n[esp_combo_gen] MSO5202D combined analog + LA generator");
     Serial.println("  runtime protocol + frequency control over this serial link (JSON).");
-    Serial.println("  cmds: help | id | status | list | proto | freq <hz> | set <proto> <hz> | burst <n> | gap <us> | mode <single|continuous>");
+    Serial.println("  cmds: help | id | status | list | proto | freq <hz> | set <proto> <hz> | burst <n> | gap <us>");
+    Serial.println("        mode <single|continuous|triggered> | pattern <ramp|prbs> | trigger <n>");
+    Serial.println("  'mode triggered' = silent until 'trigger <n>' sends exactly n bytes from pattern index 0");
     Serial.println("  freq snaps to a per-protocol table (SPI 1kHz..20MHz, UART 300..5Mbaud, I2C 1kHz..5MHz)");
     Serial.println("  'mode continuous' = long bursts, no gap (solid stream); 'mode single' = framed bytes (decoder-friendly)");
     Serial.println("  CH1=GPIO22  CH2=GPIO23  LA D0..D15 on 13,12,14,27,26,25,33,32,15,2,4,16,17,5,18,19");
@@ -596,9 +699,9 @@ void loop()
     pollCommands(); // handle host control commands
     const uint32_t now = micros();
     laTick(now); // keep all 16 LA lines toggling
-    if ((int32_t)(now - nextSerial) >= 0)
+    if (!triggeredMode && (int32_t)(now - nextSerial) >= 0)
     { // pace the serial, non-blocking
-        serialUnit();
+        serialUnit(effBurst());
         nextSerial = micros() + effGap();
     }
 }

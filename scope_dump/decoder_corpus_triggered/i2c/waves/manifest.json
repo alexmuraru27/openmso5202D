@@ -1,0 +1,178 @@
+[
+  {
+    "achieved_spc": 10.0,
+    "burst": 89,
+    "depth": "40k",
+    "expected": "2cae4e5f64cd6e7de45dedf652cfd8656b1bd42193b7f41335fca6a74026ff716a0fb7a0c1cce144d2a69c7ac16c0b61939346153f959840f1eaf1df18383f3d3ebb439f66ab87ab1da12f2fd56c7806f4dcfb36e63c8d18f5",
+    "files": [
+      "i2c_10000hz_12spc_CH1.csv",
+      "i2c_10000hz_12spc_CH2.csv"
+    ],
+    "freq": 10000,
+    "pattern": "prbs",
+    "rows": 40067,
+    "seed": 138239,
+    "spc": 12,
+    "tb_ns": 20000000
+  },
+  {
+    "achieved_spc": 100.0,
+    "burst": 8,
+    "depth": "40k",
+    "expected": "e7e14d425d5b7f3d",
+    "files": [
+      "i2c_10000hz_100spc_CH1.csv",
+      "i2c_10000hz_100spc_CH2.csv"
+    ],
+    "freq": 10000,
+    "pattern": "prbs",
+    "rows": 40067,
+    "seed": 305479,
+    "spc": 100,
+    "tb_ns": 2000000
+  },
+  {
+    "achieved_spc": 100.0,
+    "burst": 111,
+    "depth": "512k",
+    "expected": "b82dffecab62fbf4a9de3886a9dca50e2369fdac20a124330fb955e0b9e85132145edc51a21a21813faaba858778c6c40c793808b4a38b22b317d67e41d100cd21cd99451088c2ee6abfeaf54dc9825c7ae1ca2380846f1480a9a9f17c4df84a67dbcbb8bccd3c44514cadaa72ad2c",
+    "files": [
+      "i2c_10000hz_100spc_CH1.csv",
+      "i2c_10000hz_100spc_CH2.csv"
+    ],
+    "freq": 10000,
+    "pattern": "prbs",
+    "rows": 400067,
+    "seed": 380995,
+    "spc": 100,
+    "tb_ns": 20000000
+  },
+  {
+    "achieved_spc": 12.5,
+    "burst": 52,
+    "depth": "40k",
+    "expected": "0794c49a12d0b7e0c504a34390a428e4eadda127d9c72f476b5dadbcdc8733baa518c08af77f327b3063a09e35f161ee6d8bdcab",
+    "files": [
+      "i2c_400000hz_12spc_CH1.csv",
+      "i2c_400000hz_12spc_CH2.csv"
+    ],
+    "freq": 400000,
+    "pattern": "prbs",
+    "rows": 40067,
+    "seed": 258396,
+    "spc": 12,
+    "tb_ns": 400000
+  },
+  {
+    "achieved_spc": 125.0,
+    "burst": 4,
+    "depth": "40k",
+    "expected": "44c972d8",
+    "files": [
+      "i2c_400000hz_100spc_CH1.csv",
+      "i2c_400000hz_100spc_CH2.csv"
+    ],
+    "freq": 400000,
+    "pattern": "prbs",
+    "rows": 40067,
+    "seed": 507546,
+    "spc": 100,
+    "tb_ns": 40000
+  },
+  {
+    "achieved_spc": 12.5,
+    "burst": 522,
+    "depth": "512k",
+    "expected": "8385aca0b2cd13814e2a7c601ad7d3f0186e51833416be1c93f85891670bdd74243c55e5c0c19fadc1ca088c0f08fcd4fd079aa1be9c1c8bc553b86cc43d5f2851d5f8e2b250b632f5f4dc0a8b9d66e14a8a532c706330774a6861e3289e2d264ffd8ec0f00345eac5990d63bfef877d5b7741a00fc2837f07d580a707e35568b27cbc03cdef6833aa909c9fea3e4b7f7330aaae52e7e72ed7cd6e6395ea009ae55cbc645772e1ab2f3b9953e52a7c76d40bbcdf9ef547b2c18046a7ce76e4507c3b48920febb80c7ad1077786d6d9201ece7aa9bf4320a8c23e215742026f50ca419bcc7ae9d168c6b6642abd3798756d23b168d5c9ffcb803995e812b857bc68ad3956610d888cd80f6addb2f48d537c908b08e1b5ba068f6bd7675733adf55ae58a013ec8bd79ebff4fa307964cdfc8e111ed366c93cf76cc674e9d30eee7ca20b55a1092969807aca24a8346470d89d3e52c36d639b82c20432d2ee90bee540f92a19221be672b98c1bd61d1511bbdbe4baad6b03af938c0282e2c6a35c3cc1ae3120d85547dd7b33431733d6b368a88d28fba458d0ec6b8ca3f307b9721115b4fb91910140836a5a68d162bcbb962ce19aeee92dc650da60e260469847d7df81b6f427816ad6bbd2cb3e927c1ed939d89dfa593ceecd5d7e2435d23739e6c2815d9944ce9ed3ba89aef77b01d66603ae703b9441b0528015bab7427e58f7adfb07685d6a37b8827",
+    "files": [
+      "i2c_400000hz_12spc_CH1.csv",
+      "i2c_400000hz_12spc_CH2.csv"
+    ],
+    "freq": 400000,
+    "pattern": "prbs",
+    "rows": 400067,
+    "seed": 465022,
+    "spc": 12,
+    "tb_ns": 4000000
+  },
+  {
+    "achieved_spc": 125.0,
+    "burst": 50,
+    "depth": "512k",
+    "expected": "a43c2f5b1579e01ca83cf831715d215bcad18684438224275cdea285f7c6e3f7b2c88ec364e5eb8006825dc0f9656f23625e",
+    "files": [
+      "i2c_400000hz_100spc_CH1.csv",
+      "i2c_400000hz_100spc_CH2.csv"
+    ],
+    "freq": 400000,
+    "pattern": "prbs",
+    "rows": 400067,
+    "seed": 86740,
+    "spc": 100,
+    "tb_ns": 400000
+  },
+  {
+    "achieved_spc": 10.0,
+    "burst": 25,
+    "depth": "40k",
+    "expected": "add7488e0f148e438e21fa5f97c9b4d619ddb28092b6cb92a7",
+    "files": [
+      "i2c_1000000hz_12spc_CH1.csv",
+      "i2c_1000000hz_12spc_CH2.csv"
+    ],
+    "freq": 1000000,
+    "pattern": "prbs",
+    "rows": 40067,
+    "seed": 790087,
+    "spc": 12,
+    "tb_ns": 200000
+  },
+  {
+    "achieved_spc": 100.0,
+    "burst": 1,
+    "depth": "40k",
+    "expected": "91",
+    "files": [
+      "i2c_1000000hz_100spc_CH1.csv",
+      "i2c_1000000hz_100spc_CH2.csv"
+    ],
+    "freq": 1000000,
+    "pattern": "prbs",
+    "rows": 40067,
+    "seed": 936735,
+    "spc": 100,
+    "tb_ns": 20000
+  },
+  {
+    "achieved_spc": 10.0,
+    "burst": 254,
+    "depth": "512k",
+    "expected": "feb32861a6dc897e2a621262899f03b1cf078185ee029ef367988f390d39951d5407c09d686a71745b82ba32d1afab083fab12b6e1b9aefafacc262a460759e19715d128335b30616e8cd0ce07f4202655cfcf19af7dc309d111f0c7fd538894d24ce71cafe0547e6fabcc54dbea746150ba963ec1140e2eb1759debcb1270db97f98337bdb48562b9ed58177bb01b8f7df0a9ac0dad69cc34e9329c3fe367b09b4c744c95411447003b9046c75583e78a9b184f621b218dfb62574fb618e239746e95c59fd57c54e152303b356d36a91337150135d2c12a89a25c9de85e6382fc4fd48a4859dc09eb7c0ca227bf9d047b384b4c31c491c7d6f201be6e45",
+    "files": [
+      "i2c_1000000hz_12spc_CH1.csv",
+      "i2c_1000000hz_12spc_CH2.csv"
+    ],
+    "freq": 1000000,
+    "pattern": "prbs",
+    "rows": 400067,
+    "seed": 616651,
+    "spc": 12,
+    "tb_ns": 2000000
+  },
+  {
+    "achieved_spc": 100.0,
+    "burst": 25,
+    "depth": "512k",
+    "expected": "e3e400d24ca3d4d5bc50e4fb8f20d45fc302d527301582da0b",
+    "files": [
+      "i2c_1000000hz_100spc_CH1.csv",
+      "i2c_1000000hz_100spc_CH2.csv"
+    ],
+    "freq": 1000000,
+    "pattern": "prbs",
+    "rows": 400067,
+    "seed": 383723,
+    "spc": 100,
+    "tb_ns": 200000
+  }
+]

@@ -34,7 +34,11 @@ fn labels_read_like_the_user_facing_operation() {
         Op::SetTimePerDiv { nanoseconds: 2000 }.label(),
         "Setting timebase to 2 µs/div"
     );
-    assert_eq!(Op::CaptureSingle.label(), "Capturing a single sequence");
+    assert_eq!(Op::ArmSingle.label(), "Arming a single sequence");
+    assert_eq!(
+        Op::WaitCaptured { timeout_s: 20 }.label(),
+        "Waiting for the trigger"
+    );
     assert_eq!(
         Op::SaveCsv { source: CsvSource::Ch1 }.label(),
         "Saving CH1 to card"

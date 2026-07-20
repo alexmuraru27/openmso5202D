@@ -26,6 +26,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 tracing-appender = "0.2"
 
-[dev-dependencies]
-# Reading the capture manifests and writing the decoder scoreboard.
+# The capture-corpus tool reads and merges its JSON manifest.
 serde_json = "1"

@@ -53,15 +53,22 @@ pub enum Op {
         depth: StoreDepth,
     },
 
-    /// Arm a single sequence and wait for the scope to capture and stop itself.
+    /// Arm a single sequence and return **without** waiting for it to fire.
     ///
-    /// The only capture mechanism used: a single sequence stops on a real trigger with a
-    /// trigger-aligned record. A manual run/stop freeze is not trigger-aligned and can
-    /// latch a stale or partial buffer.
+    /// Splitting the arm from the wait is what allows an external stimulus to be released
+    /// while the scope is armed: arm, start the signal, then [`Op::WaitCaptured`]. Doing
+    /// both in one step would either miss the stimulus or force a trigger before it
+    /// arrived.
+    ArmSingle,
+
+    /// Wait for an armed single sequence to capture and stop.
     ///
-    /// This is a **precondition for saving** — exporting from a scope that has not captured
-    /// writes no file at all.
-    CaptureSingle,
+    /// Fails if nothing triggers within the timeout, rather than forcing one — a forced
+    /// trigger would capture an idle window and quietly produce an empty record.
+    WaitCaptured {
+        /// How long to wait for a trigger, in seconds.
+        timeout_s: u64,
+    },
 
     /// Export the captured record for one source to the memory card as a CSV.
     ///
@@ -110,7 +117,8 @@ impl Op {
             Op::SetDepth { depth } => {
                 format!("Setting acquisition depth to {}", depth_label(*depth))
             }
-            Op::CaptureSingle => "Capturing a single sequence".into(),
+            Op::ArmSingle => "Arming a single sequence".into(),
+            Op::WaitCaptured { .. } => "Waiting for the trigger".into(),
             Op::SaveCsv { source } => format!("Saving {} to card", source.name()),
             Op::Download { source } => format!("Downloading {} record", source.name()),
             Op::ClearCard => "Clearing exported CSVs from card".into(),

@@ -64,6 +64,11 @@ impl Transport {
     /// Tear down and re-establish the connection from scratch (find → detach → claim →
     /// clear_halt), discarding any buffered bytes. Use after an unrecoverable USB error.
     pub fn reconnect(&mut self, reset: bool) -> Result<()> {
+        // Release the interface the current handle holds BEFORE opening a new one.
+        // Otherwise, when the device is still present (a soft failure, not a
+        // disconnect), our own claim collides with itself — libusb reports
+        // "Resource busy" and recovery fails on a scope that was actually fine.
+        let _ = self.handle.release_interface(INTERFACE);
         self.handle = Self::open_handle(reset)?;
         self.rx.lock().unwrap().clear();
         Ok(())

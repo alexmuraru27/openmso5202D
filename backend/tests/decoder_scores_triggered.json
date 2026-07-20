@@ -1,0 +1,172 @@
+{
+  "i2c/10000/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 8,
+    "expected": 8
+  },
+  "i2c/10000/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 89,
+    "expected": 89
+  },
+  "i2c/10000/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 111,
+    "expected": 111
+  },
+  "i2c/1000000/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 1,
+    "expected": 1
+  },
+  "i2c/1000000/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 25,
+    "expected": 25
+  },
+  "i2c/1000000/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 25,
+    "expected": 25
+  },
+  "i2c/1000000/512k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 254,
+    "expected": 254
+  },
+  "i2c/400000/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 4,
+    "expected": 4
+  },
+  "i2c/400000/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 52,
+    "expected": 52
+  },
+  "i2c/400000/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 50,
+    "expected": 50
+  },
+  "i2c/400000/512k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 522,
+    "expected": 522
+  },
+  "spi/10000/40k/100spc": {
+    "accuracy": 0.95,
+    "decoded": 20,
+    "expected": 20
+  },
+  "spi/10000/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 200,
+    "expected": 200
+  },
+  "spi/10000/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 200,
+    "expected": 200
+  },
+  "spi/2000000/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 16,
+    "expected": 16
+  },
+  "spi/2000000/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 160,
+    "expected": 160
+  },
+  "spi/2000000/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 160,
+    "expected": 160
+  },
+  "spi/2000000/512k/12spc": {
+    "accuracy": 0.961,
+    "decoded": 1600,
+    "expected": 1600
+  },
+  "spi/20000000/40k/12spc": {
+    "accuracy": 0.0,
+    "decoded": 35,
+    "expected": 160
+  },
+  "spi/20000000/512k/12spc": {
+    "accuracy": 0.002,
+    "decoded": 252,
+    "expected": 1280
+  },
+  "spi/500000/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 20,
+    "expected": 20
+  },
+  "spi/500000/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 200,
+    "expected": 200
+  },
+  "spi/500000/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 200,
+    "expected": 200
+  },
+  "uart/115200/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 18,
+    "expected": 18
+  },
+  "uart/115200/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 185,
+    "expected": 184
+  },
+  "uart/115200/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 184,
+    "expected": 184
+  },
+  "uart/115200/512k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 1844,
+    "expected": 1843
+  },
+  "uart/921600/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 14,
+    "expected": 14
+  },
+  "uart/921600/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 148,
+    "expected": 147
+  },
+  "uart/921600/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 148,
+    "expected": 147
+  },
+  "uart/921600/512k/12spc": {
+    "accuracy": 0.145,
+    "decoded": 1454,
+    "expected": 1474
+  },
+  "uart/9600/40k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 16,
+    "expected": 15
+  },
+  "uart/9600/40k/12spc": {
+    "accuracy": 1.0,
+    "decoded": 153,
+    "expected": 153
+  },
+  "uart/9600/512k/100spc": {
+    "accuracy": 1.0,
+    "decoded": 154,
+    "expected": 153
+  }
+}
