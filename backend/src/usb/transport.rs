@@ -9,8 +9,9 @@
 //! to actually reach the kernel, then writes the OUT frame. Below ~12 ms the write races
 //! the read and the device goes silent.
 
+use std::io::Write as _;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -120,17 +121,35 @@ impl Transport {
 
     /// [`Transport::transact`] with an explicit timeout and retry count.
     pub fn transact_with(&self, payload: &[u8], timeout: Duration, retries: u32) -> Result<Vec<u8>> {
-        let frame = self.transact_raw(protocol::LEADER_DATA, payload, timeout, retries)?;
+        // Full verification (leader + length + checksum) happens INSIDE the retry loop, so a
+        // corrupt or stale cross-channel frame is discarded and the request re-sent — exactly
+        // as Python's `transact` retries because `verify` runs inside `_transact_once`.
+        let frame = self.transact_validated(protocol::LEADER_DATA, payload, timeout, retries)?;
         protocol::verify(&frame).map(<[u8]>::to_vec)
     }
 
     /// Send `payload` under an explicit `leader` and return the **complete raw frame**
     /// (leader, length, payload and checksum included).
     ///
-    /// This is the leader-generic primitive both channels build on: the data channel adds
-    /// checksum verification on top, while the command channel (`0x43`) parses by length
-    /// only, since its replies carry no checksum we can rely on.
+    /// The leader-generic primitive both channels build on. It validates the reply INSIDE the
+    /// retry loop: the data channel demands a full [`protocol::verify`] (leader + length +
+    /// checksum), while the command channel (`0x43`), whose replies carry no trustworthy
+    /// checksum, demands only that the reply's leader **matches the request's** — a mismatch
+    /// means a stale frame from the *other* channel was read (the classic `bad leader 0x43`
+    /// after a shell command), which is discarded and retried after a resync.
     pub fn transact_raw(
+        &self,
+        leader: u8,
+        payload: &[u8],
+        timeout: Duration,
+        retries: u32,
+    ) -> Result<Vec<u8>> {
+        self.transact_validated(leader, payload, timeout, retries)
+    }
+
+    /// Shared retry loop: send, receive one frame, **validate it in-loop**, resync-and-retry
+    /// on any failure. Returns the raw frame; the caller extracts its payload.
+    fn transact_validated(
         &self,
         leader: u8,
         payload: &[u8],
@@ -150,7 +169,10 @@ impl Transport {
                 "transact"
             );
             let started = std::time::Instant::now();
-            match self.transact_once(leader, payload, timeout) {
+            let outcome = self
+                .transact_once(leader, payload, timeout)
+                .and_then(|frame| validate_reply(leader, frame));
+            match outcome {
                 Ok(frame) => {
                     tracing::trace!(
                         selector = format_args!("0x{selector:02x}"),
@@ -195,6 +217,7 @@ impl Transport {
         thread::sleep(TRANSACT_POST);
 
         let frame = protocol::build_with(leader, payload);
+        log_usb("OUT", &frame);
         let write_res = self
             .handle
             .write_bulk(EP_OUT, &frame, Duration::from_millis(2000));
@@ -236,6 +259,7 @@ impl Transport {
             if n == 0 {
                 return Err(Error::Timeout(timeout));
             }
+            log_usb("IN ", &scratch[..n]);
             buf.extend_from_slice(&scratch[..n]);
         }
         let total = protocol::frame_total_len(&buf).unwrap();
@@ -244,6 +268,7 @@ impl Transport {
             if n == 0 {
                 return Err(Error::Timeout(timeout));
             }
+            log_usb("IN ", &scratch[..n]);
             buf.extend_from_slice(&scratch[..n]);
         }
 
@@ -262,9 +287,12 @@ impl Transport {
                 .handle
                 .read_bulk(EP_IN, &mut scratch, Duration::from_millis(60))
             {
-                Ok(0) => break,          // endpoint dry
-                Ok(_) => continue,       // keep draining — scope dribbles frames
-                Err(_) => break,         // timeout = nothing more pending
+                Ok(0) => break, // endpoint dry
+                Ok(n) => {
+                    log_usb("DRN", &scratch[..n]);
+                    continue; // keep draining — scope dribbles frames
+                }
+                Err(_) => break, // timeout = nothing more pending
             }
         }
     }
@@ -281,4 +309,76 @@ impl Drop for Transport {
     fn drop(&mut self) {
         let _ = self.handle.release_interface(INTERFACE);
     }
+}
+
+/// Validate a reply frame, passing it through unchanged if acceptable.
+///
+/// Data-channel (`0x53`) replies get a full [`protocol::verify`] — leader, length, and
+/// checksum — exactly as Python's `verify` does inside its retry loop (so a `0x43` frame read
+/// where a `0x53` was expected is rejected and retried). Command-channel (`0x43`) replies
+/// carry no trustworthy checksum, so they only have to **start with the matching leader**; a
+/// mismatch means a stale frame from the other channel (the `bad leader 0x43` desync after a
+/// shell command). Either rejection makes the retry loop resync and re-send.
+///
+/// It deliberately does NOT check the `selector | 0x80` echo: a `0x13` key press is not
+/// idempotent, so retrying it because a one-behind reply came back would double-press the
+/// key — which is why Python never validates the echo here either.
+fn validate_reply(leader: u8, frame: Vec<u8>) -> Result<Vec<u8>> {
+    if leader == protocol::LEADER_DATA {
+        protocol::verify(&frame)?;
+    } else if frame.first() != Some(&leader) {
+        return Err(Error::Framing(format!(
+            "bad leader 0x{:02x} (wanted 0x{leader:02x})",
+            frame.first().copied().unwrap_or(0)
+        )));
+    }
+    Ok(frame)
+}
+
+// --- optional raw USB logging -------------------------------------------------
+// The direct analogue of the Python driver's `MSO_USB_LOG`: set `MSO_USB_LOG=1` (or
+// `=stderr`) to log to stderr, or `=/path/to/file` to append. Every OUT frame written, IN
+// chunk read, and DRN chunk drained by a resync is logged with a millisecond timestamp and
+// its byte length + hex head — so the Rust and Python wire traces can be diffed byte for
+// byte and delay for delay.
+
+/// Backing store for the raw USB log: where lines go, and the zero point for timestamps.
+struct UsbLog {
+    sink: Box<dyn std::io::Write + Send>,
+    start: std::time::Instant,
+}
+
+/// The process-wide USB log, initialised once from `MSO_USB_LOG`. `None` when unset.
+fn usb_log() -> Option<&'static Mutex<UsbLog>> {
+    static LOG: OnceLock<Option<Mutex<UsbLog>>> = OnceLock::new();
+    LOG.get_or_init(|| {
+        let dest = std::env::var("MSO_USB_LOG").ok()?;
+        let sink: Box<dyn std::io::Write + Send> = match dest.as_str() {
+            "1" | "stderr" => Box::new(std::io::stderr()),
+            path => Box::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .ok()?,
+            ),
+        };
+        Some(Mutex::new(UsbLog {
+            sink,
+            start: std::time::Instant::now(),
+        }))
+    })
+    .as_ref()
+}
+
+/// Log one direction (`OUT` / `IN ` / `DRN`) of `bytes` with a millisecond timestamp and a
+/// hex head. No-op unless `MSO_USB_LOG` is set.
+fn log_usb(dir: &str, bytes: &[u8]) {
+    let Some(lock) = usb_log() else { return };
+    let mut log = lock.lock().unwrap();
+    let ms = log.start.elapsed().as_secs_f64() * 1000.0;
+    let head: String = bytes.iter().take(24).map(|b| format!("{b:02x}")).collect();
+    let tail = if bytes.len() > 24 { "…" } else { "" };
+    let _ = writeln!(log.sink, "[{ms:11.1}] {dir} {:>7}B [{head}{tail}]", bytes.len());
+    let _ = log.sink.flush();
 }

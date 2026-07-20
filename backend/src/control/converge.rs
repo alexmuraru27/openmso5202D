@@ -26,6 +26,12 @@ pub const MENU_SETTLE: Duration = Duration::from_millis(350);
 /// Generous: volts/div spans about a dozen steps end to end and the timebase spans 32.
 const MAX_STEPS: u32 = 40;
 
+/// Re-nudges of a knob that appears not to have moved before concluding it is a real end
+/// stop. The single-slot key mailbox drops presses, so one dropped nudge looks exactly like
+/// an end stop — the Python setters (`_step_key`) just keep pressing, so a transient
+/// non-move must not abort the whole plan.
+const NONMOVE_RETRIES: u32 = 3;
+
 /// Attempts to open a menu before giving up.
 const MENU_ATTEMPTS: u32 = 4;
 
@@ -64,9 +70,20 @@ pub fn converge(
         device.turn(knob, direction, 1)?;
         sleep(SETTLE);
 
-        let moved = current(device)?;
+        // A knob that appears not to have moved is usually a dropped press, not an end
+        // stop — the mailbox is single-slot. Re-nudge a few times before concluding it
+        // really cannot move, so one lost press does not abort the whole prepare/capture.
+        let mut moved = current(device)?;
+        let mut stalls = 0;
+        while moved == value && stalls < NONMOVE_RETRIES {
+            device.turn(knob, direction, 1)?;
+            sleep(SETTLE);
+            moved = current(device)?;
+            stalls += 1;
+        }
         if moved == value {
-            // The knob did not budge: an end stop, or a value the scope will not accept.
+            // Still put after several nudges: a genuine end stop, or a value the scope
+            // will not accept in this mode.
             return Err(Error::Unexpected(format!(
                 "{knob:?} stopped at {value} before reaching {target} (end stop or invalid value)"
             )));

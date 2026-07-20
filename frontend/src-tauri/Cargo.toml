@@ -16,7 +16,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
-# NOTE: no `mso5202d` backend dependency yet. The frontend is intentionally left
-# unconnected; a dedicated backend-API layer will bridge to the driver later, and this is
-# where that dependency (plus serde for command payloads) will be re-added.
+# The driver, bridged to the UI through the backend-API layer in `src/api.rs`.
+mso5202d = { path = "../../backend" }

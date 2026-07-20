@@ -13,6 +13,22 @@ line). This tool is the host end of that command API:
     python3 mso5202d_espgen.py set uart 115200 single       # (mode: single=framed / continuous=stream)
     python3 mso5202d_espgen.py burst 256              # bytes per transaction (fine-tune)
     python3 mso5202d_espgen.py gap 0                  # idle us between transactions (0=continuous)
+    python3 mso5202d_espgen.py pattern ramp           # byte sequence: ramp (0,1,2,..) or prbs (hash)
+    python3 mso5202d_espgen.py trigger 5 1            # send exactly 5 bytes from index 1 -> 1,2,3,4,5
+
+The BYTE SEQUENCE is set by `pattern`:
+  - `ramp` — 0x00, 0x01, 0x02, … wrapping at 0xFF. Human-readable; the classic test ramp.
+  - `prbs` — a deterministic hash of the byte index. Every byte depends on its position, so
+    a decode that is shifted or has dropped a byte is immediately visible (a shifted ramp
+    still looks like a ramp). Both are reproducible; `prbs` is the better grading pattern.
+
+The TRANSMIT MODE decides WHEN bytes go out:
+  - `continuous` — a solid back-to-back stream (long bursts, no gap): fills the scope.
+  - `single`     — framed bytes with idle gaps between them (decoder-friendly).
+  - `triggered`  — SILENT until you ask: `trigger <n> [start]` sends exactly n bytes ONCE
+                   (from pattern index `start`, default 0), then falls silent again. This is
+                   what pairs with a scope single-sequence: arm the scope, then `trigger`.
+                   e.g. `trigger 5 1` -> 1,2,3,4,5;  `trigger 256` -> the full 0x00..0xFF ramp.
 
 Port is auto-detected (/dev/ttyUSB*, /dev/ttyACM*); override with --port.
 
@@ -262,15 +278,18 @@ def main():
     p_gap = sub.add_parser("gap", help="idle microseconds between transactions (0=continuous, or 'auto')")
     p_gap.add_argument("us", help="microseconds, or 'auto'")
     p_trig = sub.add_parser("trigger",
-                            help="send exactly n bytes ONCE, then fall silent "
-                                 "(puts the generator in triggered mode)")
+                            help="send exactly n bytes ONCE from the current pattern, then "
+                                 "fall silent (also switches the generator to triggered mode)")
     p_trig.add_argument("n", type=int, help="bytes to send (1..8192)")
     p_trig.add_argument("start", type=int, nargs="?", default=0,
-                        help="start offset into the pattern (default 0) — vary it "
-                             "per capture so different runs cover different bytes")
-    p_pat = sub.add_parser("pattern", help="byte sequence the generator sends")
+                        help="start index into the pattern (default 0). With pattern=ramp, "
+                             "`trigger 5 1` sends 1,2,3,4,5; `trigger 5` sends 0,1,2,3,4. "
+                             "Vary it per capture so runs cover different bytes.")
+    p_pat = sub.add_parser("pattern", help="the byte sequence the generator sends")
     p_pat.add_argument("name", choices=PATTERNS,
-                       help="ramp (0x00,0x01,...) or prbs (hash of the byte index)")
+                       help="ramp = 0x00,0x01,0x02,.. (wraps at 0xFF); "
+                            "prbs = deterministic hash of the byte index (any shift/drop is "
+                            "visible). Applies to every mode (continuous/single/triggered).")
 
     args = ap.parse_args()
     port = args.port or find_port()

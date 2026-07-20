@@ -19,7 +19,20 @@
 //   UART: TX=CH1(22)    (CH2 unused)   8N1,       300 bps .. 5 Mbps  (HW peripheral)
 //   I2C : SCL=CH1(22)   SDA=CH2(23)    self-ACK,  1 kHz .. 5 MHz nominal (bit-banged;
 //                                      actually reaches ~500 kHz — see freq_achieved)
-// All loop the 0x00..0xFF ramp. 3.3 V CMOS out — common GND with the scope.
+// 3.3 V CMOS out — common GND with the scope.
+//
+// The BYTE SEQUENCE is selectable with `pattern` (default prbs at power-on):
+//   * ramp — 0x00, 0x01, 0x02, … wrapping at 0xFF. The classic, human-readable ramp.
+//   * prbs — a deterministic hash of the byte index (patternByte); every byte depends on
+//            its position, so a decode that is shifted or dropped a byte is obvious, unlike
+//            a shifted ramp. Both are reproducible from the index; the host mirrors prbs.
+//
+// The TRANSMIT MODE decides WHEN bytes go out (`mode`, or preset by burst/gap):
+//   * continuous — solid back-to-back stream (fills the scope).
+//   * single     — framed bytes with idle gaps (decoder-friendly).
+//   * triggered  — SILENT until `trigger <n> [start]` sends exactly n bytes ONCE from
+//                  pattern index `start` (default 0), then falls silent. Pairs with a scope
+//                  single-sequence: arm the scope, then trigger. `trigger 5 1` -> 1,2,3,4,5.
 //
 // Serial command API (send one command per line, 115200 8N1). Every command
 // replies with a single JSON line; unknown/malformed lines reply {"ok":false,...}.
@@ -30,6 +43,10 @@
 //   proto spi|uart|i2c-> switch protocol (restores that protocol's last freq)
 //   freq <hz>         -> set frequency for the current protocol (clamped to range)
 //   set <proto> <hz>  -> switch protocol AND set its frequency in one call
+//   pattern ramp|prbs -> the byte sequence to send (see above)
+//   mode single|continuous|triggered -> when bytes go out (see above)
+//   burst <1..256>    -> bytes per transaction; gap <us|auto> -> idle between them
+//   trigger <n> [start] -> triggered mode: send n bytes once from pattern index `start`
 // See README.md and scripts/mso5202d_espgen.py (host-side control tool).
 
 #include <Arduino.h>
@@ -448,9 +465,11 @@ static void handleCommand(char *line)
         Serial.print("{\"ok\":true,\"help\":\"cmds: id | status | range/list | "
                      "proto <spi|uart|i2c> | freq <hz> | set <proto> <hz> | "
                      "burst <1..256> | gap <us|auto> | mode <single|continuous|triggered> | "
-                     "pattern <ramp|prbs> | trigger <n>. "
+                     "pattern <ramp|prbs> | trigger <n> [start]. "
                      "freq is SPI SCLK / UART baud / I2C SCL, snapped to the nearest "
-                     "table entry (see 'list'). burst=bytes per transaction, gap=idle "
+                     "table entry (see 'list'). pattern: ramp=0,1,2,.. prbs=index hash. "
+                     "trigger sends n bytes once from pattern index start (default 0), "
+                     "e.g. 'trigger 5 1'->1,2,3,4,5. burst=bytes per transaction, gap=idle "
                      "us between them (0=continuous). replies are JSON.\"}\n");
         return;
     }

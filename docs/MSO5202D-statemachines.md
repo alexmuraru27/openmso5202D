@@ -5,7 +5,9 @@ verification between steps. This is the procedural companion to the two referenc
 docs — `MSO5202D-protocol.md` (the byte-level wire protocol) and
 `MSO5202D-rendering.md` (turning samples into a trace). Everything here is
 hardware-verified; the flows are what `scripts/mso5202d_plot.py`,
-`scripts/mso5202d_decode.py`, and `scripts/mso5202d_shell.py` implement.
+`scripts/mso5202d_decode.py`, and `scripts/mso5202d_shell.py` implement, and what the
+Rust backend (`backend/src`) mirrors one-to-one — the host-side USB stack that carries
+them all is §8.
 
 The scope is a small embedded instrument with a slow key-scan loop and a
 **fragile USB/SD-card coupling**. Driving it reliably is less about individual
@@ -357,6 +359,10 @@ The `0x11`-write busy period (~3.4 s) is the single biggest avoidable cost, so:
 | **Save no-ops, no file, no `/dsocsv.tmp`** | no SD card mounted | insert the card; confirm `df /mnt/udisk` shows a vfat device |
 | **Malformed `0x43 0x01`** crash-reboot | bare `0x01` with no LE16 count arg | never send it; it's the acquisition engine anyway, not an LA tap |
 | **Link desync** (`bad SOF`) | stale RX bytes from a prior session | `_resync()` |
+| **`bad leader 0x43`** on a `0x53` read | a trailing shell (`0x43`) reply lingered and was read by the next data-channel request | validate the reply leader **inside** the retry loop → resync + re-send (§8.3/§8.4); resync at the end of a shell command |
+| **`bad leader 0x53` (wanted `0x43`)** during a shell `ls` | leftover `0x53` framebuffer frames bled into the shell read | collect the framebuffer to its real END so nothing is left queued (§8.6); resync before/after each grab (§8.7) |
+| **`framebuffer too short: 212 B`** on a screen grab | a one-behind stale settings block (`0x81`, whose 2nd byte can look like a DATA subtype) was read as the framebuffer | retry the grab with a resync around it, accept only a full screen (§8.7) |
+| **probe/menu key fires twice** | a fire-and-forget key press was retried on a stale reply | never re-validate a `0x13` key by its reply echo — keys are non-idempotent (§8.5) |
 
 ---
 
@@ -379,3 +385,152 @@ error; aborting on the first timeout kills a save that was progressing normally.
 The same poll must still respect the no-re-press rule (§3.0.1): the file only
 becomes visible when the scope renames its temp file at the very end.
 [verified 2026-07-20]
+
+---
+
+## 8. USB transport layer — the full host-side stack
+
+Everything above is *what* to send; this section is *how* the host must move bytes so the
+scope answers reliably. It is implemented identically in the Python `Scope` (`mso5202d.py`)
+and the Rust `Transport` (`backend/src/usb/transport.rs`); the byte layout of a frame lives in
+`MSO5202D-protocol.md` §2, this is the procedural handling around it. Two bulk endpoints only:
+**OUT `0x02`, IN `0x81`**. Every quirk below was needed to make prepare+capture work end to
+end (4K / 40K / 512K, single- and dual-channel, `[verified 2026-07-20]`).
+
+### 8.1 The transaction primitive — reader thread *before* the write
+
+**The device only answers an OUT command if a bulk-IN read is already posted when the command
+is written.** libusb's synchronous read blocks, so a transaction is:
+
+```
+spawn reader thread ──▶ reader signals "about to post the IN read" ──▶ post bulk-IN read (blocks)
+main thread waits for that signal ──▶ sleep TRANSACT_POST (~15 ms) ──▶ write the OUT frame
+                                   ──▶ join the reader ──▶ it returns the reply frame
+```
+
+`TRANSACT_POST` is the margin for the IN URB to actually reach the kernel before the OUT
+races it. Below ~12 ms the write beats the read and the device goes **silent** (the
+transaction times out); 15 ms is measured-reliable with headroom, and latency is
+USB-round-trip-limited from there down, so lower is not faster. Re-tune per host with
+`scripts/tune_transact.py`. If the write reports an error but the reader still got a frame,
+**prefer the received frame** — the reply is what matters.
+
+### 8.2 Frame assembly & the persistent RX buffer
+
+Reads are accumulated into a **persistent RX buffer** that survives across transactions, so a
+read that returns more than one frame's worth of bytes keeps the tail aligned for the next
+read. Assembly: read until ≥ 3 bytes (leader + `len_LE16`), compute `total = len + 3`, read
+until the buffer holds `total`, split off exactly that frame, leave the rest buffered. Chunk
+size differs by implementation and does **not** affect correctness — Python reads 512 B per
+`dev.read`, Rust reads 64 KB per `read_bulk`; both accumulate to a whole frame either way.
+
+### 8.3 Validation lives INSIDE the retry loop *(the load-bearing rule)*
+
+A transaction retries (default 2) with a `resync()` between attempts, and **the reply is
+validated inside that loop, not after it.** On any validation failure — bad leader, wrong
+length, bad checksum — the attempt resyncs and re-sends. Moving the check outside the loop (so
+a bad frame errors instead of retrying) is exactly what made a stale cross-channel frame fatal
+instead of self-healing. For the data channel validation is a full `verify` (leader `0x53` +
+length + checksum); see §8.4 for the command channel.
+
+### 8.4 Two channels share the endpoints → the leader-match rule
+
+The data channel (`0x53`) and the command/shell channel (`0x43`) use the **same** bulk
+endpoints. A reply frame's leader always equals its request's leader (`0x53`→`0x53`,
+`0x43`→`0x43`). So the in-loop validation requires **the reply leader to match the request
+leader**; a mismatch means a frame from the *other* channel was read — typically a shell reply
+still dribbling out when the next data request posts its read (`bad leader 0x43`) — and it is
+rejected → resync → re-send. To keep it from happening in the first place, **`resync()` at the
+end of every shell command** (§8.11) so no trailing `0x43` frame is left for the next `0x53`
+read. Command-channel replies carry no checksum we can trust, so they are validated by leader
+only (their content is delimited by the shell marker, §7).
+
+### 8.5 The one-behind race — and why keys are NOT echo-validated
+
+A slow reply can arrive one request late: a delayed `0x01` settings reply (`0x81` echo) can be
+read as the *next* request's first frame. It is a valid `0x53` frame, so leader+checksum pass —
+only its **selector echo** (`0x81`) is wrong for, say, a `0x20` framebuffer request (which
+echoes `0xa0`). It is tempting to also validate `reply[0] == selector | 0x80` and retry on a
+mismatch — **do not.** A `0x13` key press is **fire-and-forget and NOT idempotent**: retrying
+one because its ack was a one-behind frame **double-presses the key** (observed as a probe/menu
+softkey advancing two ring steps instead of one). Python never validates the echo for this
+reason. Instead the one-behind stale frame is absorbed where it lands: the multi-frame
+collector skips it (§8.6) and the framebuffer grab resyncs and retries (§8.7).
+
+### 8.6 Multi-frame replies — consume the END, skip everything else
+
+A large reply is a **size** frame (subtype `0x00`), any number of **data** frames (`0x01`),
+then an **end-marker** frame (`0x02`). The end marker **must be consumed** or the next read
+starts mid-stream. The collector therefore:
+
+- **appends** on subtype `0x01`,
+- **stops** only on subtype `0x02` (END),
+- **skips** anything else (a SIZE frame, or a stale one-behind frame) and keeps reading,
+
+bounded by a large max frame count as a backstop. Stopping on the *first* non-data frame was a
+real bug: a stale frame in front of the framebuffer ended collection early and left ~768 KB of
+`0x53` frames queued, which then surfaced as `bad leader 0x53` inside the following shell `ls`.
+Data offsets differ by reply: file-read and framebuffer data start at **offset 2** (echo +
+subtype); acquire data starts at **offset 3** (echo + subtype + source byte, §8.8).
+
+### 8.7 Framebuffer grab (`0x20` → `0xa0`, ~768 KB)
+
+Reading the screen (for the CSV Source radio and the save banner) moves the whole framebuffer —
+exactly `800·480·2` bytes across ~75 frames, **no size frame**. It is the grab most exposed to
+desync, so:
+
+- **`resync()` before *and* after every grab.** Before → start from a clean endpoint so a
+  leftover frame is never mistaken for the first framebuffer frame; after → a 768 KB transfer
+  can leave a tail that would bleed into the next command.
+- **Retry the whole grab (up to 4×)** and **accept only a full-size screen.** A short/garbled
+  grab (a one-behind stale frame, or the scope momentarily busy) is retried, never accepted.
+- Convert RGB565 LE → RGB888 only after a full grab. `[verified 2026-07-20]`
+
+### 8.8 Waveform acquire (`0x02 01 <ch>` → `0x82`)
+
+Screen-buffer samples for one analog channel. Two quirks: (1) write a **`12 01 00` latch
+first** (the vendor app pulses `0x12` around every acquire); (2) the data frame is `echo |
+0x01 | src | samples…`, so samples start at **offset 3**. The channel switch is **one-deep
+pipelined** — the *first* read after changing `<ch>` returns the *previous* channel's block —
+so a caller comparing channels must **read twice and keep the second** (this is how a channel's
+on/off state is verified in prepare, §4b: an empty acquire = channel off). A disabled channel
+answers empty. Retries with a resync between, like every other read. (`02 01 05` LA is broken —
+never used; §protocol.md §5.)
+
+### 8.9 File read (`0x10 <path>` → `0x90`)
+
+Multi-frame like §8.6 (offset 2), looped until the END marker, so it handles files far larger
+than the 64 KB single-frame cap — a 512 K export is ~7.7 MB and reads back at ~800 KB/s
+(≈10 s). After the transfer, `resync()` to clear any tail. A path the scope cannot serve
+(e.g. the running `/dso_bin`) answers with a single byte forever, so cross-check the returned
+length against the card's `ls` size when truncation would matter.
+
+### 8.10 `resync()` — draining to a clean boundary
+
+Called after a timeout, a bad frame, or a large transfer. It clears the RX buffer, then reads
+the endpoint dry in **large chunks with a short (~60 ms) timeout**, bounded (~64 iterations, a
+few seconds worst case) so a desync costs a second or two rather than tens of seconds. It keeps
+reading until a read comes back empty/times out — it must **not** stop on a partial read,
+because the scope dribbles frames and a premature stop leaves a trailing frame that re-desyncs
+the next transaction. An interrupted big read (file or framebuffer) can leave hundreds of KB
+queued, which the 64 KB chunks clear in ~16 iterations.
+
+### 8.11 Shell channel (`0x43`) framing around a command
+
+A shell exchange sends `0x43 0x11 "{ cmd; echo <marker>; }"` and reads the first `0x43` frame
+plus continuation frames until a short read (the command channel has no END marker — "no more
+output" is a read timeout). It **resyncs before** the command (drop any stale queued reply),
+re-issues up to a few times until the reply carries the unique **end-marker** (replies race one
+command behind), and **resyncs after** the marker is found so no trailing `0x43` frame is left
+for the next data-channel read (§8.4). Keep commands short and read-only — a stalled command
+trips the watchdog reboot (§7).
+
+### 8.12 Wire logging for diffing against the reference driver
+
+Set **`MSO_USB_LOG=1`** (or `=stderr`, or `=/path/to/file`) to log every OUT frame, IN chunk,
+and DRN (resync-drained) chunk with a millisecond timestamp and hex head — in the **same line
+format** in both the Rust transport and, via `scripts/_usbcompare.py` (a pyusb read/write
+monkeypatch), the Python driver. Running the same capture through both and diffing the two
+traces — selector sequence, frame lengths, and inter-frame delays — is how each transport
+divergence above was pinned down; keep it as the first tool when the two disagree.
+`[verified 2026-07-20]`

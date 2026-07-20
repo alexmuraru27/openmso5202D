@@ -2050,11 +2050,18 @@ already triggers it. `push` ids (27/33 position, 45 trigger level) zero their ax
 Frame form (leader `0x53`): `53 04 00 13 <keyid> <b> <ck>` (the second byte `<b>` is a
 don't-care — see fact 1). Two verified facts shape correct use:
 
-1. **The second byte is not acted on.** Every `0x13` frame injects exactly **one**
-   key press regardless of the second byte (`00`, `01`, and `02` all inject one event).
-   The vendor app always sends `01`. Treat `0x13` as an edge, not a level; there is no
-   separate "release" event to send, and one frame per intended press drives every softkey
-   (including the CSV Source cycle, §9.4). [verified]
+1. **The second byte is not acted on — with one verified exception.** For nearly every
+   key, every `0x13` frame injects exactly **one** key press regardless of the second byte
+   (`00`, `01`, and `02` all inject one event); the vendor app always sends `01`, and one
+   frame per intended press drives it (including the CSV Source cycle, §9.4). [verified]
+   **The Acquire-menu LongMem/store-depth softkey (keyid 5) is the exception: it is
+   edge-triggered on the second byte.** It advances only on a level *transition*, so a
+   repeated `01` produces an edge on the first frame and then no-ops — the depth silently
+   sticks at its prior value. Drive it with **alternating** `13 05 01` / `13 05 00` frames,
+   polling `ACQURIE-STORE-DEPTH` until each step lands (see the `ACQURIE-STORE-DEPTH` row in
+   §8). No other softkey observed to need this — probe/source/channel/delete/save all take a
+   plain repeated `01`. [verified on hardware 2026-07-20, Python `_set_depth_via_keys` and
+   the Rust `control::set_depth` port]
 2. **The pending-key store is a single slot, not a queue.** A `0x13` frame writes
    `keyid` into a one-byte mailbox (idle sentinel = `0xFF`); the device's input loop
    consumes it on its next poll and clears it back to the sentinel. **Two key events

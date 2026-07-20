@@ -42,7 +42,7 @@ pub mod settings;
 pub mod usb;
 pub mod waveform;
 
-pub use control::{execute, Context, Op, ProgressEvent, ProgressSink, StepState};
+pub use control::{execute, CaptureSpec, Context, Op, ProgressEvent, ProgressSink, StepState};
 pub use device::{Device, FileEntry, Key, Knob, Screenshot, Turn};
 pub use error::{Error, Result};
 pub use protocol::{PID, VID};

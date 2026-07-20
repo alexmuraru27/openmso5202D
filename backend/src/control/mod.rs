@@ -30,6 +30,7 @@
 //! will acquire, so continuing past a failure would capture data at settings the caller
 //! did not ask for — worse than stopping loudly.
 
+pub mod capture;
 pub mod converge;
 pub mod csv;
 pub mod ops;
@@ -46,6 +47,7 @@ use crate::device::{Device, Key, Knob};
 use crate::error::{Error, Result};
 use crate::settings::{Probe, StoreDepth};
 
+pub use capture::CaptureSpec;
 pub use csv::CsvSource;
 pub use ops::Op;
 pub use progress::{ProgressEvent, ProgressSink, SilentProgress, StepState};
@@ -53,8 +55,17 @@ pub use progress::{ProgressEvent, ProgressSink, SilentProgress, StepState};
 /// Number of positions in the probe-attenuation ring (1x, 10x, 100x, 1000x).
 const PROBE_RING: u32 = 4;
 
-/// Number of positions in the store-depth ring (4K, 40K, 512K, 1M).
-const DEPTH_RING: u32 = 4;
+/// The store-depth ring the Acquire-menu F5 softkey walks, in cycle order — the wire codes
+/// for 4K → 40K → 512K → 1M → (wraps). F5 advances one step per key **edge**.
+const DEPTH_RING: [u8; 4] = [0, 4, 6, 7];
+
+/// Longest to wait for one F5 edge to advance the depth one ring step. Generous because a
+/// deep record takes a moment to reconfigure before the field settles.
+const DEPTH_STEP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Retries of the whole Acquire-menu depth walk before giving up — a desynced link or a
+/// dropped edge is recovered by resyncing and walking again.
+const DEPTH_WALK_ATTEMPTS: u32 = 3;
 
 /// Softkey that cycles probe attenuation while a channel menu is open.
 const PROBE_SOFTKEY: Key = Key::Fn4;
@@ -83,6 +94,12 @@ const CHANNEL_ATTEMPTS: u32 = 5;
 /// channel reconfigures the acquisition, and reading back too early sees the old state.
 const CHANNEL_SETTLE: Duration = Duration::from_millis(700);
 
+/// How long a single sequence may wait with no edge before it is nudged with a Force
+/// trigger. Long enough to strongly prefer a real trigger; short enough that a signal that
+/// never crosses the level (e.g. the level parked off the signal) still yields a record
+/// rather than timing out. Matches the 4 s in `_trigger_record`.
+const FORCE_AFTER: Duration = Duration::from_secs(4);
+
 /// Menu id of the Save/Recall base menu.
 const SAVE_RECALL_MENU: u8 = 47;
 
@@ -98,6 +115,12 @@ const SAVE_SOFTKEY: Key = Key::Fn2;
 /// Softkey that opens the CSV page from the Save/Recall menu.
 const CSV_SOFTKEY: Key = Key::Fn3;
 
+/// Softkey that backs out of the CSV file list / a submenu.
+const BACK_SOFTKEY: Key = Key::Fn6;
+
+/// Run/Stop presses allowed to reach a wanted run state.
+const RUN_STOP_ATTEMPTS: u32 = 8;
+
 /// Softkey that deletes the selected file on the CSV page.
 ///
 /// Shares its key id with the probe softkey — a softkey's meaning depends entirely on the
@@ -110,6 +133,11 @@ const DELETE_PRESS_GAP: Duration = Duration::from_millis(600);
 /// Passes over the card before giving up on clearing it. More than one is needed because
 /// the single-slot key mailbox can drop presses.
 const CLEAR_ROUNDS: u32 = 4;
+
+/// Times to re-list the card when the listing comes back empty. The shell `ls` occasionally
+/// returns empty/garbled (a one-behind race); a card in use always holds files, so an empty
+/// result is retried for a reliable baseline. Matches `_list_wavedata`.
+const LIST_WAVEDATA_ATTEMPTS: u32 = 4;
 
 /// Attempts to land the Source radio on the wanted entry.
 const SOURCE_ATTEMPTS: u32 = 6;
@@ -392,18 +420,24 @@ fn default_setup(device: &Device) -> Result<()> {
 
 /// Show or hide a channel.
 ///
-/// The channel button is a **toggle**, so this reads the current state and presses only
-/// when a flip is actually needed — pressing blindly would be a coin flip.
+/// The channel button is a **toggle**, so this reads the current state and presses only when
+/// a flip is actually needed — pressing blindly would be a coin flip. The state is checked
+/// the way `_set_channels_via_keys` checks it: against the channel's **actual 4 K waveform
+/// data** ([`Device::channel_has_data`]), not the `VERT-CHx-DISP` settings field, which is
+/// decoupled from the real acquisition and can lag or mislead. Only meaningful at 4 K with
+/// the scope running, which is the state prepare is in when this runs (before the depth
+/// walk).
 fn set_channel(device: &Device, channel: u8, on: bool) -> Result<()> {
     let key = channel_key(channel)?;
+    let index = channel - 1; // read_waveform: 0 = CH1, 1 = CH2
     for _ in 0..CHANNEL_ATTEMPTS {
-        if device.read_settings()?.channel_shown(channel) == on {
+        if device.channel_has_data(index)? == on {
             return Ok(());
         }
         device.press(key)?;
         sleep(CHANNEL_SETTLE);
     }
-    if device.read_settings()?.channel_shown(channel) == on {
+    if device.channel_has_data(index)? == on {
         return Ok(());
     }
     Err(Error::Unexpected(format!(
@@ -483,82 +517,217 @@ fn set_trigger_level(device: &Device, position: i64) -> Result<()> {
     Ok(())
 }
 
-/// Set the acquisition record length via the Acquire menu's depth softkey.
+/// Set the acquisition record length via the Acquire menu's depth softkey (F5).
 ///
-/// Driven by the softkey rather than a settings write so the on-screen LongMem indicator
-/// stays truthful — a raw write changes the acquisition but leaves the display stale.
+/// Driven by the softkey rather than a settings write for two reasons: a raw write leaves
+/// the on-screen LongMem indicator stale, and a raw depth change on a *running* scope
+/// reboots it. F5 walks the same visible ring and is safe while running.
+///
+/// The whole walk is retried on failure: a desynced link or a dropped edge is recovered by
+/// resyncing and walking the menu again.
 fn set_depth(device: &Device, depth: StoreDepth) -> Result<()> {
     let code = depth
         .code()
         .ok_or_else(|| Error::Unexpected(format!("depth {depth:?} has no known code")))?;
 
-    converge::open_menu(device, Key::MenuAcquire, &[ACQUIRE_MENU])?;
-    converge::cycle_until(
-        device,
-        DEPTH_SOFTKEY,
-        DEPTH_RING,
-        |settings| settings.field("ACQURIE-STORE-DEPTH").map(|value| value as i64),
-        code as i64,
-    )?;
-    debug!(?depth, "store depth set");
+    for attempt in 0..DEPTH_WALK_ATTEMPTS {
+        if attempt > 0 {
+            device.transport().resync();
+        }
+        match depth_walk(device, code) {
+            Ok(()) => {
+                debug!(?depth, "store depth set");
+                return Ok(());
+            }
+            Err(e) if attempt + 1 == DEPTH_WALK_ATTEMPTS => return Err(e),
+            Err(e) => debug!(error = %e, attempt, "depth walk failed — retrying"),
+        }
+    }
+    unreachable!("the loop returns on its last attempt")
+}
+
+/// Walk the Acquire-menu F5 ring to `target`, a faithful port of `_set_depth_via_keys`.
+///
+/// F5 advances the ring 4K → 40K → 512K → 1M → (4K) **one step per key EDGE** — the press
+/// (`0x13 05 01`) and the release (`0x13 05 00`) EACH advance one step. So this drives it
+/// with **single alternating edges** and, after each, **polls `ACQURIE-STORE-DEPTH` until
+/// it reaches the next step** — no fixed render delay; the field settles within a second or
+/// two and the poll catches it. It is **self-correcting**: if an edge causes no change (F5
+/// was already at that level from a prior call), it flips the edge and resends. From a
+/// known 4K start it takes exactly the ring distance.
+///
+/// The depth field is reliable at 4K/40K; at 512K/1M it can read transiently wrong while
+/// the deep record loads, so a poll that never settles fails the walk and the caller
+/// resyncs and retries. 1M is single-channel only (the Default-Setup CH1-only baseline
+/// satisfies that).
+fn depth_walk(device: &Device, target: u8) -> Result<()> {
+    if !DEPTH_RING.contains(&target) {
+        return Err(Error::Unexpected(format!(
+            "depth code {target} is not on the F5 ring {DEPTH_RING:?}"
+        )));
+    }
+
+    // Open the Acquire menu (menuid 17). One press opens it; retry once because the
+    // single-slot key mailbox can drop the press.
+    device.press(Key::MenuAcquire)?;
+    sleep(Duration::from_millis(800));
+    if device.read_settings()?.menu_id() != ACQUIRE_MENU {
+        device.press(Key::MenuAcquire)?;
+        sleep(Duration::from_millis(800));
+    }
+
+    let ring_pos = |code: u8| DEPTH_RING.iter().position(|&c| c == code);
+    let mut at = depth_now(device).and_then(ring_pos).unwrap_or(0);
+    let mut edge: u8 = 0x01; // first F5 edge = press; then alternate
+
+    while DEPTH_RING[at] != target {
+        let next = DEPTH_RING[(at + 1) % DEPTH_RING.len()];
+        let mut landed = false;
+        // Self-correct: an edge that no-ops (F5 already at that level) is retried with the
+        // opposite edge.
+        for _ in 0..2 {
+            device.key_edge(DEPTH_SOFTKEY, edge)?;
+            let started = Instant::now();
+            while started.elapsed() < DEPTH_STEP_TIMEOUT {
+                if depth_now(device) == Some(next) {
+                    landed = true;
+                    break;
+                }
+                sleep(Duration::from_millis(200));
+            }
+            edge ^= 0x01; // the next edge is the opposite level
+            if landed {
+                break;
+            }
+        }
+        if !landed {
+            return Err(Error::Unexpected(format!(
+                "store depth would not advance to {:?} via the F5 softkey",
+                StoreDepth::from_code(next)
+            )));
+        }
+        at = (at + 1) % DEPTH_RING.len();
+        debug!(depth = ?StoreDepth::from_code(next), "F5 advanced depth one step");
+    }
     Ok(())
+}
+
+/// Read the current `ACQURIE-STORE-DEPTH` code, tolerating a transient read failure by
+/// resyncing and reporting `None` (the poll simply tries again). Matches `_depth_now`.
+fn depth_now(device: &Device) -> Option<u8> {
+    match device.read_settings() {
+        Ok(settings) => Some(settings.field("ACQURIE-STORE-DEPTH").unwrap_or(0) as u8),
+        Err(_) => {
+            device.transport().resync();
+            None
+        }
+    }
 }
 
 // --- capture and export -----------------------------------------------------
 
-/// Arm a single sequence, leaving it armed.
+/// Arm a single sequence.
 ///
-/// The scope must be running first: a single sequence armed from a stopped scope latches
-/// the stale buffer instead of acquiring afresh.
+/// Ensures the scope is running first — a single sequence armed from a *stopped* scope
+/// latches the stale buffer instead of acquiring afresh — then presses Single **once** and
+/// returns. It deliberately does **not** verify an intermediate armed state: right after the
+/// press the state is transient (it may read Auto/Triggered for a moment before it arms or
+/// fires), and pressing Single a second time to "confirm" only disturbs it. Waiting for the
+/// capture, and the Force-trigger fallback, are [`wait_captured`]'s job. This is the arm half
+/// of `_trigger_record`, which likewise presses Single once and never checks the state in
+/// between.
 fn arm_single(device: &Device) -> Result<()> {
     if device.read_settings()?.trig_state().is_stopped() {
-        debug!("scope was stopped — starting it before arming");
-        device.press(Key::RunStop)?;
-        sleep(converge::SETTLE);
+        debug!("scope was stopped — starting it running before the single sequence");
+        resume_run(device, true)?; // _run_stop(sc, True): press Run/Stop until it is running
+        sleep(Duration::from_millis(500));
     }
     device.press(Key::Single)?;
     sleep(Duration::from_millis(500));
-
-    // Confirm it is actually waiting for a trigger rather than already stopped, so a
-    // stimulus released now cannot arrive before the scope is listening.
-    let state = device.read_settings()?.trig_state();
-    if state.is_stopped() {
-        return Err(Error::Unexpected(format!(
-            "scope is {state:?} straight after arming — it did not stay armed"
-        )));
-    }
-    debug!(?state, "armed");
     Ok(())
 }
 
 /// Wait for an armed single sequence to fire and stop.
+///
+/// If no edge arrives within a grace period the trigger is **forced once** — a scope whose
+/// level sits off the signal would otherwise wait for a crossing that never comes. A real
+/// trigger is strongly preferred (the grace is seconds), but forcing guarantees a record
+/// rather than a timeout. Matches `_trigger_record`, which force-triggers after ~4 s and
+/// then leaves the scope stopped (it never presses Run/Stop afterwards).
 fn wait_captured(device: &Device, timeout: Duration) -> Result<()> {
     let started = Instant::now();
+    let mut forced = false;
     while started.elapsed() < timeout {
         let state = device.read_settings()?.trig_state();
         if state.is_stopped() {
             debug!(?state, elapsed_ms = started.elapsed().as_millis() as u64, "captured");
             return Ok(());
         }
+        if !forced && started.elapsed() > FORCE_AFTER {
+            debug!("no trigger after the grace period — forcing one");
+            device.press(Key::ForceTrigger)?;
+            forced = true;
+        }
         sleep(Duration::from_millis(200));
     }
     Err(Error::Unexpected(format!(
-        "no trigger within {timeout:?} — the signal never crossed the trigger level"
+        "no trigger within {timeout:?}, even after forcing — is the signal present?"
     )))
+}
+
+/// Press Run/Stop until the scope reaches the wanted run state.
+///
+/// Treats a captured single sequence (`SingleCaptured`) as **stopped**, so a resume request
+/// on a captured single-seq actually starts it running rather than being read as "already
+/// stopped" and toggled the wrong way — the bug `_run_stop` was written to avoid.
+/// Best-effort: a read failure ends the attempt without erroring.
+pub(crate) fn resume_run(device: &Device, want_run: bool) -> Result<()> {
+    for _ in 0..RUN_STOP_ATTEMPTS {
+        let running = !device.read_settings()?.trig_state().is_stopped();
+        if running == want_run {
+            return Ok(());
+        }
+        device.press(Key::RunStop)?;
+        sleep(Duration::from_millis(350));
+    }
+    Ok(())
+}
+
+/// Leave the scope live and clean after a capture: resync, resume RUN from the single-
+/// sequence stop, then back out of the file list. Best-effort — cleanup never fails the
+/// capture. Mirrors the `capture_prepared` finally block.
+pub(crate) fn finalize_capture(device: &Device) {
+    device.transport().resync();
+    let _ = resume_run(device, true);
+    let _ = device.press(BACK_SOFTKEY);
+    device.transport().resync();
 }
 
 /// Export the captured record for `source` to the memory card.
 fn save_csv(context: &Context, source: CsvSource) -> Result<()> {
     let device = context.device;
 
-    // Saving without a captured record writes no file at all, so refuse early with a clear
-    // reason rather than waiting out the full timeout for a file that will never appear.
-    let settings = device.read_settings()?;
+    // Saving without a captured record writes no file at all. If the scope is not holding
+    // one, nudge with Force a few times first — the single sequence may just not have caught
+    // an edge — and only give up if it still will not stop, matching the guard in
+    // capture_prepared.
+    let mut settings = device.read_settings()?;
     if !settings.trig_state().is_stopped() {
-        return Err(Error::Unexpected(format!(
-            "scope is {:?}, not holding a captured record — capture before saving",
-            settings.trig_state()
-        )));
+        debug!(state = ?settings.trig_state(), "not stopped before save — forcing a trigger");
+        for _ in 0..3 {
+            device.press(Key::ForceTrigger)?;
+            sleep(Duration::from_millis(600));
+            settings = device.read_settings()?;
+            if settings.trig_state().is_stopped() {
+                break;
+            }
+        }
+        if !settings.trig_state().is_stopped() {
+            return Err(Error::Unexpected(format!(
+                "scope is {:?}, not holding a captured record — capture before saving",
+                settings.trig_state()
+            )));
+        }
     }
     let depth = settings.store_depth();
 
@@ -744,9 +913,13 @@ fn await_new_file(
             return Err(Error::Cancelled);
         }
         let listing = list_wavedata_if_reachable(device);
+        // Pick the NEWEST new file — the highest WaveData sequence number, matching Python's
+        // `new[-1]`. If more than one new file is present (a card that was not clean), the
+        // one this save just wrote is the newest, never the oldest.
         if let Some(found) = listing
             .iter()
-            .find(|file| !before.contains(&file.name))
+            .filter(|file| !before.contains(&file.name))
+            .max_by_key(|file| csv::wavedata_number(&file.name))
         {
             target = Some(found.name.clone());
             break;
@@ -826,8 +999,23 @@ struct FoundFile {
 }
 
 /// The exported waveform files currently on the card.
+///
+/// Retries an **empty** listing a few times: the shell `ls` occasionally returns
+/// empty/garbled from a one-behind race, and a card in use always holds files, so an empty
+/// result is far more likely a flaky read than a truly clean card. Faithful to
+/// `_list_wavedata`. (On a genuinely empty card this simply costs the retries.)
 fn list_wavedata(device: &Device) -> Result<Vec<crate::device::FileEntry>> {
-    Ok(csv::wavedata_files(&device.list_dir(CARD_PATH)?))
+    let mut files = Vec::new();
+    for attempt in 0..LIST_WAVEDATA_ATTEMPTS {
+        if attempt > 0 {
+            sleep(Duration::from_millis(300));
+        }
+        files = csv::wavedata_files(&device.list_dir(CARD_PATH)?);
+        if !files.is_empty() {
+            return Ok(files);
+        }
+    }
+    Ok(files)
 }
 
 /// List the card, treating a failure as "cannot tell yet" rather than an error.

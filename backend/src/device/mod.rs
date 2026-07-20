@@ -41,6 +41,29 @@ pub const KEY_REPEAT_DELAY: Duration = Duration::from_millis(60);
 /// Timeout for a screen grab, which moves ~768 KB.
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_millis(4000);
 
+/// Attempts to grab a full framebuffer before giving up. A one-behind reply (a buffered
+/// settings block, whose second byte can look like a DATA subtype) or a momentarily busy
+/// scope yields a short/garbled grab; Python's `_grab_fb` retries up to four times with a
+/// resync around each, and so do we.
+const FRAMEBUFFER_ATTEMPTS: u32 = 4;
+
+/// Settle after a resync before re-grabbing the framebuffer (Python's `time.sleep(0.4)`).
+const FRAMEBUFFER_RETRY_SETTLE: Duration = Duration::from_millis(400);
+
+/// Timeout for a waveform acquire. The `0x02` reply can take a moment, but once it has
+/// answered the data frames arrive within a short window or not at all (the scope dropped
+/// them — typically because a knob is being turned), so the follow-up frames use a much
+/// shorter timeout to fail fast instead of hanging.
+const WAVEFORM_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// Timeout for the follow-up data frames of a waveform acquire (`min(timeout, 150)` in
+/// `mso5202d.py`).
+const WAVEFORM_TAIL_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// How many times to retry a waveform acquire that comes back empty (a resync happens
+/// between attempts). Matches the Python `read_waveform` default.
+const WAVEFORM_ATTEMPTS: u32 = 3;
+
 /// Timeout for a file download.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_millis(4000);
 
@@ -110,6 +133,19 @@ impl Device {
             .map(|_| ())
     }
 
+    /// Inject one front-panel key event with an **explicit edge/state byte**.
+    ///
+    /// [`Device::press`] always sends state `0x01`, which the firmware treats as a
+    /// don't-care for almost every key. The store-depth softkey (F5 in the Acquire menu) is
+    /// the exception: it advances one position per *edge*, so its walk has to send
+    /// alternating `0x01` (press) / `0x00` (release) states, one step each. This is the
+    /// primitive that lets it. (Python: the depth walk's `sc.transact([0x13, 5, edge])`.)
+    pub fn key_edge(&self, key: Key, state: u8) -> Result<()> {
+        self.transport
+            .transact(&[selector::KEY, key.id(), state])
+            .map(|_| ())
+    }
+
     /// Press `key` `count` times, spaced by [`KEY_REPEAT_DELAY`].
     pub fn press_repeatedly(&self, key: Key, count: u32) -> Result<()> {
         for i in 0..count {
@@ -164,6 +200,82 @@ impl Device {
         Err(last)
     }
 
+    // --- waveform acquire ------------------------------------------------------
+
+    /// Acquire one screen-buffer sample block for an analog channel (selector `0x02`).
+    ///
+    /// `ch`: 0 = CH1, 1 = CH2. The channel is chosen by the acquire **value byte**
+    /// (`02 01 <ch>`), not by any settings field — verified on hardware: with CH2's probe
+    /// disconnected, `02 01 00` returns CH1's square wave and `02 01 01` returns CH2's flat
+    /// line. Returns the raw sample bytes (two's-complement signed int8 per sample), or an
+    /// **empty** vec when the channel is hidden (a disabled channel answers with no data) or
+    /// the read is disrupted. Mirrors `Scope.read_waveform` in `mso5202d.py`.
+    ///
+    /// The scope wants a `12 01 00` latch written first (the vendor app pulses `0x12` around
+    /// every refresh), then answers `02 01 <ch>` with a size frame, a data frame, and an end
+    /// marker. The data frame is `echo | 0x01 | src | samples…`, so the samples start at
+    /// **offset 3** — one past the file/framebuffer data offset, because of the extra source
+    /// byte.
+    ///
+    /// Beware the one-deep channel pipeline: the FIRST acquire after switching `ch` returns
+    /// the PREVIOUS channel's block, so a caller comparing channels must read twice and keep
+    /// the second (see [`Device::channel_has_data`]).
+    pub fn read_waveform(&self, ch: u8) -> Result<Vec<u8>> {
+        // selector echo + subtype + source byte — one more than a file/framebuffer frame.
+        const DATA_OFFSET: usize = 3;
+        for attempt in 0..WAVEFORM_ATTEMPTS {
+            if attempt > 0 {
+                self.transport.resync();
+            }
+            match self.acquire_once(ch, DATA_OFFSET) {
+                Ok(data) if !data.is_empty() => return Ok(data),
+                Ok(_) => continue, // empty — retry after a resync
+                Err(_) => continue,
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// One acquire attempt: latch, request the channel, and collect its data frame.
+    fn acquire_once(&self, ch: u8, data_offset: usize) -> Result<Vec<u8>> {
+        // Run-latch. The inner transactions use no retries so retrying is governed above.
+        self.transport
+            .transact_with(&[0x12, 0x01, 0x00], WAVEFORM_TIMEOUT, 0)?;
+        let first = self
+            .transport
+            .transact_with(&[0x02, 0x01, ch], WAVEFORM_TIMEOUT, 0)?;
+
+        let mut frame = first;
+        let mut data = Vec::new();
+        // Walk the size / data / end frames. Only the data frame carries samples; keep it.
+        for _ in 0..5 {
+            match frame.get(1).copied() {
+                Some(subtype::DATA) => {
+                    data = frame.get(data_offset..).unwrap_or(&[]).to_vec();
+                }
+                Some(subtype::END) => break,
+                _ => {}
+            }
+            match self.transport.recv(WAVEFORM_TAIL_TIMEOUT) {
+                Ok(next) => frame = next,
+                Err(_) => break,
+            }
+        }
+        Ok(data)
+    }
+
+    /// Whether analog channel `ch` (0 = CH1, 1 = CH2) is actually serving data.
+    ///
+    /// The reliable test of a channel being on is that its acquire returns samples — the
+    /// `VERT-CHx-DISP` settings field is decoupled from the real acquisition and can lag or
+    /// mislead. Double-reads to defeat the one-deep channel pipeline (the first read after a
+    /// switch returns the previous channel), keeping the second. Only meaningful at 4 K with
+    /// the scope running. Mirrors `_channel_enabled` in `mso5202d_plot.py`.
+    pub fn channel_has_data(&self, ch: u8) -> Result<bool> {
+        let _ = self.read_waveform(ch)?; // discard — pipeline returns the previous channel
+        Ok(!self.read_waveform(ch)?.is_empty())
+    }
+
     // --- screen ----------------------------------------------------------------
 
     /// Grab the scope's rendered screen (selector `0x20`).
@@ -171,19 +283,41 @@ impl Device {
     /// This is the only way to see what the instrument is drawing — including the
     /// logic-analyzer rows and menu state that the settings block does not expose.
     pub fn screenshot(&self) -> Result<Screenshot> {
-        let first = self
-            .transport
-            .transact_with(&[selector::FRAMEBUFFER], SCREENSHOT_TIMEOUT, 1)?;
-        let raw = self.collect_multiframe(first, SCREENSHOT_TIMEOUT)?;
-        // A framebuffer transfer is large; clear any tail so the next command starts clean.
-        self.transport.resync();
-        Screenshot::from_rgb565(&raw).ok_or_else(|| {
-            Error::Unexpected(format!(
-                "framebuffer too short: {} bytes, want {}",
-                raw.len(),
-                screen::FRAMEBUFFER_BYTES
-            ))
-        })
+        // Faithful port of `_grab_fb`: retry the whole grab, resyncing around each attempt,
+        // and accept only a full-size screen. A single grab can come back short — a stale
+        // one-behind reply gets read as the framebuffer, or the scope is momentarily busy —
+        // so one attempt is not enough.
+        for attempt in 0..FRAMEBUFFER_ATTEMPTS {
+            // Start EVERY grab from a clean endpoint. The framebuffer is ~768 KB across ~75
+            // frames; a single leftover frame — a previous grab's tail, or a stale
+            // settings/shell reply whose bytes look like a framebuffer frame — gets read as
+            // this grab's first frame and desyncs the whole transfer, and a retry issued
+            // while the previous 768 KB is still in flight cascades into the following
+            // commands (the `bad leader` we saw bleeding into the next shell `ls`). Resyncing
+            // before the request is what keeps each grab self-contained.
+            self.transport.resync();
+            if attempt > 0 {
+                thread::sleep(FRAMEBUFFER_RETRY_SETTLE);
+            }
+            let first = match self
+                .transport
+                .transact_with(&[selector::FRAMEBUFFER], SCREENSHOT_TIMEOUT, 1)
+            {
+                Ok(frame) => frame,
+                Err(_) => continue, // resync at the top of the next attempt cleans up
+            };
+            let raw = self.collect_multiframe(first, SCREENSHOT_TIMEOUT)?;
+            // A framebuffer transfer is large; clear any tail so the next command is clean.
+            self.transport.resync();
+            if let Some(shot) = Screenshot::from_rgb565(&raw) {
+                return Ok(shot);
+            }
+            // Short/garbled (a stale frame, or the scope busy) — retry from a clean start.
+        }
+        Err(Error::Unexpected(format!(
+            "framebuffer grab did not return a full {}-byte screen after {FRAMEBUFFER_ATTEMPTS} attempts",
+            screen::FRAMEBUFFER_BYTES
+        )))
     }
 
     // --- files -----------------------------------------------------------------
@@ -271,7 +405,13 @@ impl Device {
             self.transport.resync(); // drop any stale reply still queued
             last = self.shell_exchange(&request)?;
             if let Some(output) = shell::output_before_marker(&last, &marker) {
-                return Ok(output.to_string());
+                let output = output.to_string();
+                // Drain any trailing/duplicate 0x43 reply the scope is still dribbling before
+                // handing back to the data channel — otherwise the next 0x53 transact reads a
+                // stale command-channel frame (the `bad leader 0x43` desync). The cross-channel
+                // boundary is exactly where the working corpus tool resyncs too.
+                self.transport.resync();
+                return Ok(output);
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -306,17 +446,27 @@ impl Device {
 
     // --- shared plumbing -------------------------------------------------------
 
-    /// Collect a data-channel multi-frame reply.
+    /// Collect the framebuffer's multi-frame reply, a faithful port of `_grab_fb`'s inner
+    /// loop.
     ///
     /// The scope streams DATA frames (subtype `0x01`) terminated by an END frame (subtype
-    /// `0x02`). **The end marker must be consumed** or the next read starts mid-stream.
+    /// `0x02`). Crucially, anything that is **neither** — a SIZE frame, or a stale one-behind
+    /// frame a race slipped in front — is **skipped**, and reading continues, rather than
+    /// stopping the collection early. Stopping early was the bug: it left the remaining
+    /// ~768 KB of framebuffer frames queued on the endpoint, and those `0x53` frames then bled
+    /// into the following shell (`0x43`) command as a `bad leader` desync. The loop is bounded
+    /// (Python's `range(2000)`) so a stream that never ends cannot spin forever.
     fn collect_multiframe(&self, first: Vec<u8>, timeout: Duration) -> Result<Vec<u8>> {
         const DATA_OFFSET: usize = 2; // selector echo + subtype
+        const MAX_FRAMES: usize = 2000;
         let mut frame = first;
         let mut data = Vec::new();
-        // Anything other than a DATA frame — END, NODATA, or no subtype — ends the reply.
-        while let Some(subtype::DATA) = frame.get(1).copied() {
-            data.extend_from_slice(&frame[DATA_OFFSET..]);
+        for _ in 0..MAX_FRAMES {
+            match frame.get(1).copied() {
+                Some(subtype::DATA) => data.extend_from_slice(&frame[DATA_OFFSET..]),
+                Some(subtype::END) => break,
+                _ => {} // SIZE / stale frame — skip and keep reading until the END marker
+            }
             match self.transport.recv(timeout) {
                 Ok(next) => frame = next,
                 Err(_) => break,

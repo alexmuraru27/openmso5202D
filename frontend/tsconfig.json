@@ -3,12 +3,15 @@
     "target": "ES2021",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "jsx": "react-jsx",
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "lib": ["ES2021", "DOM", "DOM.Iterable"]
+    "esModuleInterop": true,
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"]
   },
   "include": ["src"]
 }

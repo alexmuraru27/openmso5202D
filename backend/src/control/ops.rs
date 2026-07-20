@@ -63,8 +63,10 @@ pub enum Op {
 
     /// Wait for an armed single sequence to capture and stop.
     ///
-    /// Fails if nothing triggers within the timeout, rather than forcing one — a forced
-    /// trigger would capture an idle window and quietly produce an empty record.
+    /// A real trigger is strongly preferred, but if no edge arrives within a short grace the
+    /// trigger is **forced once** so a scope whose level sits off the signal still yields a
+    /// record instead of timing out — the same nudge `_trigger_record` makes. Only a scope
+    /// that never stops even after forcing is a failure.
     WaitCaptured {
         /// How long to wait for a trigger, in seconds.
         timeout_s: u64,
