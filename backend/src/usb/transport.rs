@@ -105,19 +105,36 @@ impl Transport {
 
     // --- transaction primitive -------------------------------------------------
 
-    /// Send `payload` and return the first response frame's payload, retrying (with a
-    /// resync between attempts) up to `retries` times.
+    /// Send `payload` on the data channel and return the reply's **verified** payload
+    /// (`selector_echo | subtype | data…`), retrying (with a resync between attempts).
     ///
-    /// Uses the default endpoint timeout unless overridden with [`Transport::transact_with`].
+    /// Uses the default timeout unless overridden with [`Transport::transact_with`].
     pub fn transact(&self, payload: &[u8]) -> Result<Vec<u8>> {
         self.transact_with(payload, DEFAULT_TIMEOUT, DEFAULT_RETRIES)
     }
 
     /// [`Transport::transact`] with an explicit timeout and retry count.
     pub fn transact_with(&self, payload: &[u8], timeout: Duration, retries: u32) -> Result<Vec<u8>> {
+        let frame = self.transact_raw(protocol::LEADER_DATA, payload, timeout, retries)?;
+        protocol::verify(&frame).map(<[u8]>::to_vec)
+    }
+
+    /// Send `payload` under an explicit `leader` and return the **complete raw frame**
+    /// (leader, length, payload and checksum included).
+    ///
+    /// This is the leader-generic primitive both channels build on: the data channel adds
+    /// checksum verification on top, while the command channel (`0x43`) parses by length
+    /// only, since its replies carry no checksum we can rely on.
+    pub fn transact_raw(
+        &self,
+        leader: u8,
+        payload: &[u8],
+        timeout: Duration,
+        retries: u32,
+    ) -> Result<Vec<u8>> {
         let mut last: Option<Error> = None;
         for _ in 0..=retries {
-            match self.transact_once(payload, timeout) {
+            match self.transact_once(leader, payload, timeout) {
                 Ok(frame) => return Ok(frame),
                 Err(e) => {
                     last = Some(e);
@@ -130,7 +147,7 @@ impl Transport {
 
     /// One attempt: post the IN read on a reader thread, wait the margin, write the OUT
     /// frame, then collect the reader's result.
-    fn transact_once(&self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>> {
+    fn transact_once(&self, leader: u8, payload: &[u8], timeout: Duration) -> Result<Vec<u8>> {
         let handle = Arc::clone(&self.handle);
         let rx = Arc::clone(&self.rx);
         let (ready_tx, ready_rx) = mpsc::channel::<()>();
@@ -146,7 +163,7 @@ impl Transport {
         let _ = ready_rx.recv_timeout(Duration::from_millis(500));
         thread::sleep(TRANSACT_POST);
 
-        let frame = protocol::build(payload);
+        let frame = protocol::build_with(leader, payload);
         let write_res = self
             .handle
             .write_bulk(EP_OUT, &frame, Duration::from_millis(2000));
@@ -162,16 +179,22 @@ impl Transport {
         }
     }
 
-    /// Read exactly one complete frame off the wire and return its verified payload.
+    /// Read one complete frame and return its **verified** data-channel payload.
     ///
-    /// Public so higher layers can drain follow-up frames of a multi-frame reply (the
+    /// Higher layers use this to drain the follow-up frames of a multi-frame reply (the
     /// first frame comes back from [`Transport::transact`]; the rest via this).
     pub fn recv(&self, timeout: Duration) -> Result<Vec<u8>> {
+        let frame = self.recv_raw(timeout)?;
+        protocol::verify(&frame).map(<[u8]>::to_vec)
+    }
+
+    /// Read one complete frame and return it raw (leader and checksum included).
+    pub fn recv_raw(&self, timeout: Duration) -> Result<Vec<u8>> {
         Self::recv_frame(&self.handle, &self.rx, timeout)
     }
 
-    /// Core receive: fill the persistent buffer until one whole frame is present, split it
-    /// off, and verify it. Reused by the reader thread and by [`Transport::recv`].
+    /// Core receive: fill the persistent buffer until one whole frame is present and split
+    /// it off. Returns the frame verbatim; validation is the caller's choice.
     fn recv_frame(handle: &Handle, rx: &Mutex<Vec<u8>>, timeout: Duration) -> Result<Vec<u8>> {
         let mut buf = rx.lock().unwrap();
         let mut scratch = vec![0u8; READ_CHUNK];
@@ -193,9 +216,7 @@ impl Transport {
             buf.extend_from_slice(&scratch[..n]);
         }
 
-        let frame: Vec<u8> = buf.drain(..total).collect();
-        drop(buf); // release the lock before the (cheap) verify
-        protocol::verify(&frame).map(<[u8]>::to_vec)
+        Ok(buf.drain(..total).collect())
     }
 
     /// Discard buffered bytes and drain the endpoint so the next frame starts on a clean

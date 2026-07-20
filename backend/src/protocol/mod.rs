@@ -33,6 +33,22 @@ pub const LEADER_DATA: u8 = 0x53;
 /// selector map. Read-only use only — it runs commands as root on the scope.
 pub const LEADER_CMD: u8 = 0x43;
 
+/// Request selectors — the first payload byte, which the reply echoes as `selector | 0x80`.
+pub mod selector {
+    /// Data channel (`0x53`): read the 213-byte settings block. Echo `0x81`.
+    pub const SETTINGS: u8 = 0x01;
+    /// Data channel: acquire a waveform block, `02 01 <channel>`. Echo `0x82`.
+    pub const ACQUIRE: u8 = 0x02;
+    /// Data channel: read a file off the scope's filesystem. Echo `0x90`.
+    pub const FILE_READ: u8 = 0x10;
+    /// Data channel: inject a front-panel key event, `13 <keyid> <state>`. Echo `0x93`.
+    pub const KEY: u8 = 0x13;
+    /// Data channel: grab the rendered screen framebuffer. Echo `0xa0`.
+    pub const FRAMEBUFFER: u8 = 0x20;
+    /// Command channel (`0x43`): run a shell command as root. Echo `0x91`.
+    pub const SHELL: u8 = 0x11;
+}
+
 /// Response multi-frame subtype bytes (second payload byte after the selector echo).
 pub mod subtype {
     /// Size frame — announces the length of the data to follow.
@@ -50,14 +66,38 @@ pub mod subtype {
 /// `frame = 0x53 | len_LE16(payload_len + 1) | payload | checksum`, where the checksum is
 /// the low byte of the sum of every preceding byte.
 pub fn build(payload: &[u8]) -> Vec<u8> {
+    build_with(LEADER_DATA, payload)
+}
+
+/// Build a frame with an explicit leader byte — [`LEADER_DATA`] for the protocol channel
+/// or [`LEADER_CMD`] for the shell/command channel. Both use identical framing.
+pub fn build_with(leader: u8, payload: &[u8]) -> Vec<u8> {
     let len = (payload.len() as u16) + 1;
     let mut frame = Vec::with_capacity(payload.len() + 4);
-    frame.push(LEADER_DATA);
+    frame.push(leader);
     frame.extend_from_slice(&len.to_le_bytes());
     frame.extend_from_slice(payload);
     let checksum = frame.iter().fold(0u32, |a, &b| a + b as u32) as u8;
     frame.push(checksum);
     frame
+}
+
+/// Extract a frame's payload using only its length field — no leader or checksum check.
+///
+/// Used for the command channel (`0x43`), whose replies do not carry a checksum we can
+/// rely on. Prefer [`verify`] for data-channel frames, which validates both.
+pub fn payload_of(frame: &[u8]) -> Result<&[u8]> {
+    if frame.len() < 5 {
+        return Err(Error::Framing(format!("frame too short: {} bytes", frame.len())));
+    }
+    let declared = u16::from_le_bytes([frame[1], frame[2]]) as usize;
+    if declared != frame.len() - 3 {
+        return Err(Error::Framing(format!(
+            "length field {declared} != actual {}",
+            frame.len() - 3
+        )));
+    }
+    Ok(&frame[3..frame.len() - 1])
 }
 
 /// Validate a complete frame and return its payload (`selector_echo | subtype | data…`).

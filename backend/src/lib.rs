@@ -1,27 +1,45 @@
-//! `mso5202d` — reverse-engineered USB driver for the Hantek MSO5202D
-//! oscilloscope (USB `049f:505a`).
+//! `mso5202d` — reverse-engineered driver for the Hantek MSO5202D oscilloscope
+//! (USB `049f:505a`).
 //!
-//! This crate is the Rust port of the Python `Scope` class (see `scripts/mso5202d.py`
-//! and `docs/MSO5202D-protocol.md`). It is layered so higher-level features build on
-//! a small, well-understood foundation:
+//! The crate is layered so each level has one job and depends only on the one below:
 //!
-//! - [`protocol`] — the `'S'`-framed wire format ([`protocol::build`] / [`protocol::verify`])
-//!   and the wire constants (VID/PID, endpoints, selectors).
-//! - [`usb::Transport`] — the low-level driver: connect / reconnect / reset, interface
-//!   binding, and the reader-thread-before-write [`Transport::transact`] dance the device
-//!   requires.
-//! - [`Scope`] — a thin high-level facade over the transport (settings poll, file read,
-//!   key events) that later GUI/decoding layers consume.
+//! | Layer | Module | Concern |
+//! |---|---|---|
+//! | 3 | *(future)* | Workflows: closed-loop control, deep capture, decoding |
+//! | 2 | [`device`] | **Device operations** — keys, knobs, settings, screen, files, shell |
+//! | 1 | [`usb`] | USB transport — connect, bind, transact |
+//! | 0 | [`protocol`], [`settings`] | Wire format and data layout (pure logic) |
 //!
-//! Everything that touches hardware needs the scope plugged in and either the udev rule
-//! from `70-mso5202d.rules` installed or the process running as root.
+//! [`Device`] is the entry point:
+//!
+//! ```no_run
+//! use mso5202d::{Device, Key};
+//!
+//! let scope = Device::connect()?;
+//! let settings = scope.read_settings()?;
+//! println!("timebase: {:?} ns/div", settings.time_per_div_ns());
+//! scope.press(Key::Autoset)?;
+//! # Ok::<(), mso5202d::Error>(())
+//! ```
+//!
+//! Hardware access needs the scope plugged in, and either the udev rule from
+//! `70-mso5202d.rules` installed or the process running as root.
+//!
+//! # Configuration policy
+//!
+//! The settings block is treated as **read-only**. The scope is configured exclusively
+//! through key events, because a raw block write skips the firmware side effects a real
+//! key press runs — LEDs, on-screen state, acquisition reconfiguration, and SD-card
+//! detection. No write path is exposed here by design.
 
+pub mod device;
 pub mod error;
 pub mod protocol;
-pub mod scope;
+pub mod settings;
 pub mod usb;
 
+pub use device::{Device, FileEntry, Key, Knob, Screenshot, Turn};
 pub use error::{Error, Result};
 pub use protocol::{PID, VID};
-pub use scope::Scope;
+pub use settings::{Settings, StoreDepth, TrigState};
 pub use usb::Transport;

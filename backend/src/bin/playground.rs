@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use mso5202d::{Result, Scope};
+use mso5202d::{Device, Key, Result};
 
 fn main() {
     if let Err(e) = run() {
@@ -22,40 +22,73 @@ fn main() {
 
 fn run() -> Result<()> {
     println!("[playground] connecting to MSO5202D…");
-    let scope = Scope::connect()?;
-
-    if let Some((bus, addr)) = scope.transport().bus_address() {
-        println!("[playground] connected — bus {bus} address {addr}");
+    let scope = Device::connect()?;
+    if let Some((bus, address)) = scope.transport().bus_address() {
+        println!("[playground] connected — bus {bus} address {address}");
     }
 
-    // 1) Poll the settings block and show its size + a hex preview.
+    // --- settings ------------------------------------------------------------
     let settings = scope.read_settings()?;
-    println!("[playground] settings block: {} bytes", settings.len());
-    println!("[playground]   {}", hex_preview(&settings, 32));
+    println!("\n[settings]");
+    println!("  menu        {:?}", settings.menu_name());
+    println!("  trig state  {:?}", settings.trig_state());
+    println!("  store depth {:?}", settings.store_depth());
+    println!("  time/div    {:?} ns", settings.time_per_div_ns());
+    println!("  sample int  {:?} ns", settings.sample_interval_ns());
+    for ch in [1u8, 2] {
+        println!(
+            "  CH{ch}         shown={} {:?} mV/div probe={:?} coupling={:?}",
+            settings.channel_shown(ch),
+            settings.volts_per_div_mv(ch),
+            settings.probe(ch),
+            settings.coupling(ch),
+        );
+    }
+    println!("  trig level  {:?} mV", settings.trigger_level_mv());
 
-    // 2) A raw transaction: framebuffer/settings/etc. can be poked here.
-    //    Example — repeat the settings poll via the transport directly:
-    let raw = scope
-        .transport()
-        .transact_with(&[0x01], Duration::from_millis(3000), 1)?;
-    println!("[playground] raw 0x01 reply: {} bytes (echo 0x{:02x})", raw.len(), raw.first().copied().unwrap_or(0));
-
-    // 3) Read a small file off the scope's embedded Linux (safe, read-only).
-    match scope.read_file("/protocol.inf") {
-        Ok(bytes) => println!("[playground] /protocol.inf: {} bytes", bytes.len()),
-        Err(e) => println!("[playground] /protocol.inf read failed: {e}"),
+    // --- screen --------------------------------------------------------------
+    match scope.screenshot() {
+        Ok(shot) => println!(
+            "\n[screen] {}x{}, centre pixel {:?}",
+            shot.width(),
+            shot.height(),
+            shot.pixel(shot.width() / 2, shot.height() / 2)
+        ),
+        Err(e) => println!("\n[screen] grab failed: {e}"),
     }
 
-    println!("[playground] done.");
+    // --- files ---------------------------------------------------------------
+    match scope.download("/protocol.inf") {
+        Ok(bytes) => println!("\n[files] /protocol.inf: {} bytes", bytes.len()),
+        Err(e) => println!("\n[files] download failed: {e}"),
+    }
+
+    // --- shell (read-only) ---------------------------------------------------
+    match scope.shell("uname -n -r") {
+        Ok(out) => println!("[shell] uname: {}", out.trim()),
+        Err(e) => println!("[shell] failed: {e}"),
+    }
+    match scope.list_dir("/mnt/udisk") {
+        Ok(entries) if entries.is_empty() => println!("[shell] /mnt/udisk is empty"),
+        Ok(entries) => {
+            println!("[shell] /mnt/udisk — {} entries", entries.len());
+            for entry in entries.iter().take(10) {
+                println!("          {:>10}  {}", entry.size, entry.name);
+            }
+        }
+        Err(e) => println!("[shell] list failed: {e} (is a card inserted?)"),
+    }
+
+    // --- keys ----------------------------------------------------------------
+    // Open a menu and read back which menu the scope reports, then return to where we
+    // started. Harmless and reversible — it only moves the on-screen menu.
+    let before = scope.read_settings()?.menu_id();
+    scope.press(Key::MenuAcquire)?;
+    std::thread::sleep(Duration::from_millis(400));
+    let after = scope.read_settings()?.menu_id();
+    println!("\n[keys] menu {before} -> {after} (17 = Acquire)");
+    scope.press(Key::MenuSaveRecall)?;
+
+    println!("\n[playground] done.");
     Ok(())
-}
-
-/// First `n` bytes of `data` as spaced hex, with an ellipsis if truncated.
-fn hex_preview(data: &[u8], n: usize) -> String {
-    let shown = &data[..data.len().min(n)];
-    let mut s = shown.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-    if data.len() > n {
-        s.push_str(" …");
-    }
-    s
 }

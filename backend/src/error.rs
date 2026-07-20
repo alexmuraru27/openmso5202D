@@ -23,4 +23,13 @@ pub enum Error {
     /// A lower-level libusb error (I/O, access denied, pipe stall, …).
     #[error("usb error: {0}")]
     Usb(#[from] rusb::Error),
+
+    /// A shell command was refused by the safety guard before reaching the scope.
+    #[error("refused to run: {0}")]
+    UnsafeCommand(String),
+
+    /// The scope answered, but with something we cannot use (short framebuffer, malformed
+    /// settings block, missing reply marker, …).
+    #[error("unexpected response: {0}")]
+    Unexpected(String),
 }
