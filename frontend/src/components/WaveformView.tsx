@@ -5,6 +5,9 @@ import { COLORS, channelColor } from "../theme";
 const GUTTER = 104; // left label rail
 const AXIS = 32; // top time-axis strip
 const LANE_PAD = 10; // vertical padding inside a lane
+const DECODE_STRIP = 32; // height of the per-lane decode (pill) strip — two lines: hex + dec
+const HEX_FONT = "600 11px ui-monospace, monospace"; // top line: 0x-prefixed hex
+const DEC_FONT = "500 10px ui-monospace, monospace"; // bottom line: decimal
 
 /** A time window in seconds, over the record's absolute sample time. */
 interface View {
@@ -206,6 +209,18 @@ function render(canvas: HTMLCanvasElement, model: Model, view: View) {
 
   drawAxis(ctx, model, view, timeToX, plotX, plotW, H);
 
+  // Byte-slice guides span ALL lanes, so each decoded byte's boundaries line up across every
+  // waveform (e.g. the SPI data bytes drawn through the clock trace too). Drawn once here,
+  // before the lanes, so the traces stay crisp on top. The decoded items live on one channel
+  // but the guides are placed by time, so they apply to all.
+  const decoded = model.lanes.flatMap((lane) => lane.decoded);
+  if (decoded.length) {
+    const topStrip = model.lanes[0].decoded.length ? DECODE_STRIP : 0;
+    const top = plotY + LANE_PAD + topStrip;
+    const bottom = plotY + plotH - LANE_PAD;
+    drawByteSlices(ctx, decoded, timeToX, plotX, plotW, top, bottom - top);
+  }
+
   const laneH = plotH / model.lanes.length;
   model.lanes.forEach((lane, i) => {
     const y0 = plotY + i * laneH;
@@ -224,19 +239,26 @@ function drawAxis(
 ) {
   const span = view.t1 - view.t0;
   const step = niceStep(span, plotW / 90);
-  const first = Math.ceil(view.t0 / step) * step;
+  // Anchor ticks to the TRIGGER (time origin), not to the record start, so 0 always lands on
+  // a gridline and every label is a clean multiple of the step.
+  const rel0 = view.t0 - model.triggerS;
+  const rel1 = view.t1 - model.triggerS;
+  const first = Math.ceil(rel0 / step) * step;
+  // One unit + decimal count for the whole axis, derived from its extent and the STEP — so
+  // adjacent ticks a step apart never round to the same text (the "−28 µs ×5" bug).
+  const label = timeAxisFormat(Math.max(Math.abs(rel0), Math.abs(rel1)), step);
   ctx.font = "11px ui-monospace, monospace";
   ctx.textBaseline = "middle";
-  for (let t = first; t <= view.t1; t += step) {
-    const x = timeToX(t);
+  ctx.textAlign = "center";
+  for (let rel = first; rel <= rel1 + step * 1e-6; rel += step) {
+    const x = timeToX(model.triggerS + rel);
     ctx.strokeStyle = COLORS.grid;
     ctx.beginPath();
     ctx.moveTo(x, AXIS);
     ctx.lineTo(x, H);
     ctx.stroke();
     ctx.fillStyle = COLORS.axisText;
-    ctx.textAlign = "center";
-    ctx.fillText(formatTime(t - model.triggerS), x, AXIS / 2);
+    ctx.fillText(label(rel), x, AXIS / 2);
   }
   // The trigger marker (time origin).
   const tx = timeToX(model.triggerS);
@@ -285,7 +307,7 @@ function drawLane(
   }
 
   // Signal band: leave room for a decode strip at the top when this lane has a decode.
-  const decodeStrip = lane.decoded.length ? 26 : 0;
+  const decodeStrip = lane.decoded.length ? DECODE_STRIP : 0;
   const bandY = y0 + LANE_PAD + decodeStrip;
   const bandH = laneH - LANE_PAD * 2 - decodeStrip;
   const yOf = (v: number) =>
@@ -348,6 +370,45 @@ function drawLane(
   }
 }
 
+/** Vertical byte-boundary guides across the signal band — the "byte slicing" that ties each
+ * decoded byte to the stretch of waveform it was read from. A faint alternating fill sets
+ * neighbouring bytes apart. Culls slices too narrow to read (the pills still convey those)
+ * and anything off-screen, so it stays clean at any zoom. */
+function drawByteSlices(
+  ctx: CanvasRenderingContext2D,
+  items: DecodedItem[],
+  timeToX: (t: number) => number,
+  plotX: number,
+  plotW: number,
+  bandY: number,
+  bandH: number,
+) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotX, bandY, plotW, bandH);
+  ctx.clip();
+  ctx.lineWidth = 1;
+  for (const item of items) {
+    if (!isByte(item)) continue;
+    const x0 = timeToX(item.startS);
+    const x1 = timeToX(item.endS);
+    if (x1 < plotX || x0 > plotX + plotW) continue;
+    const w = x1 - x0;
+    if (w < 3) continue; // too thin to slice cleanly — the decode pill already stands in
+
+    ctx.fillStyle = COLORS.byteGuideFill;
+    ctx.fillRect(x0, bandY, w, bandH);
+    ctx.strokeStyle = COLORS.byteGuide;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x0) + 0.5, bandY);
+    ctx.lineTo(Math.round(x0) + 0.5, bandY + bandH);
+    ctx.moveTo(Math.round(x1) + 0.5, bandY);
+    ctx.lineTo(Math.round(x1) + 0.5, bandY + bandH);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawDecode(
   ctx: CanvasRenderingContext2D,
   items: DecodedItem[],
@@ -382,12 +443,32 @@ function drawDecode(
     }
 
     const cx = (x0 + x1) / 2;
-    const label = item.text.replace("!", "");
-    const w = Math.max(x1 - x0 - 2, ctx.measureText(label).width + 12);
-    const px = cx - w / 2;
-    pill(ctx, px, y, w, h, COLORS.decodeFill, item.text.includes("!"));
-    ctx.fillStyle = COLORS.decodeInk;
-    ctx.fillText(label, cx, y + h / 2 + 0.5);
+    const bad = item.text.includes("!");
+
+    if (item.value != null) {
+      // Two lines: 0x-prefixed hex on top, decimal below.
+      const hex = `0x${item.value.toString(16).toUpperCase().padStart(2, "0")}${bad ? "!" : ""}`;
+      const dec = String(item.value);
+      ctx.font = HEX_FONT;
+      const wHex = ctx.measureText(hex).width;
+      ctx.font = DEC_FONT;
+      const wDec = ctx.measureText(dec).width;
+      const w = Math.max(x1 - x0 - 2, Math.max(wHex, wDec) + 12);
+      const px = cx - w / 2;
+      pill(ctx, px, y, w, h, COLORS.decodeFill, bad);
+      ctx.fillStyle = COLORS.decodeInk;
+      ctx.font = HEX_FONT;
+      ctx.fillText(hex, cx, y + h * 0.33);
+      ctx.font = DEC_FONT;
+      ctx.fillText(dec, cx, y + h * 0.71);
+    } else {
+      const label = item.text.replace("!", "");
+      const w = Math.max(x1 - x0 - 2, ctx.measureText(label).width + 12);
+      const px = cx - w / 2;
+      pill(ctx, px, y, w, h, COLORS.decodeFill, bad);
+      ctx.fillStyle = COLORS.decodeInk;
+      ctx.fillText(label, cx, y + h / 2 + 0.5);
+    }
   }
   ctx.restore();
 }
@@ -432,12 +513,32 @@ function niceStep(span: number, targetTicks: number): number {
   return step * mag;
 }
 
-function formatTime(s: number): string {
-  const a = Math.abs(s);
-  const sign = s < 0 ? "−" : "+";
-  if (a < 1e-9) return "0";
-  if (a < 1e-6) return `${sign}${(s * 1e9).toFixed(a < 1e-8 ? 1 : 0)} ns`;
-  if (a < 1e-3) return `${sign}${(s * 1e6).toFixed(a < 1e-5 ? 1 : 0)} µs`;
-  if (a < 1) return `${sign}${(s * 1e3).toFixed(a < 1e-2 ? 1 : 0)} ms`;
-  return `${sign}${s.toFixed(2)} s`;
+const TIME_UNITS: [number, string][] = [
+  [1, "s"],
+  [1e-3, "ms"],
+  [1e-6, "µs"],
+  [1e-9, "ns"],
+];
+
+/** Build a time-axis label formatter that uses ONE unit for the whole axis (chosen from its
+ * extent) and just enough decimals to tell adjacent `step`-apart ticks apart — so a fine
+ * zoom never collapses several ticks onto the same rounded label. */
+function timeAxisFormat(maxAbs: number, step: number): (s: number) => string {
+  // Largest unit whose scale does not exceed the axis extent (falls back to ns).
+  let scale = 1e-9;
+  let name = "ns";
+  for (const [s, n] of TIME_UNITS) {
+    if (maxAbs >= s) {
+      scale = s;
+      name = n;
+      break;
+    }
+  }
+  const stepInUnit = step / scale;
+  const decimals = Math.max(0, Math.min(3, -Math.floor(Math.log10(stepInUnit) + 1e-9)));
+  return (s: number) => {
+    if (Math.abs(s) < step / 2) return "0";
+    const sign = s < 0 ? "−" : "+";
+    return `${sign}${Math.abs(s / scale).toFixed(decimals)} ${name}`;
+  };
 }

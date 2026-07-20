@@ -77,6 +77,9 @@ pub struct DecodedItem {
     pub end_s: f64,
     pub text: String,
     pub kind: String,
+    /// The raw byte value, for a byte/address event; `None` for a bus marker. Lets the UI
+    /// show it in whatever base it likes (hex + decimal) without re-parsing `text`.
+    pub value: Option<u8>,
     /// Channel the badge should be drawn over (the data line).
     pub channel: u8,
 }
@@ -245,7 +248,13 @@ impl CaptureConfig {
         if self.max_freq_hz <= 0.0 || self.samples_per_cycle <= 0.0 {
             return Err("frequency and samples-per-cycle must be positive".into());
         }
-        parse_depth(&self.depth)?;
+        let depth = parse_depth(&self.depth)?;
+        // 1M is single-channel only — the deep record needs the whole acquisition memory, so
+        // the scope cannot serve two channels at that depth (the F5 ring only reaches 1M with
+        // CH2 off).
+        if depth == StoreDepth::M1 && self.channels.len() > 1 {
+            return Err("1M memory depth is single-channel only — select just one channel".into());
+        }
         Ok(())
     }
 
@@ -389,6 +398,7 @@ fn decode(
             end_s: e.end as f64 * dt_s,
             text: e.text(),
             kind: kind_name(e.kind).to_string(),
+            value: e.value,
             channel: data_channel,
         })
         .collect()
@@ -408,6 +418,7 @@ fn parse_depth(depth: &str) -> Result<StoreDepth, String> {
         "4k" => Ok(StoreDepth::K4),
         "40k" => Ok(StoreDepth::K40),
         "512k" => Ok(StoreDepth::K512),
+        "1m" => Ok(StoreDepth::M1),
         other => Err(format!("unknown depth '{other}'")),
     }
 }

@@ -12,6 +12,10 @@ export const COLORS = {
   decodeInk: "#22131a",
   decodeSub: "#c0c6d2",
   cursor: "#17b8c9",
+  // Byte-slice guides: boundary lines dropped from each decoded byte onto the waveform,
+  // and a faint alternating fill so adjacent byte slices read apart.
+  byteGuide: "#ffafc22f",
+  byteGuideFill: "rgba(202, 79, 255, 0.09)",
 };
 
 /** Trace colour for a channel. */

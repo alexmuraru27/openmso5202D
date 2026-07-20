@@ -12,7 +12,7 @@ interface Props {
   onCapture: () => void;
 }
 
-const DEPTHS: Depth[] = ["4k", "40k", "512k"];
+const DEPTHS: Depth[] = ["4k", "40k", "512k", "1m"];
 const PROTOCOLS: { id: Protocol; label: string }[] = [
   { id: "none", label: "None" },
   { id: "uart", label: "UART" },
@@ -35,7 +35,10 @@ export function ControlPanel(props: Props) {
     const next = has
       ? config.channels.filter((c) => c !== ch)
       : [...config.channels, ch].sort();
-    onChange({ channels: next });
+    const patch: Partial<CaptureConfig> = { channels: next };
+    // 1M memory depth is single-channel only, so adding a second channel drops it to 512K.
+    if (next.length > 1 && config.depth === "1m") patch.depth = "512k";
+    onChange(patch);
   };
 
   const lines = LINES[config.protocol];
@@ -113,26 +116,26 @@ function Acquisition({
         </div>
       </div>
 
-      <div className="field-row">
-        <div className="field" style={{ flex: 1.4 }}>
-          <span className="name">Max frequency</span>
-          <FrequencyInput
-            hz={config.maxFreqHz}
-            onChange={(hz) => onChange({ maxFreqHz: hz })}
+      <div className="field">
+        <span className="name">Max frequency</span>
+        <FrequencyInput
+          hz={config.maxFreqHz}
+          onChange={(hz) => onChange({ maxFreqHz: hz })}
+        />
+      </div>
+
+      <div className="field">
+        <span className="name">Samples / clock</span>
+        <div className="slider-row">
+          <input
+            type="range"
+            min={4}
+            max={1000}
+            step={1}
+            value={config.samplesPerCycle}
+            onChange={(e) => onChange({ samplesPerCycle: Number(e.target.value) })}
           />
-        </div>
-        <div className="field" style={{ flex: 1 }}>
-          <span className="name">Samples / clock</span>
-          <div className="input-suffix">
-            <input
-              type="number"
-              min={4}
-              max={500}
-              value={config.samplesPerCycle}
-              onChange={(e) => onChange({ samplesPerCycle: Number(e.target.value) })}
-            />
-            <span className="suffix">/bit</span>
-          </div>
+          <span className="slider-val">{config.samplesPerCycle}/bit</span>
         </div>
       </div>
       <span className="hint">Higher samples/clock = more resolution, shorter captured window.</span>
@@ -140,16 +143,26 @@ function Acquisition({
       <div className="field">
         <span className="name">Memory depth</span>
         <div className="segmented">
-          {DEPTHS.map((d) => (
-            <button
-              key={d}
-              className={config.depth === d ? "active" : ""}
-              onClick={() => onChange({ depth: d })}
-            >
-              {d.toUpperCase()}
-            </button>
-          ))}
+          {DEPTHS.map((d) => {
+            // 1M uses the whole acquisition memory, so it is available only with a single
+            // channel — disable it (and explain) while both channels are on.
+            const disabled = d === "1m" && config.channels.length !== 1;
+            return (
+              <button
+                key={d}
+                className={config.depth === d ? "active" : ""}
+                disabled={disabled}
+                title={disabled ? "1M is single-channel only" : undefined}
+                onClick={() => onChange({ depth: d })}
+              >
+                {d.toUpperCase()}
+              </button>
+            );
+          })}
         </div>
+        {config.depth === "1m" && (
+          <span className="hint">1M uses full memory — single channel only.</span>
+        )}
       </div>
     </div>
   );
@@ -164,6 +177,21 @@ function Decoder({
   onChange: (patch: Partial<CaptureConfig>) => void;
   lines: { clock?: string; data?: string };
 }) {
+  // Assigning a line to the channel the OTHER line is on swaps them, so clock and data stay
+  // distinct yet can be freely switched between CH1 and CH2.
+  const setClock = (ch: number) =>
+    onChange(
+      ch === config.dataChannel
+        ? { clockChannel: ch, dataChannel: config.clockChannel }
+        : { clockChannel: ch },
+    );
+  const setData = (ch: number) =>
+    onChange(
+      ch === config.clockChannel
+        ? { dataChannel: ch, clockChannel: config.dataChannel }
+        : { dataChannel: ch },
+    );
+
   return (
     <div className="group">
       <div className="label">Protocol decode</div>
@@ -180,35 +208,23 @@ function Decoder({
       </div>
 
       {lines.clock && (
-        <ChannelPicker
-          name={lines.clock}
-          value={config.clockChannel}
-          other={config.dataChannel}
-          onChange={(ch) => onChange({ clockChannel: ch })}
-        />
+        <ChannelPicker name={lines.clock} value={config.clockChannel} onChange={setClock} />
       )}
       {lines.data && (
-        <ChannelPicker
-          name={lines.data}
-          value={config.dataChannel}
-          other={config.clockChannel}
-          onChange={(ch) => onChange({ dataChannel: ch })}
-        />
+        <ChannelPicker name={lines.data} value={config.dataChannel} onChange={setData} />
       )}
     </div>
   );
 }
 
-/** Assign a protocol line to a physical channel, blocking a clash with `other`. */
+/** Assign a protocol line to a physical channel. */
 function ChannelPicker({
   name,
   value,
-  other,
   onChange,
 }: {
   name: string;
   value?: number;
-  other?: number;
   onChange: (ch: number) => void;
 }) {
   return (
@@ -219,8 +235,6 @@ function ChannelPicker({
           <button
             key={ch}
             className={value === ch ? "active" : ""}
-            disabled={other === ch}
-            title={other === ch ? "already used by the other line" : undefined}
             onClick={() => onChange(ch)}
           >
             CH{ch}

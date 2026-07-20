@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Protocol = "none" | "uart" | "spi" | "i2c";
-export type Depth = "4k" | "40k" | "512k";
+export type Depth = "4k" | "40k" | "512k" | "1m";
 
 export interface CaptureConfig {
   channels: number[];
@@ -33,6 +33,8 @@ export interface DecodedItem {
   endS: number;
   text: string;
   kind: string;
+  /** Raw byte value for a byte/address event; absent for a bus marker. */
+  value?: number;
   channel: number;
 }
 
