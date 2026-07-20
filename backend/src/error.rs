@@ -28,6 +28,10 @@ pub enum Error {
     #[error("refused to run: {0}")]
     UnsafeCommand(String),
 
+    /// Execution was cancelled by the caller between operations.
+    #[error("cancelled")]
+    Cancelled,
+
     /// The scope answered, but with something we cannot use (short framebuffer, malformed
     /// settings block, missing reply marker, …).
     #[error("unexpected response: {0}")]

@@ -7,12 +7,16 @@
 //! ```sh
 //! cargo run -p mso5202d --bin playground
 //! ```
+//!
+//! Every run appends a full trace to `logs/`; set `MSO_LOG=trace` to see it on the console
+//! as well.
 
-use std::time::Duration;
-
-use mso5202d::{Device, Key, Result};
+use mso5202d::control::{execute, Context, Op, ProgressEvent, StepState};
+use mso5202d::settings::{Probe, StoreDepth};
+use mso5202d::{logging, Device, Result};
 
 fn main() {
+    let _log = logging::init().expect("start logging");
     if let Err(e) = run() {
         eprintln!("\n[playground] error: {e}");
         eprintln!("(is the scope plugged in? is the udev rule installed, or are you root?)");
@@ -27,68 +31,70 @@ fn run() -> Result<()> {
         println!("[playground] connected — bus {bus} address {address}");
     }
 
-    // --- settings ------------------------------------------------------------
+    // --- what the scope currently thinks ------------------------------------
     let settings = scope.read_settings()?;
     println!("\n[settings]");
     println!("  menu        {:?}", settings.menu_name());
     println!("  trig state  {:?}", settings.trig_state());
     println!("  store depth {:?}", settings.store_depth());
     println!("  time/div    {:?} ns", settings.time_per_div_ns());
-    println!("  sample int  {:?} ns", settings.sample_interval_ns());
     for ch in [1u8, 2] {
         println!(
-            "  CH{ch}         shown={} {:?} mV/div probe={:?} coupling={:?}",
+            "  CH{ch}         shown={} {:?} mV/div probe={:?}",
             settings.channel_shown(ch),
             settings.volts_per_div_mv(ch),
             settings.probe(ch),
-            settings.coupling(ch),
         );
     }
-    println!("  trig level  {:?} mV", settings.trigger_level_mv());
 
-    // --- screen --------------------------------------------------------------
-    match scope.screenshot() {
-        Ok(shot) => println!(
-            "\n[screen] {}x{}, centre pixel {:?}",
-            shot.width(),
-            shot.height(),
-            shot.pixel(shot.width() / 2, shot.height() / 2)
-        ),
-        Err(e) => println!("\n[screen] grab failed: {e}"),
+    // --- run a plan ----------------------------------------------------------
+    // A plan is plain data, so its shape — step count and labels — is known before
+    // anything runs. That is what a progress bar needs.
+    let plan = vec![
+        Op::DefaultSetup,
+        Op::SetChannel { channel: 1, on: true },
+        Op::SetChannel { channel: 2, on: true },
+        Op::SetProbe { channel: 1, probe: Probe::X1 },
+        Op::SetVoltsPerDiv { channel: 1, millivolts: 1000 },
+        Op::SetTimePerDiv { nanoseconds: 2000 },
+        Op::SetTriggerLevel { position: 13 },
+        Op::SetDepth { depth: StoreDepth::K40 },
+    ];
+
+    println!("\n[plan] {} operations", plan.len());
+    for (i, op) in plan.iter().enumerate() {
+        println!("  {:>2}. {}", i + 1, op.label());
     }
 
-    // --- files ---------------------------------------------------------------
-    match scope.download("/protocol.inf") {
-        Ok(bytes) => println!("\n[files] /protocol.inf: {} bytes", bytes.len()),
-        Err(e) => println!("\n[files] download failed: {e}"),
-    }
-
-    // --- shell (read-only) ---------------------------------------------------
-    match scope.shell("uname -n -r") {
-        Ok(out) => println!("[shell] uname: {}", out.trim()),
-        Err(e) => println!("[shell] failed: {e}"),
-    }
-    match scope.list_dir("/mnt/udisk") {
-        Ok(entries) if entries.is_empty() => println!("[shell] /mnt/udisk is empty"),
-        Ok(entries) => {
-            println!("[shell] /mnt/udisk — {} entries", entries.len());
-            for entry in entries.iter().take(10) {
-                println!("          {:>10}  {}", entry.size, entry.name);
+    println!("\n[running]");
+    // A linear bar over index/total — exactly what a UI would draw.
+    let report = |event: &ProgressEvent| {
+        let percent = (event.index + 1) * 100 / event.total.max(1);
+        match &event.state {
+            StepState::Started => println!("  [{:>2}/{}] {} …", event.index + 1, event.total, event.label),
+            StepState::Completed { elapsed_ms } => {
+                println!("  {percent:>3}%    {} ✓ {elapsed_ms} ms", event.label)
+            }
+            StepState::Failed { error } => println!("         {} ✗ {error}", event.label),
+            StepState::Advanced { done, total } => {
+                println!("         {} {done}/{total}", event.label)
             }
         }
-        Err(e) => println!("[shell] list failed: {e} (is a card inserted?)"),
+    };
+
+    let context = Context::new(&scope, &report);
+    match execute(&context, &plan) {
+        Ok(()) => println!("\n[plan] completed"),
+        Err(e) => println!("\n[plan] stopped: {e}"),
     }
 
-    // --- keys ----------------------------------------------------------------
-    // Open a menu and read back which menu the scope reports, then return to where we
-    // started. Harmless and reversible — it only moves the on-screen menu.
-    let before = scope.read_settings()?.menu_id();
-    scope.press(Key::MenuAcquire)?;
-    std::thread::sleep(Duration::from_millis(400));
-    let after = scope.read_settings()?.menu_id();
-    println!("\n[keys] menu {before} -> {after} (17 = Acquire)");
-    scope.press(Key::MenuSaveRecall)?;
+    let after = scope.read_settings()?;
+    println!("\n[after]");
+    println!("  CH1 {:?} mV/div probe={:?}", after.volts_per_div_mv(1), after.probe(1));
+    println!("  time/div {:?} ns", after.time_per_div_ns());
+    println!("  depth {:?}", after.store_depth());
+    println!("  trigger position {}", after.trigger_position());
 
-    println!("\n[playground] done.");
+    println!("\n[playground] done — full trace in logs/");
     Ok(())
 }

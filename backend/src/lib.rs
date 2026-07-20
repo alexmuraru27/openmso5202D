@@ -5,7 +5,7 @@
 //!
 //! | Layer | Module | Concern |
 //! |---|---|---|
-//! | 3 | *(future)* | Workflows: closed-loop control, deep capture, decoding |
+//! | 3 | [`control`] | **Business logic** — plans of semantic operations, closed-loop |
 //! | 2 | [`device`] | **Device operations** — keys, knobs, settings, screen, files, shell |
 //! | 1 | [`usb`] | USB transport — connect, bind, transact |
 //! | 0 | [`protocol`], [`settings`] | Wire format and data layout (pure logic) |
@@ -32,12 +32,15 @@
 //! key press runs — LEDs, on-screen state, acquisition reconfiguration, and SD-card
 //! detection. No write path is exposed here by design.
 
+pub mod control;
 pub mod device;
 pub mod error;
+pub mod logging;
 pub mod protocol;
 pub mod settings;
 pub mod usb;
 
+pub use control::{execute, Context, Op, ProgressEvent, ProgressSink, StepState};
 pub use device::{Device, FileEntry, Key, Knob, Screenshot, Turn};
 pub use error::{Error, Result};
 pub use protocol::{PID, VID};

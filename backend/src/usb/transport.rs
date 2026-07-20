@@ -132,11 +132,37 @@ impl Transport {
         timeout: Duration,
         retries: u32,
     ) -> Result<Vec<u8>> {
+        let selector = payload.first().copied().unwrap_or(0);
         let mut last: Option<Error> = None;
-        for _ in 0..=retries {
+        for attempt in 0..=retries {
+            // Logged before the write: an operation that never logs its outcome is exactly
+            // how a hang presents itself in the log file.
+            tracing::trace!(
+                leader = format_args!("0x{leader:02x}"),
+                selector = format_args!("0x{selector:02x}"),
+                bytes = payload.len(),
+                attempt,
+                "transact"
+            );
+            let started = std::time::Instant::now();
             match self.transact_once(leader, payload, timeout) {
-                Ok(frame) => return Ok(frame),
+                Ok(frame) => {
+                    tracing::trace!(
+                        selector = format_args!("0x{selector:02x}"),
+                        reply_bytes = frame.len(),
+                        elapsed_us = started.elapsed().as_micros() as u64,
+                        "transact ok"
+                    );
+                    return Ok(frame);
+                }
                 Err(e) => {
+                    tracing::debug!(
+                        selector = format_args!("0x{selector:02x}"),
+                        attempt,
+                        elapsed_us = started.elapsed().as_micros() as u64,
+                        error = %e,
+                        "transact failed; resyncing"
+                    );
                     last = Some(e);
                     self.resync(); // clear desync before retrying
                 }

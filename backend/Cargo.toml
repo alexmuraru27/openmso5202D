@@ -19,3 +19,9 @@ path = "src/bin/playground.rs"
 [dependencies]
 rusb = "0.9"        # libusb-1.0 bindings — detach/reset/claim/clear_halt/bulk transfer
 thiserror = "2"     # ergonomic error enum
+
+# Execution logging — spans/events give a durable trace of what ran, which is the evidence
+# needed to diagnose a hang (an operation that started and never completed).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-appender = "0.2"
