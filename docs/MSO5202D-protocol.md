@@ -628,6 +628,15 @@ path is a plain absolute path, e.g. `/protocol.inf`, `/help.db`,
 - **Checksum on the request:** `0x10` is the one selector for which the vendor
   always sends the **`0x66` wildcard** checksum. A correctly computed checksum is
   **also accepted** — both forms work. [verified] (confirmed on hardware this session)
+- **A completed transfer can leave a tail on the endpoint.** After a large read the
+  bulk IN endpoint may still hold bytes once the `90 02` end marker has been
+  consumed. A following command then reads that residue instead of its own reply:
+  a second back-to-back `0x10` read returns **0 bytes**, because the stale end
+  marker is taken for its first frame (its subtype is `02`, not `01`, so the
+  content loop never runs). **Drain the endpoint after any large read** — the same
+  precaution the `0x20` framebuffer grab needs. Verified with two 40 K CSV
+  read-backs (768 153 B then 761 532 B): without the drain the second returns
+  empty; with it, both return byte-exact. [verified 2026-07-20]
 - **Not every path is servable.** A path the firmware will not read back answers
   with a **1-byte reply** rather than an error or an empty stream, and no amount of
   waiting changes it: `/dso_bin` (the 4 454 536-byte running acquisition binary)
@@ -1539,7 +1548,7 @@ parentheses):
 
 | header | printed as | actual meaning | example |
 |---|---|---|---|
-| `#timebase` | `%d(ns)` | a **constant screen-timebase tag**, **NOT** the record's sample step | `4000000` |
+| `#timebase` | `%d(ns)` | the **screen time/div in picoseconds** — a constant tag, **NOT** the record's sample step. The `(ns)` label is wrong by 1000×: an export taken at 2 µs/div reports `2000000`, i.e. 2 µs = 2 000 000 ps, cross-checked against `HORIZ-WIN-TB` read back over `0x01` `[verified 2026-07-20]` | `2000000` = 2 µs/div |
 | `#voltbase` | `%d(mv/100)` | actually **µV/div** → `V/div = voltbase / 1 000 000` (the `(mv/100)` label is wrong) `[verified]` | `5000000` = 5 V/div |
 | `#size` | `%d` | number of data rows | `4064` / `40064` / `400064` |
 

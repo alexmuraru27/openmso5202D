@@ -201,12 +201,38 @@ impl Device {
     /// yields a partial file rather than a failure. For transfers where truncation would
     /// matter, cross-check the length against the size from [`Device::list_dir`].
     pub fn download(&self, path: &str) -> Result<Vec<u8>> {
+        self.download_with(path, |_| {})
+    }
+
+    /// [`Device::download`], reporting bytes received so far as the transfer proceeds.
+    ///
+    /// The reply carries no declared length, so `on_progress` receives only the running
+    /// count — a caller wanting a percentage supplies the expected size itself, typically
+    /// from [`Device::list_dir`].
+    pub fn download_with(&self, path: &str, mut on_progress: impl FnMut(u64)) -> Result<Vec<u8>> {
         let mut request = vec![selector::FILE_READ, 0x00];
         request.extend_from_slice(path.as_bytes());
         let first = self
             .transport
             .transact_with(&request, DOWNLOAD_TIMEOUT, 2)?;
-        self.collect_multiframe(first, DOWNLOAD_TIMEOUT)
+
+        const DATA_OFFSET: usize = 2; // selector echo + subtype
+        let mut frame = first;
+        let mut data = Vec::new();
+        while let Some(subtype::DATA) = frame.get(1).copied() {
+            data.extend_from_slice(&frame[DATA_OFFSET..]);
+            on_progress(data.len() as u64);
+            match self.transport.recv(DOWNLOAD_TIMEOUT) {
+                Ok(next) => frame = next,
+                Err(_) => break,
+            }
+        }
+        // A large transfer can leave a tail queued on the endpoint. Left there, the next
+        // command reads it instead of its own reply — which showed up as a second
+        // back-to-back download returning zero bytes, because the stale end-marker was
+        // taken for that download's first frame.
+        self.transport.resync();
+        Ok(data)
     }
 
     /// List a directory on the scope, via the shell channel.

@@ -11,7 +11,7 @@
 //! Every run appends a full trace to `logs/`; set `MSO_LOG=trace` to see it on the console
 //! as well.
 
-use mso5202d::control::{execute, Context, Op, ProgressEvent, StepState};
+use mso5202d::control::{execute, Context, CsvSource, Op, ProgressEvent, StepState};
 use mso5202d::settings::{Probe, StoreDepth};
 use mso5202d::{logging, Device, Result};
 
@@ -50,15 +50,19 @@ fn run() -> Result<()> {
     // --- run a plan ----------------------------------------------------------
     // A plan is plain data, so its shape — step count and labels — is known before
     // anything runs. That is what a progress bar needs.
+    //
+    // Add `Op::ClearCard` at the end to wipe every exported CSV off the card — it is
+    // irreversible, so it is not here by default.
     let plan = vec![
         Op::DefaultSetup,
         Op::SetChannel { channel: 1, on: true },
-        Op::SetChannel { channel: 2, on: true },
         Op::SetProbe { channel: 1, probe: Probe::X1 },
         Op::SetVoltsPerDiv { channel: 1, millivolts: 1000 },
         Op::SetTimePerDiv { nanoseconds: 2000 },
-        Op::SetTriggerLevel { position: 13 },
-        Op::SetDepth { depth: StoreDepth::K40 },
+        Op::SetDepth { depth: StoreDepth::K4 },
+        Op::CaptureSingle,
+        Op::SaveCsv { source: CsvSource::Ch1 },
+        Op::Download { source: CsvSource::Ch1 },
     ];
 
     println!("\n[plan] {} operations", plan.len());
@@ -71,7 +75,9 @@ fn run() -> Result<()> {
     let report = |event: &ProgressEvent| {
         let percent = (event.index + 1) * 100 / event.total.max(1);
         match &event.state {
-            StepState::Started => println!("  [{:>2}/{}] {} …", event.index + 1, event.total, event.label),
+            StepState::Started => {
+                println!("  [{:>2}/{}] {} …", event.index + 1, event.total, event.label)
+            }
             StepState::Completed { elapsed_ms } => {
                 println!("  {percent:>3}%    {} ✓ {elapsed_ms} ms", event.label)
             }
@@ -86,6 +92,20 @@ fn run() -> Result<()> {
     match execute(&context, &plan) {
         Ok(()) => println!("\n[plan] completed"),
         Err(e) => println!("\n[plan] stopped: {e}"),
+    }
+
+    for file in &context.outputs().files {
+        println!(
+            "\n[output] {} -> {} ({} bytes on card, {} downloaded)",
+            file.source.name(),
+            file.name,
+            file.size,
+            file.data.as_ref().map(|d| d.len()).unwrap_or(0)
+        );
+        if let Some(data) = &file.data {
+            let head = String::from_utf8_lossy(&data[..data.len().min(120)]);
+            println!("  header: {}", head.lines().take(3).collect::<Vec<_>>().join(" | "));
+        }
     }
 
     let after = scope.read_settings()?;

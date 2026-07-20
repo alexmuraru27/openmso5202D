@@ -34,6 +34,16 @@ fn labels_read_like_the_user_facing_operation() {
         Op::SetTimePerDiv { nanoseconds: 2000 }.label(),
         "Setting timebase to 2 µs/div"
     );
+    assert_eq!(Op::CaptureSingle.label(), "Capturing a single sequence");
+    assert_eq!(
+        Op::SaveCsv { source: CsvSource::Ch1 }.label(),
+        "Saving CH1 to card"
+    );
+    assert_eq!(
+        Op::Download { source: CsvSource::Ch2 }.label(),
+        "Downloading CH2 record"
+    );
+    assert_eq!(Op::ClearCard.label(), "Clearing exported CSVs from card");
 }
 
 #[test]
@@ -103,4 +113,112 @@ fn events_render_for_a_log_line() {
     assert!(event(0, StepState::Completed { elapsed_ms: 42 })
         .to_string()
         .contains("42 ms"));
+}
+
+// --- CSV menu screen reading ------------------------------------------------
+
+use mso5202d::control::csv::{
+    is_wavedata, save_in_progress, selected_source, wavedata_files, wavedata_number, CsvSource,
+};
+use mso5202d::device::screen::{Screenshot, FRAMEBUFFER_BYTES, SCREEN_WIDTH};
+use mso5202d::device::FileEntry;
+
+/// A painted rectangle: horizontal band, vertical band, RGB565 colour.
+type Rect = ((usize, usize), (usize, usize), u16);
+
+/// Build a screenshot, painting rectangles of RGB565 colour.
+fn screen_with(regions: &[Rect]) -> Screenshot {
+    let mut raw = vec![0u8; FRAMEBUFFER_BYTES];
+    for &((x0, x1), (y0, y1), colour) in regions {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = (y * SCREEN_WIDTH + x) * 2;
+                raw[i..i + 2].copy_from_slice(&colour.to_le_bytes());
+            }
+        }
+    }
+    Screenshot::from_rgb565(&raw).expect("full-size buffer")
+}
+
+/// The three Source radio dots: two identical (unselected) and one distinct (selected).
+fn screen_with_source(selected: usize) -> Screenshot {
+    const ROWS: [(usize, usize); 3] = [(58, 72), (80, 94), (102, 116)];
+    let regions: Vec<_> = ROWS
+        .iter()
+        .enumerate()
+        .map(|(row, &band)| {
+            // Selected dot is filled bright; unselected dots are identical dim rings.
+            let colour = if row == selected { 0xFFFF } else { 0x2104 };
+            ((656usize, 676usize), band, colour)
+        })
+        .collect();
+    screen_with(&regions)
+}
+
+#[test]
+fn source_radio_is_read_as_the_odd_one_out() {
+    // Deliberately not colour-matching: the selected dot is whichever differs from the
+    // identical pair, so the reading survives any firmware theme.
+    assert_eq!(selected_source(&screen_with_source(0)), Some(CsvSource::Ch1));
+    assert_eq!(selected_source(&screen_with_source(1)), Some(CsvSource::Ch2));
+    assert_eq!(selected_source(&screen_with_source(2)), Some(CsvSource::La));
+}
+
+#[test]
+fn a_uniform_radio_group_is_rejected_rather_than_guessed() {
+    // All three dots identical — the menu is not on screen, or the grab was poor. Guessing
+    // here would silently export the wrong channel.
+    let blank = screen_with(&[]);
+    assert_eq!(selected_source(&blank), None);
+}
+
+#[test]
+fn the_busy_banner_is_detected() {
+    // While this banner is up the scope ignores key presses.
+    let busy = screen_with(&[((160, 535), (230, 245), 0xFC00)]); // orange
+    assert!(save_in_progress(&busy));
+
+    let idle = screen_with(&[]);
+    assert!(!save_in_progress(&idle));
+
+    // A banner-coloured patch elsewhere on screen must not read as busy.
+    let elsewhere = screen_with(&[((0, 100), (400, 460), 0xFC00)]);
+    assert!(!save_in_progress(&elsewhere));
+}
+
+// --- exported file naming ---------------------------------------------------
+
+fn entry(name: &str, size: u64) -> FileEntry {
+    FileEntry { name: name.into(), size, is_dir: false }
+}
+
+#[test]
+fn wavedata_files_are_recognised_and_ordered() {
+    let listing = vec![
+        entry("WaveData1412.csv", 40064),
+        entry("notes.txt", 10),
+        entry("WaveData1410.csv", 400064),
+        entry("pic_141_1.bmp", 100),
+        entry("WaveData1411.csv", 4064),
+    ];
+    let found = wavedata_files(&listing);
+    let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["WaveData1410.csv", "WaveData1411.csv", "WaveData1412.csv"]);
+}
+
+#[test]
+fn only_exported_waveforms_match() {
+    assert!(is_wavedata("WaveData1410.csv"));
+    assert!(is_wavedata("wavedata9.CSV"), "matching must be case-insensitive");
+    assert!(!is_wavedata("WaveData1410.txt"));
+    assert!(!is_wavedata("pic_141_1.bmp"));
+    assert!(!is_wavedata(""));
+}
+
+#[test]
+fn file_numbers_order_by_sequence_not_string() {
+    // String ordering would put 1410 after 999; the embedded number must win.
+    assert!(wavedata_number("WaveData1410.csv") > wavedata_number("WaveData999.csv"));
+    assert_eq!(wavedata_number("WaveData1410.csv"), 1410);
+    assert_eq!(wavedata_number("nodigits.csv"), 0);
 }

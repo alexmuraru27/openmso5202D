@@ -8,6 +8,7 @@
 //! every step's description fall out of the data before anything runs, which is what a
 //! progress bar needs.
 
+use crate::control::csv::CsvSource;
 use crate::settings::{Probe, StoreDepth};
 
 /// One semantic operation in a plan.
@@ -51,6 +52,42 @@ pub enum Op {
         /// Desired store depth.
         depth: StoreDepth,
     },
+
+    /// Arm a single sequence and wait for the scope to capture and stop itself.
+    ///
+    /// The only capture mechanism used: a single sequence stops on a real trigger with a
+    /// trigger-aligned record. A manual run/stop freeze is not trigger-aligned and can
+    /// latch a stale or partial buffer.
+    ///
+    /// This is a **precondition for saving** — exporting from a scope that has not captured
+    /// writes no file at all.
+    CaptureSingle,
+
+    /// Export the captured record for one source to the memory card as a CSV.
+    ///
+    /// This is how a record longer than the screen buffer is retrieved: deep records are
+    /// not exposed over USB at any depth, so the scope writes them to the card and they are
+    /// read back with [`Op::Download`].
+    SaveCsv {
+        /// Which trace to export.
+        source: CsvSource,
+    },
+
+    /// Read back the CSV that [`Op::SaveCsv`] wrote for `source`.
+    Download {
+        /// Which trace's export to fetch.
+        source: CsvSource,
+    },
+
+    /// Delete **every** exported waveform CSV from the memory card.
+    ///
+    /// Irreversible, and it clears the whole card of `WaveData*.csv` — not merely the
+    /// files this plan created, because the front-panel delete key acts on whatever the
+    /// file list has selected and cannot be aimed at specific files.
+    ///
+    /// Deletion goes through the front panel, never a shell `rm`: the shell is root on the
+    /// instrument with no undo, and the delete key is the path the firmware expects.
+    ClearCard,
 }
 
 impl Op {
@@ -73,6 +110,10 @@ impl Op {
             Op::SetDepth { depth } => {
                 format!("Setting acquisition depth to {}", depth_label(*depth))
             }
+            Op::CaptureSingle => "Capturing a single sequence".into(),
+            Op::SaveCsv { source } => format!("Saving {} to card", source.name()),
+            Op::Download { source } => format!("Downloading {} record", source.name()),
+            Op::ClearCard => "Clearing exported CSVs from card".into(),
         }
     }
 

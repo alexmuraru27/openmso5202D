@@ -292,6 +292,17 @@ times** (1 opens the FileList, `N` delete), then **one** `ls` to verify — repe
 of rounds only if the single-slot key mailbox dropped a press. `deep_capture(delete_after=
 True)` runs this after the captures are read back to the PC; there's also a "Clear card
 CSVs" button in the GUI. Uses only front-panel keys + read-only `ls` (no `rm`).
+
+**The `N+1` count applies only while the FileList is CLOSED.** The opening press is what
+costs the extra one, and the FileList **stays open** afterwards — so a second round must
+press exactly `N` times, not `N+1`. Pressing `N+1` with the list already open issues one
+delete more than there are files to delete. `[verified 2026-07-20]`
+
+**Blast radius is confined to CSVs.** The CSV FileList exposes only `WaveData*.csv`, so
+delete presses cannot reach anything else on the card. Verified by clearing a card holding
+8 CSVs (~24 MB) alongside 9 unrelated entries (`scoperoot`, `msodump`, `msoparam`,
+`pic_141_*`, `cptest.txt`, `mso_test.txt`, `.Trash-1000`): all 8 CSVs went, all 9 others
+survived, in 7.7 s. `[verified 2026-07-20]`
 - The vendor's real save is just `MENU-SR(11) → CSV(3) → Save(2)` (its FN0/Back
   presses in captures are the operator escaping the slow, stuck app — not part of
   saving). `[verified from the virtual-panel pcap]`
@@ -358,3 +369,13 @@ can race one command behind (unique end-marker + retry), and a stalled command t
 the watchdog reboot — so keep shell commands short and never read a live process's
 `/proc/<pid>/*`. Reading files off the scope is done with the `0x53 0x10` file-read,
 not shell `cat`.
+
+**The shell goes unreachable while a large record is being written.** During a deep
+Save→CSV the scope stops answering `0x43` altogether: every command times out for
+tens of seconds until the write finalises (measured on a 512 K / 7.7 MB export —
+repeated 4 s timeouts, save wall-clock 50 s). The poll that waits for the new CSV
+therefore **must treat a failed `ls` as "still busy" and keep waiting**, not as an
+error; aborting on the first timeout kills a save that was progressing normally.
+The same poll must still respect the no-re-press rule (§3.0.1): the file only
+becomes visible when the scope renames its temp file at the very end.
+[verified 2026-07-20]
