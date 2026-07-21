@@ -2,19 +2,19 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "MSO5202D: live plot",
+            "name": "MSO5202D: screen picker",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/scripts/mso5202d_plot.py",
+            "program": "${workspaceFolder}/scripts/mso5202d_screenpick.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}/scripts",
             "justMyCode": true
         },
         {
-            "name": "MSO5202D: screen picker",
+            "name": "ESP generator: GUI",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/scripts/mso5202d_screenpick.py",
+            "program": "${workspaceFolder}/scripts/mso5202d_espgui.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}/scripts",
             "justMyCode": true

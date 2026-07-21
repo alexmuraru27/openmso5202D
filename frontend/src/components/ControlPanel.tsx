@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { CaptureConfig, Depth, Protocol } from "../api";
+import { capturePlan, formatDuration } from "../timebase";
+
+/** Bounds for the samples-per-clock control (slider and typed input share them). */
+const SPC_MIN = 4;
+const SPC_MAX = 1000;
 
 interface Props {
   config: CaptureConfig;
@@ -129,16 +134,21 @@ function Acquisition({
         <div className="slider-row">
           <input
             type="range"
-            min={4}
-            max={1000}
+            min={SPC_MIN}
+            max={SPC_MAX}
             step={1}
             value={config.samplesPerCycle}
             onChange={(e) => onChange({ samplesPerCycle: Number(e.target.value) })}
           />
-          <span className="slider-val">{config.samplesPerCycle}/bit</span>
+          <NumberInput
+            value={config.samplesPerCycle}
+            min={SPC_MIN}
+            max={SPC_MAX}
+            onChange={(n) => onChange({ samplesPerCycle: n })}
+          />
         </div>
       </div>
-      <span className="hint">Higher samples/clock = more resolution, shorter captured window.</span>
+      <CaptureWindow config={config} />
 
       <div className="field">
         <span className="name">Memory depth</span>
@@ -165,6 +175,64 @@ function Acquisition({
         )}
       </div>
     </div>
+  );
+}
+
+/** How much time the capture will actually cover, given the max frequency, the requested
+ * samples/clock, the memory depth, and the scope's fixed SEC/DIV ladder. The ladder snap is
+ * why the achieved samples/clock can differ from what was asked for. */
+function CaptureWindow({ config }: { config: CaptureConfig }) {
+  const plan = capturePlan(config.maxFreqHz, config.samplesPerCycle, config.depth);
+  if (!plan) return <span className="hint">Set a frequency to size the capture.</span>;
+  return (
+    <span className="hint">
+      Captures <strong>{formatDuration(plan.windowS)}</strong> at{" "}
+      {formatDuration(plan.timePerDivNs * 1e-9)}/div — {Math.round(plan.samplesPerClock)}{" "}
+      samples/clock actual.
+    </span>
+  );
+}
+
+/** A number field that keeps its own text so it can be cleared and retyped freely, clamping
+ * into range when the edit finishes. */
+function NumberInput({
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (n: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+  const editing = useRef(false);
+
+  // Reflect changes from the slider unless the user is mid-edit.
+  useEffect(() => {
+    if (!editing.current) setText(String(value));
+  }, [value]);
+
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      value={text}
+      onFocus={() => (editing.current = true)}
+      onBlur={() => {
+        editing.current = false;
+        const n = Math.min(max, Math.max(min, Math.round(Number(text)) || min));
+        setText(String(n));
+        onChange(n);
+      }}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = Math.round(Number(e.target.value));
+        if (Number.isFinite(n) && n >= min && n <= max) onChange(n);
+      }}
+    />
   );
 }
 

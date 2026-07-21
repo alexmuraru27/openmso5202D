@@ -227,9 +227,15 @@ body {
   font-size: 12px;
   color: var(--text-dim);
 }
-.field .hint {
+/* Applies whether the hint sits inside a .field or stands alone under a group. */
+.hint {
+  display: block;
   font-size: 11px;
   color: var(--text-faint);
+}
+.hint strong {
+  color: var(--text-dim);
+  font-weight: 650;
 }
 
 /* segmented control */
@@ -325,13 +331,14 @@ select option {
   align-items: center;
   gap: 12px;
 }
-.slider-val {
-  min-width: 48px;
+.slider-row input[type="number"] {
+  width: 74px;
+  flex: 0 0 auto;
+  padding: 6px 8px;
   text-align: right;
   font-family: ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
   font-size: 12px;
-  color: var(--text-dim);
 }
 input[type="range"] {
   flex: 1;
