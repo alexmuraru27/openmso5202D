@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { CaptureConfig, Depth, Protocol } from "../api";
+import type { CaptureConfig, CaptureResult, CardFile, Depth, Protocol } from "../api";
 import { capturePlan, formatDuration } from "../timebase";
+import { CardFiles } from "./CardFiles";
+import { LoadCsv } from "./LoadCsv";
 
 /** Bounds for the samples-per-clock control (slider and typed input share them). */
 const SPC_MIN = 4;
@@ -11,10 +13,14 @@ interface Props {
   onChange: (patch: Partial<CaptureConfig>) => void;
   connected: boolean;
   prepared: boolean;
-  busy: null | "connect" | "prepare" | "capture";
+  busy: null | "connect" | "prepare" | "capture" | "card";
   error: string | null;
   onPrepare: () => void;
   onCapture: () => void;
+  /** Card operations share the USB link, so they lock the other actions while running. */
+  onCardBusy: (busy: boolean) => void;
+  /** Viewing a card file replaces the plotted traces. */
+  onResult: (result: CaptureResult) => void;
 }
 
 const DEPTHS: Depth[] = ["4k", "40k", "512k", "1m"];
@@ -46,48 +52,71 @@ export function ControlPanel(props: Props) {
     onChange(patch);
   };
 
+  // Lifted so the Load-CSV panel offers whatever the SD panel last listed.
+  const [cardFiles, setCardFiles] = useState<CardFile[]>([]);
+
   const lines = LINES[config.protocol];
   const dualNeeded = config.protocol === "spi" || config.protocol === "i2c";
   const missingChannels = dualNeeded && config.channels.length < 2;
 
   return (
     <div className="sidebar">
-      <Acquisition config={config} onChange={onChange} toggleChannel={toggleChannel} />
+      {/* Settings scroll; the actions below stay pinned so Prepare/Capture are reachable
+          however tall the panel grows (selecting SPI/I²C adds two more line pickers). */}
+      <div className="sidebar-scroll">
+        <Acquisition config={config} onChange={onChange} toggleChannel={toggleChannel} />
 
-      <Decoder config={config} onChange={onChange} lines={lines} />
+        <Decoder config={config} onChange={onChange} lines={lines} />
 
-      {missingChannels && (
-        <div className="field">
-          <span className="hint" style={{ color: "var(--warn)" }}>
-            {config.protocol.toUpperCase()} needs both channels — enable CH1 and CH2.
-          </span>
-        </div>
-      )}
+        {missingChannels && (
+          <div className="field">
+            <span className="hint" style={{ color: "var(--warn)" }}>
+              {config.protocol.toUpperCase()} needs both channels — enable CH1 and CH2.
+            </span>
+          </div>
+        )}
 
-      <div className="actions">
-        <button
-          className="btn block lg"
-          disabled={!connected || busy !== null}
-          onClick={props.onPrepare}
-        >
-          {busy === "prepare" ? "Preparing…" : "① Prepare"}
-        </button>
-        <button
-          className="btn primary block lg"
-          disabled={!connected || !prepared || busy !== null}
-          onClick={props.onCapture}
-        >
-          {busy === "capture" ? "Capturing…" : "② Capture"}
-        </button>
+        <CardFiles
+          connected={connected}
+          busy={busy !== null}
+          onBusyChange={props.onCardBusy}
+          onFilesChange={setCardFiles}
+        />
+
+        <LoadCsv
+          connected={connected}
+          busy={busy !== null}
+          config={config}
+          cardFiles={cardFiles}
+          onBusyChange={props.onCardBusy}
+          onResult={props.onResult}
+        />
       </div>
 
-      {error && (
-        <div className="field">
+      <div className="sidebar-footer">
+        <div className="actions">
+          <button
+            className="btn block lg"
+            disabled={!connected || busy !== null}
+            onClick={props.onPrepare}
+          >
+            {busy === "prepare" ? "Preparing…" : "① Prepare"}
+          </button>
+          <button
+            className="btn primary block lg"
+            disabled={!connected || !prepared || busy !== null}
+            onClick={props.onCapture}
+          >
+            {busy === "capture" ? "Capturing…" : "② Arm capture"}
+          </button>
+        </div>
+
+        {error && (
           <span className="hint err" style={{ color: "var(--danger)" }}>
             {error}
           </span>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -214,11 +243,13 @@ function NumberInput({
     if (!editing.current) setText(String(value));
   }, [value]);
 
+  // A plain text box (not type="number") so it carries no spinner arrows, matching the
+  // frequency field.
   return (
     <input
-      type="number"
-      min={min}
-      max={max}
+      className="slider-num"
+      type="text"
+      inputMode="numeric"
       value={text}
       onFocus={() => (editing.current = true)}
       onBlur={() => {
@@ -352,7 +383,7 @@ function FrequencyInput({ hz, onChange }: { hz: number; onChange: (hz: number) =
         onChange={(e) => handleText(e.target.value)}
         style={{ flex: 1 }}
       />
-      <select value={unit} onChange={(e) => setUnit(e.target.value)} style={{ width: 66, flexShrink: 0 }}>
+      <select value={unit} onChange={(e) => setUnit(e.target.value)} style={{ width: 70, flexShrink: 0 }}>
         <option>Hz</option>
         <option>kHz</option>
         <option>MHz</option>

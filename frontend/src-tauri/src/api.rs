@@ -17,16 +17,27 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
-use mso5202d::control::{self, Context, CsvSource, ProgressEvent, ProgressSink};
+use mso5202d::control::{self, Context, CsvSource, Op, ProgressEvent, ProgressSink};
 use mso5202d::decoder::{self, i2c, spi, uart, Event, Kind};
 use mso5202d::settings::{StoreDepth, TB_TO_NS};
 use mso5202d::{waveform, CaptureSpec, Device};
 
-/// Application state held across commands: the open device and the last prepared config.
+/// Application state held across commands: the open device, the last prepared config, and
+/// the traces currently on screen.
 #[derive(Default)]
 pub struct AppState {
     device: Mutex<Option<Device>>,
     prepared: Mutex<Option<CaptureConfig>>,
+    /// The parsed records behind the current plot, kept so the decoder can be re-run against
+    /// them when a decode setting changes — no re-capture, and no shipping megabytes of
+    /// samples back through the IPC boundary just to annotate them differently.
+    traces: Mutex<Option<LoadedTraces>>,
+}
+
+/// The records currently plotted, retained for re-decoding.
+struct LoadedTraces {
+    parsed: Vec<(u8, waveform::WaveformCsv)>,
+    sample_interval_s: f64,
 }
 
 // --- data the UI sends and receives -----------------------------------------
@@ -57,6 +68,38 @@ pub struct CaptureConfig {
 pub struct ScopeStatus {
     pub connected: bool,
     pub location: Option<String>,
+}
+
+/// A waveform CSV sitting on the scope's memory card.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardFile {
+    pub name: String,
+    /// Size in bytes as the card reports it.
+    pub size: u64,
+}
+
+/// One CSV to plot, and the channel it becomes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvSlot {
+    /// Channel this file is plotted as: 1 or 2.
+    pub channel: u8,
+    /// `"card"` — a filename on the scope's card, fetched over USB; `"local"` — a path on
+    /// this machine, read straight off disk.
+    pub source: String,
+    /// The card filename or the local path, per `source`.
+    pub value: String,
+}
+
+/// A card file after it has been pulled onto this machine.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadedFile {
+    pub name: String,
+    /// Absolute path it was written to on the host.
+    pub path: String,
+    pub bytes: u64,
 }
 
 /// One captured channel, ready to plot.
@@ -233,8 +276,211 @@ pub async fn capture(
     control::capture::capture(&context, &spec).map_err(|e| e.to_string())?;
 
     // Bind so the `Ref` from `outputs()` drops before the local borrows it depends on.
-    let result = build_result(&context.outputs(), &config);
-    result
+    let parsed = parse_outputs(&context.outputs())?;
+    retain_and_build(&state, parsed, &config)
+}
+
+// --- memory card --------------------------------------------------------------
+
+/// Fallback location when the caller did not pick one (the UI normally supplies a path from
+/// a native save dialog).
+fn download_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join("openmso5202D")
+}
+
+/// The exported waveform CSVs currently on the scope's card.
+#[tauri::command]
+pub async fn list_card_files(state: State<'_, AppState>) -> Result<Vec<CardFile>, String> {
+    let guard = state.device.lock().unwrap();
+    let device = guard.as_ref().ok_or("scope not connected")?;
+    let entries = device
+        .list_dir(control::CARD_PATH)
+        .map_err(|e| e.to_string())?;
+    Ok(control::csv::wavedata_files(&entries)
+        .into_iter()
+        .map(|file| CardFile {
+            name: file.name,
+            size: file.size,
+        })
+        .collect())
+}
+
+/// Pull the named CSVs off the card onto this machine.
+///
+/// `dest` is what the UI's native dialog returned: for a **single** file the full target
+/// path (so the user names it where they like), for **several** the directory to fill. With
+/// no `dest` it falls back to [`download_dir`].
+///
+/// Streams `card:progress` so a multi-megabyte deep export (512 K ≈ 7.7 MB, 1 M ≈ 15 MB)
+/// shows movement rather than appearing to hang. `async` so the transfer runs off the UI
+/// thread.
+#[tauri::command]
+pub async fn download_card_files(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    names: Vec<String>,
+    dest: Option<String>,
+) -> Result<Vec<DownloadedFile>, String> {
+    let guard = state.device.lock().unwrap();
+    let device = guard.as_ref().ok_or("scope not connected")?;
+
+    // One file + a destination means "save exactly here"; anything else treats it as a
+    // directory to drop the files into under their own names.
+    let chosen = dest.map(std::path::PathBuf::from);
+    let single_target = chosen.clone().filter(|_| names.len() == 1);
+    let dir = match (&single_target, &chosen) {
+        (Some(path), _) => path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(download_dir),
+        (None, Some(path)) => path.clone(),
+        (None, None) => download_dir(),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    // Sizes up front so progress can be reported against a real total.
+    let listing = device
+        .list_dir(control::CARD_PATH)
+        .map_err(|e| e.to_string())?;
+    let size_of = |name: &str| -> u64 {
+        listing
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.size)
+            .unwrap_or(0)
+    };
+
+    let mut saved = Vec::new();
+    for (index, name) in names.iter().enumerate() {
+        let expected = size_of(name);
+        let remote = format!("{}/{name}", control::CARD_PATH);
+        let label = format!("Downloading {name}");
+        let data = device
+            .download_with(&remote, |done| {
+                let _ = app.emit(
+                    "card:progress",
+                    ProgressPayload {
+                        index,
+                        total: names.len(),
+                        label: label.clone(),
+                        state: "advanced".into(),
+                        fraction: if expected > 0 {
+                            (index as f32 + done as f32 / expected as f32) / names.len() as f32
+                        } else {
+                            index as f32 / names.len() as f32
+                        },
+                        detail: Some(format!("{done}/{expected} B")),
+                    },
+                );
+            })
+            .map_err(|e| format!("{name}: {e}"))?;
+
+        let path = single_target.clone().unwrap_or_else(|| dir.join(name));
+        std::fs::write(&path, &data).map_err(|e| format!("{}: {e}", path.display()))?;
+        saved.push(DownloadedFile {
+            name: name.clone(),
+            path: path.display().to_string(),
+            bytes: data.len() as u64,
+        });
+    }
+    Ok(saved)
+}
+
+/// Fetch the named CSVs off the card and return them as a plottable result.
+///
+/// Each file holds **one** channel and nothing in it says which, so they are assigned to
+/// channels **explicitly** — nothing in a CSV says which channel it came from, so the caller
+/// states it. That is what makes a saved SPI/I²C pair decodable after the fact.
+#[tauri::command]
+pub async fn load_csvs(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    slots: Vec<CsvSlot>,
+    config: CaptureConfig,
+) -> Result<CaptureResult, String> {
+    if slots.is_empty() {
+        return Err("choose a file to load".into());
+    }
+
+    // Local files need no instrument at all, so the device lock is only taken when a card
+    // file is actually being fetched — saved captures can be reviewed with the scope unplugged.
+    let needs_scope = slots.iter().any(|slot| slot.source == "card");
+    let guard = needs_scope.then(|| state.device.lock().unwrap());
+    let device = match &guard {
+        Some(held) => Some(held.as_ref().ok_or("scope not connected")?),
+        None => None,
+    };
+
+    // Sizes up front, so a card transfer can report real progress.
+    let listing = match device {
+        Some(dev) => dev
+            .list_dir(control::CARD_PATH)
+            .map_err(|e| e.to_string())?,
+        None => Vec::new(),
+    };
+
+    let total = slots.len();
+    let mut parsed = Vec::new();
+    for (index, slot) in slots.iter().enumerate() {
+        let text = match slot.source.as_str() {
+            "local" => std::fs::read_to_string(&slot.value)
+                .map_err(|e| format!("{}: {e}", slot.value))?,
+            "card" => {
+                let dev = device.ok_or("scope not connected")?;
+                let expected = listing
+                    .iter()
+                    .find(|f| f.name == slot.value)
+                    .map(|f| f.size)
+                    .unwrap_or(0);
+                let label = format!("Loading {}", slot.value);
+                let data = dev
+                    .download_with(&format!("{}/{}", control::CARD_PATH, slot.value), |done| {
+                        let _ = app.emit(
+                            "card:progress",
+                            ProgressPayload {
+                                index,
+                                total,
+                                label: label.clone(),
+                                state: "advanced".into(),
+                                fraction: if expected > 0 {
+                                    (index as f32 + done as f32 / expected as f32) / total as f32
+                                } else {
+                                    index as f32 / total as f32
+                                },
+                                detail: Some(format!("{done}/{expected} B")),
+                            },
+                        );
+                    })
+                    .map_err(|e| format!("{}: {e}", slot.value))?;
+                String::from_utf8_lossy(&data).into_owned()
+            }
+            other => return Err(format!("unknown source '{other}'")),
+        };
+
+        let csv = waveform::parse_csv(&text).map_err(|e| format!("{}: {e}", slot.value))?;
+        parsed.push((slot.channel, csv));
+    }
+    retain_and_build(&state, parsed, &config)
+}
+
+/// Delete **every** exported waveform CSV from the card.
+///
+/// Goes through the front-panel delete key (never a shell `rm`), and is irreversible — it
+/// clears all `WaveData*.csv`, not just files this session made.
+#[tauri::command]
+pub async fn clear_card_files(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let guard = state.device.lock().unwrap();
+    let device = guard.as_ref().ok_or("scope not connected")?;
+    let sink = EmitProgress {
+        app: &app,
+        event_name: "card:progress",
+    };
+    let context = Context::new(device, &sink);
+    control::execute(&context, &[Op::ClearCard]).map_err(|e| e.to_string())
 }
 
 // --- plan construction -------------------------------------------------------
@@ -291,12 +537,10 @@ impl CaptureConfig {
 
 // --- decoding ----------------------------------------------------------------
 
-/// Turn the downloaded records into plottable traces plus a decode.
-fn build_result(
+/// Parse every downloaded channel of a capture into volts + its sample interval.
+fn parse_outputs(
     outputs: &control::Outputs,
-    config: &CaptureConfig,
-) -> Result<CaptureResult, String> {
-    // Parse every downloaded channel into volts + its sample interval.
+) -> Result<Vec<(u8, waveform::WaveformCsv)>, String> {
     let mut parsed: Vec<(u8, waveform::WaveformCsv)> = Vec::new();
     for file in &outputs.files {
         let Some(bytes) = &file.data else { continue };
@@ -305,8 +549,49 @@ fn build_result(
         let csv = waveform::parse_csv(&text).map_err(|e| e.to_string())?;
         parsed.push((channel, csv));
     }
+    Ok(parsed)
+}
+
+/// Build the plottable result and **retain the records**, so a later change to a decode
+/// setting can re-annotate them ([`redecode`]) without capturing or transferring again.
+fn retain_and_build(
+    state: &State<'_, AppState>,
+    parsed: Vec<(u8, waveform::WaveformCsv)>,
+    config: &CaptureConfig,
+) -> Result<CaptureResult, String> {
+    let result = result_from_parsed(&parsed, config)?;
+    *state.traces.lock().unwrap() = Some(LoadedTraces {
+        parsed,
+        sample_interval_s: result.sample_interval_s,
+    });
+    Ok(result)
+}
+
+/// Re-run the decoder over the traces already on screen.
+///
+/// This is what makes the protocol and line-assignment controls live: the samples never move,
+/// only the annotation, so switching UART→SPI or swapping clock/data re-decodes instantly
+/// instead of demanding another capture.
+#[tauri::command]
+pub async fn redecode(
+    state: State<'_, AppState>,
+    config: CaptureConfig,
+) -> Result<Vec<DecodedItem>, String> {
+    let guard = state.traces.lock().unwrap();
+    let loaded = guard.as_ref().ok_or("nothing loaded to decode")?;
+    Ok(decode(&config, &loaded.parsed, loaded.sample_interval_s))
+}
+
+/// Assemble the plottable result from already-parsed per-channel records.
+///
+/// Shared by a live capture and by viewing CSVs pulled off the card, so both go through the
+/// same scaling and decode path.
+fn result_from_parsed(
+    parsed: &[(u8, waveform::WaveformCsv)],
+    config: &CaptureConfig,
+) -> Result<CaptureResult, String> {
     if parsed.is_empty() {
-        return Err("capture produced no data".into());
+        return Err("no data to plot".into());
     }
 
     let sample_interval_s = parsed
@@ -327,7 +612,7 @@ fn build_result(
         })
         .collect();
 
-    let decoded = decode(config, &parsed, sample_interval_s);
+    let decoded = decode(config, parsed, sample_interval_s);
     Ok(CaptureResult {
         sample_interval_s,
         channels,

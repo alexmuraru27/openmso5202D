@@ -398,27 +398,45 @@ impl Device {
         let mut request = vec![selector::SHELL];
         request.extend_from_slice(wrapped.as_bytes());
 
-        // Replies can lag one command behind, so re-issue until we see our own marker.
-        // Safe because the guard keeps commands read-only, hence repeatable.
+        // Re-issue until we see our own marker. Two different things are being ridden out
+        // here, and BOTH have to be retried rather than propagated:
+        //
+        //  * the reply can lag one command behind (wrong marker), and
+        //  * the exchange can fail outright because a leftover **data-channel** frame was
+        //    read where the `0x43` reply belonged (`bad leader 0x53`) — a big `0x53`
+        //    transfer just before this, like a multi-megabyte file read, can leave one
+        //    queued.
+        //
+        // The resync at the top of each attempt is what clears either, so a transport error
+        // must not short-circuit the loop. Re-sending is safe because the guard keeps
+        // commands read-only, hence repeatable.
         let mut last = String::new();
+        let mut failure: Option<Error> = None;
         for _ in 0..SHELL_ATTEMPTS {
             self.transport.resync(); // drop any stale reply still queued
-            last = self.shell_exchange(&request)?;
-            if let Some(output) = shell::output_before_marker(&last, &marker) {
-                let output = output.to_string();
-                // Drain any trailing/duplicate 0x43 reply the scope is still dribbling before
-                // handing back to the data channel — otherwise the next 0x53 transact reads a
-                // stale command-channel frame (the `bad leader 0x43` desync). The cross-channel
-                // boundary is exactly where the working corpus tool resyncs too.
-                self.transport.resync();
-                return Ok(output);
+            match self.shell_exchange(&request) {
+                Ok(text) => {
+                    last = text;
+                    if let Some(output) = shell::output_before_marker(&last, &marker) {
+                        let output = output.to_string();
+                        // Drain any trailing/duplicate 0x43 reply the scope is still
+                        // dribbling before handing back to the data channel — otherwise the
+                        // next 0x53 transact reads a stale command-channel frame (the
+                        // mirror-image `bad leader 0x43` desync).
+                        self.transport.resync();
+                        return Ok(output);
+                    }
+                }
+                Err(e) => failure = Some(e),
             }
             thread::sleep(Duration::from_millis(50));
         }
-        Err(Error::Unexpected(format!(
-            "shell reply never carried marker {marker} (last {} bytes)",
-            last.len()
-        )))
+        Err(failure.unwrap_or_else(|| {
+            Error::Unexpected(format!(
+                "shell reply never carried marker {marker} (last {} bytes)",
+                last.len()
+            ))
+        }))
     }
 
     /// One command-channel exchange: send, then gather frames until the scope goes quiet.

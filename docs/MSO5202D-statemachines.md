@@ -525,6 +525,15 @@ command behind), and **resyncs after** the marker is found so no trailing `0x43`
 for the next data-channel read (§8.4). Keep commands short and read-only — a stalled command
 trips the watchdog reboot (§7).
 
+**That retry loop must absorb transport failures too, not just a wrong marker.** Two different
+faults land here: a reply that lags one command behind, and an exchange that fails outright
+because a leftover **data-channel** frame was read where the `0x43` reply belonged
+(`bad leader 0x53`) — which a big `0x53` transfer just beforehand, such as a multi-megabyte
+file read, can leave queued. The resync at the top of each attempt clears either, so a
+transport error must be **retried, not propagated**: returning it immediately skips the very
+resync that would have fixed it, and the command fails on a condition the next attempt would
+have ridden out. `[verified 2026-07-21]`
+
 ### 8.12 Wire logging for diffing against the reference driver
 
 Set **`MSO_USB_LOG=1`** (or `=stderr`, or `=/path/to/file`) to log every OUT frame, IN chunk,

@@ -14,9 +14,12 @@
       {
         "label": "main",
         "title": "openmso5202D",
-        "width": 1200,
-        "height": 800,
-        "resizable": true
+        "width": 1600,
+        "height": 1000,
+        "resizable": true,
+        "minWidth": 1000,
+        "minHeight": 1000,
+        "center": true
       }
     ],
     "security": {

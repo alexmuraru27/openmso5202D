@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   capture,
   connectScope,
   onProgress,
   prepare,
+  redecode,
   scopeStatus,
   type CaptureConfig,
   type CaptureResult,
@@ -27,7 +28,7 @@ export function App() {
   const [status, setStatus] = useState<ScopeStatus>({ connected: false });
   const [config, setConfig] = useState<CaptureConfig>(DEFAULT_CONFIG);
   const [prepared, setPrepared] = useState(false);
-  const [busy, setBusy] = useState<null | "connect" | "prepare" | "capture">(null);
+  const [busy, setBusy] = useState<null | "connect" | "prepare" | "capture" | "card">(null);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CaptureResult | null>(null);
@@ -37,12 +38,70 @@ export function App() {
     scopeStatus().then(setStatus).catch(() => {});
   }, []);
 
-  // Changing the configuration invalidates a prior prepare — the scope must be set up
-  // again before the next capture reflects the new settings.
+  // Card work streams its own progress. Subscribed for the app's lifetime rather than per
+  // operation, because a card job can start from the panel without going through here.
+  useEffect(() => {
+    const pending = onProgress("card:progress", setProgress);
+    return () => {
+      pending.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  // Stable identities: CardFiles keys effects off these, so fresh closures each render
+  // would re-fire its auto-listing continuously (and stomp `busy` back to null mid-run).
+  const setCardBusy = useCallback((on: boolean) => {
+    setBusy((prev) => (on ? "card" : prev === "card" ? null : prev));
+    if (on) setProgress(null);
+  }, []);
+
+  // Changing an ACQUISITION setting invalidates a prior prepare — the scope must be set up
+  // again before the next capture reflects it. Decode-only settings (protocol, line
+  // assignment) change nothing on the instrument, so they must NOT force a re-prepare;
+  // they just re-annotate what is already on screen.
   const updateConfig = useCallback((patch: Partial<CaptureConfig>) => {
     setConfig((prev) => ({ ...prev, ...patch }));
-    setPrepared(false);
+    const decodeOnly = Object.keys(patch).every((key) =>
+      (["protocol", "clockChannel", "dataChannel"] as string[]).includes(key),
+    );
+    if (!decodeOnly) setPrepared(false);
   }, []);
+
+  // --- live decode ---------------------------------------------------------
+  // Every decode-affecting setting re-runs the decoder against the traces already loaded,
+  // so the annotation follows the controls immediately instead of waiting for a capture.
+  // `maxFreqHz` is in here because it feeds the UART decoder's baud hint.
+  const decodeKey = [
+    config.protocol,
+    config.clockChannel,
+    config.dataChannel,
+    config.maxFreqHz,
+  ].join("|");
+  const decodeKeyRef = useRef(decodeKey);
+  decodeKeyRef.current = decodeKey;
+  // What the annotation on screen was produced with, so a fresh capture (already decoded by
+  // the backend) does not trigger a redundant second decode.
+  const decodedWith = useRef<string | null>(null);
+
+  const applyResult = useCallback((next: CaptureResult) => {
+    setResult(next);
+    decodedWith.current = decodeKeyRef.current;
+  }, []);
+
+  useEffect(() => {
+    if (!result || decodedWith.current === decodeKey) return;
+    decodedWith.current = decodeKey;
+    let cancelled = false;
+    redecode(config)
+      .then((decoded) => {
+        if (!cancelled) setResult((prev) => (prev ? { ...prev, decoded } : prev));
+      })
+      .catch((e) => setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+    // `config` is read whole but only the decode fields should re-trigger this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [decodeKey, result]);
 
   const doConnect = useCallback(async () => {
     setBusy("connect");
@@ -79,14 +138,14 @@ export function App() {
     setProgress(null);
     const unlisten = await onProgress("capture:progress", setProgress);
     try {
-      setResult(await capture());
+      applyResult(await capture());
     } catch (e) {
       setError(String(e));
     } finally {
       unlisten();
       setBusy(null);
     }
-  }, []);
+  }, [applyResult]);
 
   return (
     <div className="app">
@@ -126,6 +185,8 @@ export function App() {
         error={error}
         onPrepare={doPrepare}
         onCapture={doCapture}
+        onCardBusy={setCardBusy}
+        onResult={applyResult}
       />
 
       <div className="main">
@@ -140,13 +201,20 @@ function TopProgress({
   busy,
   progress,
 }: {
-  busy: null | "connect" | "prepare" | "capture";
+  busy: null | "connect" | "prepare" | "capture" | "card";
   progress: ProgressPayload | null;
 }) {
   if (!busy) return <div className="spacer" />;
   const failed = progress?.state === "failed";
   const pct = Math.round((progress?.fraction ?? 0) * 100);
-  const phase = busy === "prepare" ? "Preparing" : busy === "capture" ? "Capturing" : "Connecting";
+  const phase =
+    busy === "prepare"
+      ? "Preparing"
+      : busy === "capture"
+        ? "Capturing"
+        : busy === "card"
+          ? "Working on card"
+          : "Connecting";
   return (
     <div className="topbar-progress">
       <span className="label">{progress?.label ?? `${phase}…`}</span>

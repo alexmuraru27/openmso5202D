@@ -107,11 +107,35 @@ body {
   grid-area: sidebar;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  /* A grid item defaults to min-height:auto, which refuses to shrink below its content —
+     so the row would grow past the viewport and push the actions off screen instead of
+     scrolling. This is what lets the inner area scroll. */
+  min-height: 0;
+}
+
+/* The settings scroll... */
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px 16px 28px;
+  padding: 16px 16px 8px;
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+/* ...while the actions stay pinned to the bottom, always reachable however many
+   protocol line-pickers the sidebar grows. */
+.sidebar-footer {
+  flex: 0 0 auto;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .main {
@@ -259,8 +283,14 @@ body {
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
 }
-.segmented button:hover {
+.segmented button:hover:not(:disabled) {
   color: var(--text);
+}
+/* A segmented button sets its own colour, so it needs an explicit disabled look — otherwise
+   an unavailable option (1M with two channels on) reads as selectable. */
+.segmented button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .segmented button.active {
   background: var(--bg-elevated);
@@ -331,7 +361,7 @@ select option {
   align-items: center;
   gap: 12px;
 }
-.slider-row input[type="number"] {
+.slider-row .slider-num {
   width: 74px;
   flex: 0 0 auto;
   padding: 6px 8px;
@@ -433,6 +463,133 @@ input[type="range"]::-moz-range-thumb {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* --- SD card file list ---------------------------------------------------- */
+
+.card-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-2);
+  max-height: 148px;
+  overflow-y: auto;
+}
+.card-empty {
+  padding: 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.card-row:last-child {
+  border-bottom: 0;
+}
+.card-row:hover {
+  color: var(--text);
+}
+.card-row.on {
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.card-row .ch {
+  flex: 0 0 26px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.card-row .nm {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-row .sz {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.card-actions {
+  display: flex;
+  gap: 6px;
+}
+.card-actions .btn {
+  flex: 1;
+  padding: 6px 4px;
+  font-size: 11px;
+}
+/* --- Load-CSV channel slots ----------------------------------------------- */
+
+.slot-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.slot-row select {
+  flex: 1;
+  min-width: 0;
+}
+.slot-row .btn {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  font-size: 11px;
+}
+.slot-chosen {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  color: var(--text-dim);
+  min-width: 0;
+}
+.slot-chosen .src {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.slot-chosen .val {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slot-chosen .clear {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.slot-chosen .clear:hover {
+  color: var(--danger);
+}
+.btn.danger {
+  border-color: rgba(239, 90, 111, 0.4);
+  color: #ef5a6f;
+}
+.btn.danger:hover:not(:disabled) {
+  background: rgba(239, 90, 111, 0.12);
 }
 
 /* --- progress ------------------------------------------------------------- */

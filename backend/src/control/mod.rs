@@ -196,7 +196,7 @@ fn expected_csv_bytes(depth: StoreDepth) -> u64 {
 const BANNER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Where the scope mounts the removable card.
-const CARD_PATH: &str = "/mnt/udisk";
+pub const CARD_PATH: &str = "/mnt/udisk";
 
 /// A file a plan exported and, once downloaded, its contents.
 #[derive(Debug, Clone)]
