@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CaptureResult, DecodedItem } from "../api";
 import { COLORS, channelColor } from "../theme";
 
@@ -9,16 +9,38 @@ const DECODE_STRIP = 32; // height of the per-lane decode (pill) strip — two l
 const HEX_FONT = "600 11px ui-monospace, monospace"; // top line: 0x-prefixed hex
 const DEC_FONT = "500 10px ui-monospace, monospace"; // bottom line: decimal
 
+/** Pixels of pointer movement below which a press counts as a click, not a drag. */
+const CLICK_SLOP = 4;
+
+/** How close the pointer must be to a cursor's dot to pick it up. */
+const GRAB_RADIUS = 10;
+
 /** A time window in seconds, over the record's absolute sample time. */
 interface View {
   t0: number;
   t1: number;
 }
 
+/** A measurement cursor: a point on a trace, in record time and volts. */
+interface Cursor {
+  /** Time within the record, seconds. */
+  t: number;
+  /** The trace's value there, volts. */
+  v: number;
+  /** Which lane it was placed on. */
+  lane: number;
+}
+
 export function WaveformView({ result }: { result: CaptureResult | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ t0: 0, t1: 1 });
-  const dragRef = useRef<{ x: number } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; moved: boolean; grabbed: number | null } | null>(
+    null,
+  );
+  // Cursors live in both a ref (the canvas draws from it) and state (the readout renders
+  // from it), so a placement updates the picture and the numbers together.
+  const cursorsRef = useRef<Cursor[]>([]);
+  const [cursors, setCursors] = useState<Cursor[]>([]);
 
   // Per-channel vertical scale + the trigger-centred time origin, recomputed per capture.
   const model = useMemo(() => buildModel(result), [result]);
@@ -33,7 +55,14 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
   const draw = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    render(canvas, model, viewRef.current);
+    render(canvas, model, viewRef.current, cursorsRef.current);
+  };
+
+  /** Place/replace cursors, keeping the canvas and the readout in step. */
+  const putCursors = (next: Cursor[]) => {
+    cursorsRef.current = next;
+    setCursors(next);
+    draw();
   };
 
   // Keep the canvas backing store matched to its display size.
@@ -76,16 +105,80 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
     draw();
   };
 
+  /** Record time at a canvas x, and the trace-snapped cursor for a lane at that time. */
+  const cursorAt = (x: number, rect: DOMRect, laneIndex: number): Cursor | null => {
+    const view = viewRef.current;
+    const t = Math.min(
+      model.duration,
+      Math.max(0, view.t0 + ((x - GUTTER) / (rect.width - GUTTER)) * (view.t1 - view.t0)),
+    );
+    const lane = model.lanes[laneIndex];
+    if (!lane) return null;
+    const index = Math.min(lane.volts.length - 1, Math.max(0, Math.round(t / model.dt)));
+    if (!Number.isFinite(lane.volts[index])) return null;
+    return { t, v: lane.volts[index], lane: laneIndex };
+  };
+
+  /** Index of a cursor whose dot is within the grab radius of (x, y), if any. */
+  const cursorNear = (x: number, y: number, rect: DOMRect): number | null => {
+    const view = viewRef.current;
+    const plotW = rect.width - GUTTER;
+    const laneH = (rect.height - AXIS) / Math.max(1, model.lanes.length);
+    // Last placed wins, so the cursor drawn on top is the one you grab.
+    for (let i = cursorsRef.current.length - 1; i >= 0; i--) {
+      const cursor = cursorsRef.current[i];
+      const lane = model.lanes[cursor.lane];
+      if (!lane) continue;
+      const cx = GUTTER + ((cursor.t - view.t0) / (view.t1 - view.t0)) * plotW;
+      const { bandY, bandH } = laneBand(lane, AXIS + cursor.lane * laneH, laneH);
+      const cy = voltToY(lane, bandY, bandH, cursor.v);
+      if (Math.hypot(x - cx, y - cy) <= GRAB_RADIUS) return i;
+    }
+    return null;
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    dragRef.current = { x: e.clientX };
-    canvasRef.current?.classList.add("dragging");
+    const rect = canvasRef.current!.getBoundingClientRect();
+    // Grabbing a cursor takes precedence over panning; anywhere else pans (or, without
+    // movement, places a new cursor on release).
+    const grabbed = cursorNear(e.clientX - rect.left, e.clientY - rect.top, rect);
+    dragRef.current = { x: e.clientX, y: e.clientY, moved: false, grabbed };
+    canvasRef.current?.classList.add(grabbed === null ? "dragging" : "grabbing");
   };
+
   const onPointerMove = (e: React.PointerEvent) => {
     const drag = dragRef.current;
-    if (!drag || !model.duration) return;
-    const canvas = canvasRef.current!;
-    const plotW = canvas.getBoundingClientRect().width - GUTTER;
+    const canvas = canvasRef.current;
+    if (!canvas || !model.duration) return;
+    const rect = canvas.getBoundingClientRect();
+
+    if (!drag) {
+      // Idle hover: show that a cursor can be picked up.
+      const over = cursorNear(e.clientX - rect.left, e.clientY - rect.top, rect) !== null;
+      canvas.classList.toggle("over-cursor", over);
+      return;
+    }
+
+    if (Math.abs(e.clientX - drag.x) > CLICK_SLOP || Math.abs(e.clientY - drag.y) > CLICK_SLOP) {
+      drag.moved = true;
+    }
+
+    if (drag.grabbed !== null) {
+      // Move the grabbed cursor along time; its voltage keeps following the trace, and it
+      // stays in its own lane so a slight vertical wobble cannot fling it to the other one.
+      const held = cursorsRef.current[drag.grabbed];
+      const next = cursorAt(e.clientX - rect.left, rect, held.lane);
+      if (next) {
+        const all = [...cursorsRef.current];
+        all[drag.grabbed] = next;
+        putCursors(all);
+      }
+      drag.x = e.clientX;
+      return;
+    }
+
+    const plotW = rect.width - GUTTER;
     const v = viewRef.current;
     const span = v.t1 - v.t0;
     const deltaT = ((drag.x - e.clientX) / plotW) * span;
@@ -93,9 +186,31 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
     drag.x = e.clientX;
     draw();
   };
+
+  /** A press that did not turn into a drag places a measurement cursor. */
+  const onPointerUp = (e: React.PointerEvent) => {
+    const drag = dragRef.current;
+    endDrag();
+    // Dragging an existing cursor is a move, never a placement.
+    if (!drag || drag.moved || drag.grabbed !== null || model.lanes.length === 0) return;
+
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (x < GUTTER || y < AXIS) return;
+
+    const laneH = (rect.height - AXIS) / model.lanes.length;
+    const laneIndex = Math.min(model.lanes.length - 1, Math.max(0, Math.floor((y - AXIS) / laneH)));
+    const placed = cursorAt(x, rect, laneIndex);
+    if (!placed) return;
+    // Two cursors at a time — a third starts a fresh pair.
+    putCursors(cursorsRef.current.length >= 2 ? [placed] : [...cursorsRef.current, placed]);
+  };
+
   const endDrag = () => {
     dragRef.current = null;
     canvasRef.current?.classList.remove("dragging");
+    canvasRef.current?.classList.remove("grabbing");
   };
   const resetView = () => {
     viewRef.current = { t0: 0, t1: Math.max(model.duration, 1e-9) };
@@ -111,21 +226,64 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
         </div>
       )}
       <div className="plot-toolbar">
+        {cursors.length > 0 && (
+          <button className="icon-btn" title="Clear cursors" onClick={() => putCursors([])}>
+            ✕
+          </button>
+        )}
         <button className="icon-btn" title="Fit to record" onClick={resetView}>
           ⤢
         </button>
       </div>
+      {result && <Measurements cursors={cursors} model={model} />}
       <canvas
         ref={canvasRef}
         className="plot-canvas"
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
+        onPointerUp={onPointerUp}
         onPointerCancel={endDrag}
         onDoubleClick={resetView}
       />
     </>
+  );
+}
+
+/** The cursor readout: each point, and the differences between them. */
+function Measurements({ cursors, model }: { cursors: Cursor[]; model: Model }) {
+  if (cursors.length === 0) {
+    return <div className="measure hint-only">Click the trace to measure · click again for Δ</div>;
+  }
+  const [a, b] = cursors;
+  const label = (c: Cursor) => model.lanes[c.lane]?.label ?? `CH${c.lane + 1}`;
+  return (
+    <div className="measure">
+      <div className="row">
+        <span className="tag a">A</span>
+        <span className="who">{label(a)}</span>
+        <span className="val">{formatSeconds(a.t - model.triggerS)}</span>
+        <span className="val">{formatVolts(a.v)}</span>
+      </div>
+      {b && (
+        <>
+          <div className="row">
+            <span className="tag b">B</span>
+            <span className="who">{label(b)}</span>
+            <span className="val">{formatSeconds(b.t - model.triggerS)}</span>
+            <span className="val">{formatVolts(b.v)}</span>
+          </div>
+          <div className="row delta">
+            <span className="tag">Δ</span>
+            <span className="who">{/* frequency implied by the interval */}
+              {Math.abs(b.t - a.t) > 0 ? `${formatHz(1 / Math.abs(b.t - a.t))}` : "—"}
+            </span>
+            <span className="val">{formatSeconds(Math.abs(b.t - a.t), true)}</span>
+            <span className="val">{formatVolts(b.v - a.v, true)}</span>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -183,7 +341,7 @@ function buildModel(result: CaptureResult | null): Model {
 
 // --- rendering --------------------------------------------------------------
 
-function render(canvas: HTMLCanvasElement, model: Model, view: View) {
+function render(canvas: HTMLCanvasElement, model: Model, view: View, cursors: Cursor[]) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   const W = Math.max(1, Math.floor(rect.width));
@@ -224,7 +382,7 @@ function render(canvas: HTMLCanvasElement, model: Model, view: View) {
   const laneH = plotH / model.lanes.length;
   model.lanes.forEach((lane, i) => {
     const y0 = plotY + i * laneH;
-    drawLane(ctx, lane, model, view, timeToX, plotX, plotW, y0, laneH);
+    drawLane(ctx, lane, model, view, timeToX, plotX, plotW, y0, laneH, cursors, i);
   });
 }
 
@@ -285,6 +443,8 @@ function drawLane(
   plotW: number,
   y0: number,
   laneH: number,
+  cursors: Cursor[],
+  laneIndex: number,
 ) {
   // Separator + gutter label.
   ctx.strokeStyle = COLORS.laneBorder;
@@ -307,11 +467,10 @@ function drawLane(
   }
 
   // Signal band: leave room for a decode strip at the top when this lane has a decode.
+  // Shared with the pointer hit-test, so a cursor is grabbed exactly where it is drawn.
+  const { bandY, bandH } = laneBand(lane, y0, laneH);
   const decodeStrip = lane.decoded.length ? DECODE_STRIP : 0;
-  const bandY = y0 + LANE_PAD + decodeStrip;
-  const bandH = laneH - LANE_PAD * 2 - decodeStrip;
-  const yOf = (v: number) =>
-    bandY + bandH - ((v - lane.vMin) / (lane.vMax - lane.vMin)) * bandH;
+  const yOf = (v: number) => voltToY(lane, bandY, bandH, v);
 
   // H / L rails.
   ctx.strokeStyle = COLORS.rail;
@@ -324,11 +483,35 @@ function drawLane(
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
+
+  // Voltage grid: 1-2-5 steps across the lane's range, labelled in the gutter, so an analog
+  // trace can be read off quantitatively rather than only as a shape.
+  const vStep = niceStep(lane.vMax - lane.vMin, bandH / 34);
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textBaseline = "middle";
+  for (let v = Math.ceil(lane.vMin / vStep) * vStep; v <= lane.vMax; v += vStep) {
+    const y = yOf(v);
+    ctx.strokeStyle = COLORS.grid;
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(plotX, y);
+    ctx.lineTo(plotX + plotW, y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = COLORS.axisText;
+    ctx.textAlign = "right";
+    ctx.fillText(formatVolts(v), plotX - 6, y);
+  }
+
+  // The lane's full swing, for a quick read of the signal's amplitude.
   ctx.fillStyle = COLORS.axisText;
   ctx.font = "10px ui-monospace, monospace";
   ctx.textAlign = "left";
-  ctx.fillText("H", plotX + 3, yOf(lane.vMax) + 7);
-  ctx.fillText("L", plotX + 3, yOf(lane.vMin) - 6);
+  ctx.fillText(
+    `${formatVolts(lane.vMin)} … ${formatVolts(lane.vMax)}  pk-pk ${formatVolts(lane.vMax - lane.vMin)}`,
+    32,
+    y0 + (lane.decoded.length ? 54 : 38),
+  );
 
   // Trace: one vertical min/max segment per pixel column (fast at any depth).
   ctx.strokeStyle = lane.color;
@@ -363,6 +546,39 @@ function drawLane(
   }
   ctx.stroke();
   ctx.lineWidth = 1;
+
+  // Measurement cursors: a full-height time marker (so two lanes can be compared) plus a
+  // dot at the sampled value on the lane the cursor was placed in.
+  cursors.forEach((cursor, index) => {
+    const x = timeToX(cursor.t);
+    if (x < plotX || x > plotX + plotW) return;
+    ctx.strokeStyle = index === 0 ? COLORS.cursorA : COLORS.cursorB;
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y0 + laneH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (cursor.lane === laneIndex) {
+      const y = yOf(cursor.v);
+      ctx.beginPath();
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();               // level line, so ΔV is visible against the other cursor
+      ctx.moveTo(plotX, y);
+      ctx.lineTo(plotX + plotW, y);
+      ctx.globalAlpha = 0.45;
+      ctx.setLineDash([3, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.font = "600 10px ui-monospace, monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(index === 0 ? "A" : "B", x + 5, y - 4);
+    }
+  });
 
   // Decode strip.
   if (lane.decoded.length) {
@@ -511,6 +727,44 @@ function niceStep(span: number, targetTicks: number): number {
   const norm = raw / mag;
   const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
   return step * mag;
+}
+
+/** The signal band inside a lane — the strip the trace is actually drawn in. */
+function laneBand(lane: Lane, y0: number, laneH: number): { bandY: number; bandH: number } {
+  const decodeStrip = lane.decoded.length ? DECODE_STRIP : 0;
+  return {
+    bandY: y0 + LANE_PAD + decodeStrip,
+    bandH: laneH - LANE_PAD * 2 - decodeStrip,
+  };
+}
+
+/** Where a voltage sits vertically within a lane's band. */
+function voltToY(lane: Lane, bandY: number, bandH: number, v: number): number {
+  return bandY + bandH - ((v - lane.vMin) / (lane.vMax - lane.vMin)) * bandH;
+}
+
+/** Volts at a readable scale: `3.3 V`, `500 mV`, `-1.2 V`. */
+function formatVolts(v: number, signed = false): string {
+  const sign = signed && v > 0 ? "+" : "";
+  if (Math.abs(v) < 1) return `${sign}${(v * 1000).toFixed(0)} mV`;
+  return `${sign}${v.toFixed(2)} V`;
+}
+
+/** A duration for the readout, always with a unit. */
+function formatSeconds(s: number, signed = false): string {
+  const sign = signed ? "" : s < 0 ? "\u2212" : "+";
+  const a = Math.abs(s);
+  if (a < 1e-6) return `${sign}${(a * 1e9).toFixed(1)} ns`;
+  if (a < 1e-3) return `${sign}${(a * 1e6).toFixed(2)} \u00b5s`;
+  if (a < 1) return `${sign}${(a * 1e3).toFixed(3)} ms`;
+  return `${sign}${a.toFixed(4)} s`;
+}
+
+/** The frequency implied by an interval. */
+function formatHz(hz: number): string {
+  if (hz >= 1e6) return `${(hz / 1e6).toFixed(2)} MHz`;
+  if (hz >= 1e3) return `${(hz / 1e3).toFixed(2)} kHz`;
+  return `${hz.toFixed(1)} Hz`;
 }
 
 const TIME_UNITS: [number, string][] = [

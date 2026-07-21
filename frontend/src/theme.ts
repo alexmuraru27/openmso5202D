@@ -12,6 +12,9 @@ export const COLORS = {
   decodeInk: "#22131a",
   decodeSub: "#c0c6d2",
   cursor: "#17b8c9",
+  // Measurement cursors — two distinguishable accents so A and B read apart at a glance.
+  cursorA: "#4ade80",
+  cursorB: "#fb923c",
   // Byte-slice guides: boundary lines dropped from each decoded byte onto the waveform,
   // and a faint alternating fill so adjacent byte slices read apart.
   byteGuide: "#ffafc22f",
