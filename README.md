@@ -217,6 +217,26 @@ The full reverse-engineering record and the developer guides live in `docs/`.
 | [Rendering model](docs/MSO5202D-rendering.md) | How samples become a trace: the two sample sources, the signed-int8 byte decode, the volts and time axes, and the decoded-byte overlay. |
 | [Backend guide](docs/backend.md) | Developer guide to the `mso5202d` Rust crate: its four layers, every module, the main call chains, the binaries, and the tests. |
 | [Frontend guide](docs/frontend.md) | Developer guide to the Tauri + React app: the command/IPC surface, the state model, every component, the waveform canvas in depth, and the capture-planning maths. |
+| [Decoders](docs/decoders.md) | Reference for the UART / SPI / I²C decoders: thresholding, bit-grid recovery, each protocol's algorithm and options, and how to take a capture that decodes. |
+
+### Diagrams
+
+Editable [draw.io](https://app.diagrams.net) sources in [`docs/diagrams/`](docs/diagrams) —
+open them at [app.diagrams.net](https://app.diagrams.net) or with the VS Code Draw.io
+extension.
+
+| Diagram | Shows |
+| --- | --- |
+| [System architecture](docs/diagrams/system-architecture.drawio) | Webview ⇄ Tauri commands ⇄ driver layers ⇄ USB ⇄ instrument, with the progress channels. |
+| [Backend layers](docs/diagrams/backend-layers.drawio) | The crate's four layers module by module, and the downward-only dependency rule. |
+| [Capture state machine](docs/diagrams/capture-statemachine.drawio) | The prepare and capture plans as closed-loop flowcharts, with every guard, poll and abort path. |
+| [USB transaction](docs/diagrams/usb-transaction.drawio) | The reader-thread-before-write sequence, the retry/resync loop, and multi-frame collection. |
+| [Decoder pipeline](docs/diagrams/decoder-pipeline.drawio) | Volts → threshold → protocol decode → events → byte list and pill overlay. |
+| [UART decode](docs/diagrams/uart-decode.drawio) | The bit-grid algorithm and frame layout, with a timing illustration. |
+| [SPI decode](docs/diagrams/spi-decode.drawio) | Clock-edge selection, burst splitting and word assembly. |
+| [I²C decode](docs/diagrams/i2c-decode.drawio) | The bus state machine: START, address, ACK, data, STOP. |
+| [Trigger menu navigation](docs/diagrams/trigger-menu-navigation.drawio) | The scope's trigger menus as a navigable graph, with the softkey that performs each move. |
+| [Frontend state](docs/diagrams/frontend-state.drawio) | UI states, what invalidates a prepare, and what only re-decodes. |
 
 Alongside them, `scope_dump/` holds the raw material — the firmware filesystem dump, the
 Wireshark captures of the vendor Windows app that the protocol was decoded from, and sample
