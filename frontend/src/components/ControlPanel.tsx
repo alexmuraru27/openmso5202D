@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { CaptureConfig, CaptureResult, CardFile, Depth, Protocol } from "../api";
+import type { CaptureConfig, Depth, Protocol } from "../api";
 import { capturePlan, formatDuration } from "../timebase";
-import { CardFiles } from "./CardFiles";
-import { LoadCsv } from "./LoadCsv";
+import { Section } from "./Section";
 
 /** Bounds for the samples-per-clock control (slider and typed input share them). */
 const SPC_MIN = 4;
@@ -16,10 +15,9 @@ interface Props {
   busy: null | "connect" | "prepare" | "capture" | "card";
   onPrepare: () => void;
   onCapture: () => void;
-  /** Card operations share the USB link, so they lock the other actions while running. */
-  onCardBusy: (busy: boolean) => void;
-  /** Viewing a card file replaces the plotted traces. */
-  onResult: (result: CaptureResult) => void;
+  /** Which sections are expanded, and how to fold one. */
+  panels: Record<string, boolean>;
+  onTogglePanel: (id: string) => void;
 }
 
 const DEPTHS: Depth[] = ["4k", "40k", "512k", "1m"];
@@ -51,45 +49,49 @@ export function ControlPanel(props: Props) {
     onChange(patch);
   };
 
-  // Lifted so the Load-CSV panel offers whatever the SD panel last listed.
-  const [cardFiles, setCardFiles] = useState<CardFile[]>([]);
-
   const lines = LINES[config.protocol];
   const dualNeeded = config.protocol === "spi" || config.protocol === "i2c";
   const missingChannels = dualNeeded && config.channels.length < 2;
+  // A collapsed section still has to answer "how is this set", so each carries a summary.
+  const open = (id: string) => props.panels[id] !== false;
 
   return (
     <div className="sidebar">
       {/* Settings scroll; the actions below stay pinned so Prepare/Capture are reachable
-          however tall the panel grows (selecting SPI/I²C adds two more line pickers). */}
+          however tall the panel grows. */}
       <div className="sidebar-scroll">
-        <Acquisition config={config} onChange={onChange} toggleChannel={toggleChannel} />
+        <Section
+          title="Acquisition"
+          open={open("acquisition")}
+          onToggle={() => props.onTogglePanel("acquisition")}
+          summary={`${config.channels.map((c) => `CH${c}`).join("+") || "no channels"} · ${config.depth.toUpperCase()}`}
+        >
+          <Acquisition config={config} onChange={onChange} toggleChannel={toggleChannel} />
+        </Section>
 
-        <Decoder config={config} onChange={onChange} lines={lines} />
-
-        {missingChannels && (
-          <div className="field">
+        <Section
+          title="Protocol decode"
+          open={open("decode")}
+          onToggle={() => props.onTogglePanel("decode")}
+          summary={
+            config.protocol === "none" ? (
+              "off"
+            ) : (
+              <>
+                {config.protocol.toUpperCase()}
+                {lines.clock && ` · CLK CH${config.clockChannel}`}
+                {lines.data && ` · DAT CH${config.dataChannel}`}
+              </>
+            )
+          }
+        >
+          <Decoder config={config} onChange={onChange} lines={lines} />
+          {missingChannels && (
             <span className="hint" style={{ color: "var(--warn)" }}>
               {config.protocol.toUpperCase()} needs both channels — enable CH1 and CH2.
             </span>
-          </div>
-        )}
-
-        <CardFiles
-          connected={connected}
-          busy={busy !== null}
-          onBusyChange={props.onCardBusy}
-          onFilesChange={setCardFiles}
-        />
-
-        <LoadCsv
-          connected={connected}
-          busy={busy !== null}
-          config={config}
-          cardFiles={cardFiles}
-          onBusyChange={props.onCardBusy}
-          onResult={props.onResult}
-        />
+          )}
+        </Section>
       </div>
 
       <div className="sidebar-footer">
@@ -124,9 +126,7 @@ function Acquisition({
   toggleChannel: (ch: number) => void;
 }) {
   return (
-    <div className="group">
-      <div className="label">Acquisition</div>
-
+    <>
       <div className="field">
         <span className="name">Channels</span>
         <div className="chips">
@@ -196,7 +196,7 @@ function Acquisition({
           <span className="hint">1M uses full memory — single channel only.</span>
         )}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -299,8 +299,7 @@ function Decoder({
     );
 
   return (
-    <div className="group">
-      <div className="label">Protocol decode</div>
+    <>
       <div className="segmented">
         {PROTOCOLS.map((p) => (
           <button
@@ -319,7 +318,7 @@ function Decoder({
       {lines.data && (
         <ChannelPicker name={lines.data} value={config.dataChannel} onChange={setData} />
       )}
-    </div>
+    </>
   );
 }
 

@@ -410,6 +410,75 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* --- collapsible sidebar sections ------------------------------------------ */
+
+/* Each settings group folds to a single row. The header doubles as the collapsed state
+   readout, so folding a section hides its controls but never its values. */
+.section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel-2);
+  overflow: hidden;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  min-width: 0;
+}
+.section-head:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.section-head .title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  font-weight: 650;
+  flex: 0 0 auto;
+}
+/* The collapsed readout: dimmer than the title, and first to be truncated. */
+.section-head .summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A disclosure triangle drawn from a rotated chevron, so it animates as it turns. */
+.section-head .chev {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+  margin-left: 1px;
+}
+.section.open .section-head .chev {
+  transform: rotate(45deg);
+}
+.section.open .section-head .title {
+  color: var(--text-dim);
+}
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 12px 12px;
+}
+
 /* --- control groups ------------------------------------------------------- */
 
 .group {
@@ -726,123 +795,6 @@ input[type="range"]::-moz-range-thumb {
 
 /* --- SD card file list ---------------------------------------------------- */
 
-.card-list {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-panel-2);
-  max-height: 148px;
-  overflow-y: auto;
-}
-.card-empty {
-  padding: 10px;
-  font-size: 11px;
-  color: var(--text-faint);
-  text-align: center;
-}
-.card-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
-  color: var(--text-dim);
-  cursor: pointer;
-  border-bottom: 1px solid var(--border);
-}
-.card-row:last-child {
-  border-bottom: 0;
-}
-.card-row:hover {
-  color: var(--text);
-}
-.card-row.on {
-  background: var(--bg-elevated);
-  color: var(--text);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-.card-row .ch {
-  flex: 0 0 26px;
-  font-size: 9px;
-  font-weight: 700;
-  color: var(--accent);
-  letter-spacing: 0.02em;
-}
-.card-row .nm {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.card-row .sz {
-  flex: 0 0 auto;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-.card-actions {
-  display: flex;
-  gap: 6px;
-}
-.card-actions .btn {
-  flex: 1;
-  padding: 6px 4px;
-  font-size: 11px;
-}
-/* --- Load-CSV channel slots ----------------------------------------------- */
-
-.slot-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.slot-row select {
-  flex: 1;
-  min-width: 0;
-}
-.slot-row .btn {
-  flex: 0 0 auto;
-  padding: 7px 10px;
-  font-size: 11px;
-}
-.slot-chosen {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 5px;
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
-  color: var(--text-dim);
-  min-width: 0;
-}
-.slot-chosen .src {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--bg-elevated);
-  color: var(--text-faint);
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.slot-chosen .val {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.slot-chosen .clear {
-  flex: 0 0 auto;
-  border: 0;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  padding: 0 2px;
-}
-.slot-chosen .clear:hover {
-  color: var(--danger);
-}
 .btn.danger {
   border-color: rgba(239, 90, 111, 0.4);
   color: #ef5a6f;
@@ -1002,4 +954,261 @@ input[type="range"]::-moz-range-thumb {
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+
+/* --- modal dialog --------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.modal {
+  outline: none;
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 100%);
+  /* Bounded so a long card listing scrolls inside the dialog rather than growing it past
+     the window. */
+  max-height: min(720px, 100%);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-head .titles {
+  flex: 1;
+  min-width: 0;
+}
+.modal-head .title {
+  font-size: 14px;
+  font-weight: 650;
+}
+.modal-head .subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.modal-close {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-close:hover {
+  background: var(--bg-panel-2);
+  color: var(--text);
+}
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.modal-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel-2);
+}
+
+/* --- file library --------------------------------------------------------- */
+
+.file-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.file-head .label {
+  flex: 1;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-faint);
+  font-weight: 650;
+}
+.file-head .tools {
+  display: flex;
+  gap: 6px;
+}
+.file-head .tools .btn {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+.file-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-2);
+  max-height: 230px;
+  overflow-y: auto;
+}
+.file-empty {
+  padding: 14px 12px;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.file-row:last-child {
+  border-bottom: 0;
+}
+.file-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.file-row .tick {
+  flex: 0 0 14px;
+  display: flex;
+  align-items: center;
+}
+/* The tick selects for download and is deliberately plain — assignment to a channel is the
+   dialog's primary action and owns the colour. */
+.file-row .tick input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.file-row .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.file-row .sz {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.file-row .drop {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.file-row .drop:hover {
+  color: var(--danger);
+}
+
+/* Assigning a file to a channel is the dialog's whole point, so the control carries the
+   channel colour and reads as a pair of switches rather than a menu. */
+.assign {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 3px;
+}
+.assign button {
+  width: 24px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.assign button:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+/* Filled with the channel's own signal colour, so the assignment reads the same way the
+   trace does. Both colours are light, so the ink is the app background either way. */
+.assign button.ch1.on,
+.assign button.ch2.on {
+  color: var(--bg-app);
+}
+.assign button.ch1.on {
+  background: var(--ch1);
+  border-color: var(--ch1);
+}
+.assign button.ch2.on {
+  background: var(--ch2);
+  border-color: var(--ch2);
+}
+
+/* What the Plot button is about to do, stated before it is pressed. */
+.assign-summary {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-width: 0;
+}
+.assign-summary .slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.assign-summary .slot .sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+.assign-summary .slot.ch1.on .sw {
+  background: var(--ch1);
+}
+.assign-summary .slot.ch2.on .sw {
+  background: var(--ch2);
+}
+.assign-summary .slot.on {
+  color: var(--text-dim);
+}
+.assign-summary .slot .val {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
 }

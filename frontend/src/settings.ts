@@ -90,3 +90,33 @@ export function clearConfig(): void {
     /* nothing to do */
   }
 }
+
+/** Which sidebar sections are expanded, keyed by section id. */
+export type PanelState = Record<string, boolean>;
+
+const PANELS_KEY = "openmso5202d.panels.v1";
+
+/** Sections start expanded; only what the user has collapsed is worth remembering. */
+export function loadPanels(): PanelState {
+  try {
+    const stored = window.localStorage.getItem(PANELS_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : null;
+    if (!parsed || typeof parsed !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).filter(
+        ([, open]) => typeof open === "boolean",
+      ),
+    ) as PanelState;
+  } catch {
+    return {};
+  }
+}
+
+/** Remember which sections are open. */
+export function savePanels(panels: PanelState): void {
+  try {
+    window.localStorage.setItem(PANELS_KEY, JSON.stringify(panels));
+  } catch {
+    /* storage unavailable — sections simply reopen next run */
+  }
+}

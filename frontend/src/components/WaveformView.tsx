@@ -116,6 +116,11 @@ export function WaveformView({
     if (!canvas) return;
     render(canvas, model, viewRef.current, cursorsRef.current, voltViewsRef.current);
   };
+  // A long-lived observer must not capture `draw`, because that closes over the `model` of
+  // the render that created it — the first one, which has no capture in it. Going through a
+  // ref keeps the subscription stable while always drawing the current model.
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
 
   /** Place/replace cursors, keeping the canvas and the readout in step. */
   const putCursors = (next: Cursor[]) => {
@@ -125,11 +130,14 @@ export function WaveformView({
     draw();
   };
 
-  // Keep the canvas backing store matched to its display size.
+  // Keep the canvas backing store matched to its display size. Resizing the backing store
+  // clears it, so every resize *must* redraw — and with the current model: decoding a
+  // capture opens the byte-list panel, which narrows the plot, so this fires with a fresh
+  // annotation waiting to be drawn.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const observer = new ResizeObserver(draw);
+    const observer = new ResizeObserver(() => drawRef.current());
     observer.observe(canvas);
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps

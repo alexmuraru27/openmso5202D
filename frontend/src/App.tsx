@@ -20,7 +20,15 @@ import {
   type FocusRequest,
 } from "./components/WaveformView";
 import { ByteList } from "./components/ByteList";
-import { clearConfig, DEFAULT_CONFIG, loadConfig, saveConfig } from "./settings";
+import { FilesDialog } from "./components/FilesDialog";
+import {
+  clearConfig,
+  DEFAULT_CONFIG,
+  loadConfig,
+  loadPanels,
+  savePanels,
+  saveConfig,
+} from "./settings";
 
 export function App() {
   const [status, setStatus] = useState<ScopeStatus>({ connected: false });
@@ -35,6 +43,17 @@ export function App() {
   const [cursors, setCursors] = useState<Cursor[]>([]);
   // A byte picked from the list; the plot zooms to it and brackets it with cursors.
   const [focus, setFocus] = useState<FocusRequest | null>(null);
+  // Which sidebar sections are expanded, and whether the file library is showing.
+  const [panels, setPanels] = useState(loadPanels);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const togglePanel = useCallback((id: string) => {
+    setPanels((prev) => {
+      const next = { ...prev, [id]: prev[id] === false };
+      savePanels(next);
+      return next;
+    });
+  }, []);
+  const closeFiles = useCallback(() => setFilesOpen(false), []);
   const focusByte = useCallback((item: DecodedItem) => {
     setFocus({
       startS: item.startS,
@@ -144,15 +163,18 @@ export function App() {
     setBusy("prepare");
     setError(null);
     setProgress(null);
-    const unlisten = await onProgress("prepare:progress", setProgress);
+    // Subscribing inside the try, so a failure there still clears `busy` — outside it, the
+    // app would be left permanently locked with no way back but a restart.
+    let unlisten: (() => void) | undefined;
     try {
+      unlisten = await onProgress("prepare:progress", setProgress);
       await prepare(config);
       setPrepared(true);
     } catch (e) {
       setError(String(e));
       setPrepared(false);
     } finally {
-      unlisten();
+      unlisten?.();
       setBusy(null);
     }
   }, [config]);
@@ -161,13 +183,14 @@ export function App() {
     setBusy("capture");
     setError(null);
     setProgress(null);
-    const unlisten = await onProgress("capture:progress", setProgress);
+    let unlisten: (() => void) | undefined;
     try {
+      unlisten = await onProgress("capture:progress", setProgress);
       applyResult(await capture());
     } catch (e) {
       setError(String(e));
     } finally {
-      unlisten();
+      unlisten?.();
       setBusy(null);
     }
   }, [applyResult]);
@@ -218,6 +241,13 @@ export function App() {
         )}
         <button
           className="btn subtle"
+          onClick={() => setFilesOpen(true)}
+          title="Scope card and saved CSVs"
+        >
+          Files…
+        </button>
+        <button
+          className="btn subtle"
           disabled={busy !== null}
           onClick={resetSettings}
           title="Reset all settings to their defaults"
@@ -234,7 +264,18 @@ export function App() {
         busy={busy}
         onPrepare={doPrepare}
         onCapture={doCapture}
-        onCardBusy={setCardBusy}
+        panels={panels}
+        onTogglePanel={togglePanel}
+      />
+
+      {/* Kept mounted so a card listing and the channel assignment survive closing it. */}
+      <FilesDialog
+        open={filesOpen}
+        onClose={closeFiles}
+        connected={status.connected}
+        busy={busy !== null && busy !== "card"}
+        config={config}
+        onBusyChange={setCardBusy}
         onResult={applyResult}
       />
 
