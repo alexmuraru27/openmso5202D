@@ -176,23 +176,40 @@ export function App() {
     <div className="app">
       <div className="brand">
         <div className="logo" />
-        <div>
-          openmso5202D
-          <div className="sub">Hantek MSO5202D</div>
+        <div className="ident">
+          <div className="name">openmso5202D</div>
+          {/* The connection state lives with the identity rather than out in the topbar —
+              it answers "what am I talking to", which is the same question as the title. */}
+          <div className={`conn ${status.connected ? "on" : ""}`}>
+            <span className="dot" />
+            <span className="where">
+              {status.connected ? status.location ?? "connected" : "not connected"}
+            </span>
+          </div>
         </div>
+        {!status.connected && (
+          <button
+            className="btn primary connect"
+            disabled={busy === "connect"}
+            onClick={doConnect}
+          >
+            {busy === "connect" ? "…" : "Connect"}
+          </button>
+        )}
       </div>
 
       <div className="topbar">
-        <div className={`conn ${status.connected ? "on" : ""}`}>
-          <span className="dot" />
-          {status.connected ? status.location ?? "connected" : "not connected"}
-        </div>
-        {!status.connected && (
-          <button className="btn" disabled={busy === "connect"} onClick={doConnect}>
-            {busy === "connect" ? "Connecting…" : "Connect"}
-          </button>
+        {error ? (
+          <div className="topbar-error" role="alert" title={error}>
+            <span className="icon">!</span>
+            <span className="msg">{error}</span>
+            <button className="dismiss" onClick={() => setError(null)} title="Dismiss">
+              ×
+            </button>
+          </div>
+        ) : (
+          <TopProgress busy={busy} progress={progress} />
         )}
-        <TopProgress busy={busy} progress={progress} />
         {result && (
           <span className="stat">
             {result.channels.reduce((n, c) => Math.max(n, c.volts.length), 0).toLocaleString()} samples
@@ -215,7 +232,6 @@ export function App() {
         connected={status.connected}
         prepared={prepared}
         busy={busy}
-        error={error}
         onPrepare={doPrepare}
         onCapture={doCapture}
         onCardBusy={setCardBusy}

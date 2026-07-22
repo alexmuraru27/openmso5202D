@@ -73,7 +73,8 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 18px;
+  padding: 0 14px;
+  min-width: 0;
   border-bottom: 1px solid var(--border);
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
@@ -87,10 +88,49 @@ body {
   background: linear-gradient(135deg, var(--accent), #1668a8);
   box-shadow: 0 0 12px rgba(23, 184, 201, 0.35);
 }
-.brand .sub {
-  color: var(--text-faint);
+.brand .ident {
+  min-width: 0;
+  flex: 1;
+  line-height: 1.15;
+}
+.brand .name {
+  font-size: 13px;
+}
+/* Compact in the brand: a state dot and where the scope is, no pill chrome. */
+.brand .conn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
   font-weight: 500;
+  font-size: 10px;
+  color: var(--text-faint);
+  min-width: 0;
+}
+.brand .conn .dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+}
+.brand .conn .where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Connect is the one thing that must be done before anything else works, so it carries the
+   same accent as the primary capture action and a glow to catch the eye in a small bar. */
+.brand .btn.connect {
+  flex: 0 0 auto;
+  padding: 6px 14px;
   font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  box-shadow: 0 0 12px rgba(23, 184, 201, 0.45);
+}
+.brand .btn.connect:hover:not(:disabled) {
+  box-shadow: 0 0 16px rgba(23, 184, 201, 0.7);
 }
 
 .topbar {
@@ -278,6 +318,54 @@ body {
   color: var(--text-faint);
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* An error takes the progress bar's slot: same place the eye already watches during an
+   operation, so a failure cannot be missed at the bottom of a panel. */
+.topbar-error {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(239, 90, 111, 0.45);
+  background: rgba(239, 90, 111, 0.12);
+  color: var(--danger);
+  font-size: 12px;
+}
+.topbar-error .icon {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #1a0c10;
+  font-weight: 800;
+  font-size: 11px;
+  line-height: 15px;
+  text-align: center;
+}
+.topbar-error .msg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-error .dismiss {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  color: var(--danger);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.topbar-error .dismiss:hover {
+  color: var(--text);
 }
 
 /* Compact progress in the topbar, filling the space between the connection pill and the
@@ -896,6 +984,10 @@ input[type="range"]::-moz-range-thumb {
 }
 .plot-canvas.grabbing {
   cursor: ew-resize;
+}
+/* Right-drag scales both axes: sideways for time, up/down for voltage. */
+.plot-canvas.zooming-volts {
+  cursor: zoom-in;
 }
 
 /* subtle scrollbars */

@@ -26,6 +26,8 @@ export interface ChannelData {
   channel: number;
   label: string;
   volts: number[];
+  /** The instrument's vertical scale for this trace, mV per division (`#voltbase`). */
+  voltsPerDivMv?: number;
 }
 
 export interface DecodedItem {

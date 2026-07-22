@@ -110,6 +110,10 @@ pub struct ChannelData {
     pub label: String,
     /// Sample values in volts.
     pub volts: Vec<f32>,
+    /// The instrument's vertical scale for this trace, in millivolts per division, straight
+    /// from the export's `#voltbase`. Lets the plot draw the scope's own divisions rather
+    /// than inventing a scale.
+    pub volts_per_div_mv: Option<f64>,
 }
 
 /// One decoded element, positioned in time.
@@ -616,6 +620,7 @@ fn result_from_parsed(
                 .as_ref()
                 .map(|v| v.iter().map(|&x| x as f32).collect())
                 .unwrap_or_default(),
+            volts_per_div_mv: csv.volts_per_div_mv,
         })
         .collect();
 

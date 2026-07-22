@@ -15,6 +15,25 @@ const CLICK_SLOP = 4;
 /** How close the pointer must be to a cursor's dot to pick it up. */
 const GRAB_RADIUS = 10;
 
+/** Zoom sensitivity: how much one pixel of right-drag scales an axis. */
+const VOLT_ZOOM_PER_PX = 0.006;
+const TIME_ZOOM_PER_PX = 0.006;
+
+/** How much of the visible window one wheel notch scrolls. */
+const WHEEL_PAN_FRACTION = 0.15;
+
+/** Vertical zoom limits — enough to magnify noise, enough to pull far back out. */
+const VOLT_ZOOM_MIN = 0.2;
+const VOLT_ZOOM_MAX = 50;
+
+/** A lane's vertical view: magnification, and an offset in volts from its fitted centre. */
+interface VoltView {
+  zoom: number;
+  pan: number;
+}
+
+const FIT: VoltView = { zoom: 1, pan: 0 };
+
 /** A time window in seconds, over the record's absolute sample time. */
 interface View {
   t0: number;
@@ -57,13 +76,29 @@ export function WaveformView({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ t0: 0, t1: 1 });
-  const dragRef = useRef<{ x: number; y: number; moved: boolean; grabbed: number | null } | null>(
-    null,
-  );
+  const dragRef = useRef<{
+    x: number;
+    y: number;
+    moved: boolean;
+    grabbed: number | null;
+    /** Right-button drag scales the voltage axis instead of panning time. */
+    volts: boolean;
+    /** The lane the gesture started in; vertical changes stay with it. */
+    lane: number;
+  } | null>(null);
   // Cursors live in both a ref (the canvas draws from it) and state (the readout renders
   // from it), so a placement updates the picture and the numbers together.
   const cursorsRef = useRef<Cursor[]>([]);
   const [cursors, setCursors] = useState<Cursor[]>([]);
+  // Vertical view per lane — each channel scales and shifts independently, as on a scope.
+  const voltViewsRef = useRef<VoltView[]>([]);
+  const voltView = (lane: number): VoltView => voltViewsRef.current[lane] ?? FIT;
+  const setVoltView = (lane: number, next: VoltView) => {
+    const all = [...voltViewsRef.current];
+    while (all.length < model.lanes.length) all.push({ ...FIT });
+    all[lane] = next;
+    voltViewsRef.current = all;
+  };
 
   // Per-channel vertical scale + the trigger-centred time origin, recomputed per capture.
   const model = useMemo(() => buildModel(result), [result]);
@@ -71,6 +106,7 @@ export function WaveformView({
   // Reset the view to the whole record whenever a new capture arrives.
   useEffect(() => {
     viewRef.current = { t0: 0, t1: Math.max(model.duration, 1e-9) };
+    voltViewsRef.current = [];
     draw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model]);
@@ -78,7 +114,7 @@ export function WaveformView({
   const draw = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    render(canvas, model, viewRef.current, cursorsRef.current);
+    render(canvas, model, viewRef.current, cursorsRef.current, voltViewsRef.current);
   };
 
   /** Place/replace cursors, keeping the canvas and the readout in step. */
@@ -109,24 +145,32 @@ export function WaveformView({
     return { t0, t1: t0 + span };
   };
 
+  /** The wheel scrolls the record sideways; zooming is the right-drag. */
   const onWheel = (e: React.WheelEvent) => {
     if (!model.duration) return;
     e.preventDefault();
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const plotW = rect.width - GUTTER;
-    const frac = Math.max(0, (e.clientX - rect.left - GUTTER) / plotW);
-    const v = viewRef.current;
-    const span = v.t1 - v.t0;
-    const center = v.t0 + frac * span;
-    const factor = e.deltaY > 0 ? 1.18 : 1 / 1.18;
-    const minSpan = model.dt * 8; // don't zoom past a few samples
-    const newSpan = Math.max(minSpan, Math.min(model.duration, span * factor));
-    viewRef.current = clampView({
-      t0: center - frac * newSpan,
-      t1: center - frac * newSpan + newSpan,
-    });
+    const view = viewRef.current;
+    const span = view.t1 - view.t0;
+    // Take both axes so a trackpad's horizontal swipe scrolls too.
+    const notches = (e.deltaY + e.deltaX) / 100;
+    const deltaT = notches * span * WHEEL_PAN_FRACTION;
+    viewRef.current = clampView({ t0: view.t0 + deltaT, t1: view.t1 + deltaT });
     draw();
+  };
+
+  /** Zoom the time axis about a fixed point on screen, so what is under the pointer stays. */
+  const zoomTimeAbout = (anchorX: number, rect: DOMRect, factor: number) => {
+    const plotW = rect.width - GUTTER;
+    const view = viewRef.current;
+    const span = view.t1 - view.t0;
+    const fraction = Math.max(0, Math.min(1, (anchorX - GUTTER) / plotW));
+    const anchorT = view.t0 + fraction * span;
+    const minSpan = model.dt * 8; // never past a few samples
+    const next = Math.max(minSpan, Math.min(model.duration, span * factor));
+    viewRef.current = clampView({
+      t0: anchorT - fraction * next,
+      t1: anchorT - fraction * next + next,
+    });
   };
 
   /** A trace-snapped cursor for a lane at a given record time. */
@@ -146,6 +190,26 @@ export function WaveformView({
     return cursorAtTime(t, laneIndex);
   };
 
+  /** The lane a canvas y falls in, with its vertical extent. */
+  const laneAt = (y: number, rect: DOMRect) => {
+    const laneH = (rect.height - AXIS) / Math.max(1, model.lanes.length);
+    const index = Math.min(
+      model.lanes.length - 1,
+      Math.max(0, Math.floor((y - AXIS) / laneH)),
+    );
+    return { index, y0: AXIS + index * laneH, laneH };
+  };
+
+  /** The voltage a canvas y currently sits at within a lane. */
+  const voltAt = (y: number, rect: DOMRect, laneIndex: number): number | null => {
+    const lane = model.lanes[laneIndex];
+    if (!lane) return null;
+    const { y0, laneH } = laneAt(y, rect);
+    const { bandY, bandH } = laneBand(lane, y0, laneH);
+    const range = laneRange(lane, voltView(laneIndex));
+    return range.vMax - ((y - bandY) / bandH) * (range.vMax - range.vMin);
+  };
+
   /** Index of a cursor whose dot is within the grab radius of (x, y), if any. */
   const cursorNear = (x: number, y: number, rect: DOMRect): number | null => {
     const view = viewRef.current;
@@ -158,7 +222,7 @@ export function WaveformView({
       if (!lane) continue;
       const cx = GUTTER + ((cursor.t - view.t0) / (view.t1 - view.t0)) * plotW;
       const { bandY, bandH } = laneBand(lane, AXIS + cursor.lane * laneH, laneH);
-      const cy = voltToY(lane, bandY, bandH, cursor.v);
+      const cy = voltToY(laneRange(lane, voltView(cursor.lane)), bandY, bandH, cursor.v);
       if (Math.hypot(x - cx, y - cy) <= GRAB_RADIUS) return i;
     }
     return null;
@@ -169,9 +233,20 @@ export function WaveformView({
     const rect = canvasRef.current!.getBoundingClientRect();
     // Grabbing a cursor takes precedence over panning; anywhere else pans (or, without
     // movement, places a new cursor on release).
-    const grabbed = cursorNear(e.clientX - rect.left, e.clientY - rect.top, rect);
-    dragRef.current = { x: e.clientX, y: e.clientY, moved: false, grabbed };
-    canvasRef.current?.classList.add(grabbed === null ? "dragging" : "grabbing");
+    // Right button scales the voltage axis; left grabs a cursor or pans time.
+    const volts = e.button === 2;
+    const grabbed = volts ? null : cursorNear(e.clientX - rect.left, e.clientY - rect.top, rect);
+    dragRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      moved: false,
+      grabbed,
+      volts,
+      lane: laneAt(e.clientY - rect.top, rect).index,
+    };
+    canvasRef.current?.classList.add(
+      volts ? "zooming-volts" : grabbed === null ? "dragging" : "grabbing",
+    );
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -189,6 +264,38 @@ export function WaveformView({
 
     if (Math.abs(e.clientX - drag.x) > CLICK_SLOP || Math.abs(e.clientY - drag.y) > CLICK_SLOP) {
       drag.moved = true;
+    }
+
+    if (drag.volts) {
+      // Right-drag zooms: sideways scales time, up/down scales voltage. Both are anchored on
+      // the point under the pointer, so whatever you are looking at stays put while the rest
+      // stretches around it.
+      const dx = e.clientX - drag.x;
+      if (dx !== 0) {
+        zoomTimeAbout(e.clientX - rect.left, rect, Math.exp(-dx * TIME_ZOOM_PER_PX));
+      }
+
+      // Drag up to magnify, down to pull out — exponential, so the feel is the same at any
+      // magnification.
+      const lane = model.lanes[drag.lane];
+      const anchor = voltAt(e.clientY - rect.top, rect, drag.lane);
+      if (lane && anchor !== null) {
+        const view = voltView(drag.lane);
+        const before = laneRange(lane, view);
+        const fraction = (before.vMax - anchor) / (before.vMax - before.vMin);
+        const dy = drag.y - e.clientY;
+        const zoom = Math.min(
+          VOLT_ZOOM_MAX,
+          Math.max(VOLT_ZOOM_MIN, view.zoom * Math.exp(dy * VOLT_ZOOM_PER_PX)),
+        );
+        const half = (lane.vMax - lane.vMin) / 2 / zoom;
+        const centre = anchor + (2 * fraction - 1) * half;
+        setVoltView(drag.lane, { zoom, pan: centre - (lane.vMin + lane.vMax) / 2 });
+      }
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+      draw();
+      return;
     }
 
     if (drag.grabbed !== null) {
@@ -210,7 +317,20 @@ export function WaveformView({
     const span = v.t1 - v.t0;
     const deltaT = ((drag.x - e.clientX) / plotW) * span;
     viewRef.current = clampView({ t0: v.t0 + deltaT, t1: v.t1 + deltaT });
+
+    // Dragging also moves the trace vertically, so the view pans in both axes.
+    const lane = model.lanes[drag.lane];
+    if (lane) {
+      const { y0, laneH } = laneAt(e.clientY - rect.top, rect);
+      const { bandH } = laneBand(lane, y0, laneH);
+      const view = voltView(drag.lane);
+      const shown = (lane.vMax - lane.vMin) / Math.max(view.zoom, 0.01);
+      const deltaV = ((e.clientY - drag.y) / bandH) * shown;
+      setVoltView(drag.lane, { ...view, pan: view.pan + deltaV });
+    }
+
     drag.x = e.clientX;
+    drag.y = e.clientY;
     draw();
   };
 
@@ -219,7 +339,8 @@ export function WaveformView({
     const drag = dragRef.current;
     endDrag();
     // Dragging an existing cursor is a move, never a placement.
-    if (!drag || drag.moved || drag.grabbed !== null || model.lanes.length === 0) return;
+    if (!drag || drag.moved || drag.grabbed !== null || drag.volts) return;
+    if (model.lanes.length === 0) return;
 
     const rect = canvasRef.current!.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -238,6 +359,7 @@ export function WaveformView({
     dragRef.current = null;
     canvasRef.current?.classList.remove("dragging");
     canvasRef.current?.classList.remove("grabbing");
+    canvasRef.current?.classList.remove("zooming-volts");
   };
 
   // Zoom to a requested span and bracket it with cursors. Bracketing rather than dropping a
@@ -259,6 +381,7 @@ export function WaveformView({
   }, [focus?.nonce]);
   const resetView = () => {
     viewRef.current = { t0: 0, t1: Math.max(model.duration, 1e-9) };
+    voltViewsRef.current = [];
     draw();
   };
 
@@ -290,6 +413,7 @@ export function WaveformView({
         onPointerUp={onPointerUp}
         onPointerCancel={endDrag}
         onDoubleClick={resetView}
+        onContextMenu={(e) => e.preventDefault()}
       />
     </>
   );
@@ -341,6 +465,8 @@ interface Lane {
   volts: number[];
   vMin: number;
   vMax: number;
+  /** The scope's own vertical scale, volts per division, when the export reported it. */
+  voltsPerDiv?: number;
   decoded: DecodedItem[];
 }
 
@@ -386,6 +512,7 @@ function buildModel(result: CaptureResult | null): Model {
       volts: c.volts,
       vMin,
       vMax,
+      voltsPerDiv: c.voltsPerDivMv ? c.voltsPerDivMv / 1000 : undefined,
       decoded: result.decoded.filter((d) => d.channel === c.channel),
     };
   });
@@ -394,7 +521,13 @@ function buildModel(result: CaptureResult | null): Model {
 
 // --- rendering --------------------------------------------------------------
 
-function render(canvas: HTMLCanvasElement, model: Model, view: View, cursors: Cursor[]) {
+function render(
+  canvas: HTMLCanvasElement,
+  model: Model,
+  view: View,
+  cursors: Cursor[],
+  voltViews: VoltView[],
+) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   const W = Math.max(1, Math.floor(rect.width));
@@ -435,7 +568,8 @@ function render(canvas: HTMLCanvasElement, model: Model, view: View, cursors: Cu
   const laneH = plotH / model.lanes.length;
   model.lanes.forEach((lane, i) => {
     const y0 = plotY + i * laneH;
-    drawLane(ctx, lane, model, view, timeToX, plotX, plotW, y0, laneH, cursors, i);
+    const vv = voltViews[i] ?? FIT;
+    drawLane(ctx, lane, model, view, timeToX, plotX, plotW, y0, laneH, cursors, i, vv);
   });
 }
 
@@ -498,6 +632,7 @@ function drawLane(
   laneH: number,
   cursors: Cursor[],
   laneIndex: number,
+  voltZoom: VoltView,
 ) {
   // Separator + gutter label.
   ctx.strokeStyle = COLORS.laneBorder;
@@ -523,7 +658,8 @@ function drawLane(
   // Shared with the pointer hit-test, so a cursor is grabbed exactly where it is drawn.
   const { bandY, bandH } = laneBand(lane, y0, laneH);
   const decodeStrip = lane.decoded.length ? DECODE_STRIP : 0;
-  const yOf = (v: number) => voltToY(lane, bandY, bandH, v);
+  const range = laneRange(lane, voltZoom);
+  const yOf = (v: number) => voltToY(range, bandY, bandH, v);
 
   // H / L rails.
   ctx.strokeStyle = COLORS.rail;
@@ -539,10 +675,18 @@ function drawLane(
 
   // Voltage grid: 1-2-5 steps across the lane's range, labelled in the gutter, so an analog
   // trace can be read off quantitatively rather than only as a shape.
-  const vStep = niceStep(lane.vMax - lane.vMin, bandH / 34);
+  // Prefer the scope's OWN volts/division so the gridlines are the instrument's divisions,
+  // not an invented scale; fall back to a 1-2-5 step only when the export omitted it. Sub-
+  // divide (or group) so the spacing stays readable at any vertical zoom.
+  const shown = range.vMax - range.vMin;
+  let vStep = lane.voltsPerDiv ?? niceStep(shown, bandH / 34);
+  if (lane.voltsPerDiv) {
+    while (bandH * (vStep / shown) > 90) vStep /= 2;
+    while (bandH * (vStep / shown) < 22) vStep *= 2;
+  }
   ctx.font = "10px ui-monospace, monospace";
   ctx.textBaseline = "middle";
-  for (let v = Math.ceil(lane.vMin / vStep) * vStep; v <= lane.vMax; v += vStep) {
+  for (let v = Math.ceil(range.vMin / vStep) * vStep; v <= range.vMax; v += vStep) {
     const y = yOf(v);
     ctx.strokeStyle = COLORS.grid;
     ctx.globalAlpha = 0.7;
@@ -561,12 +705,19 @@ function drawLane(
   ctx.font = "10px ui-monospace, monospace";
   ctx.textAlign = "left";
   ctx.fillText(
-    `${formatVolts(lane.vMin)} … ${formatVolts(lane.vMax)}  pk-pk ${formatVolts(lane.vMax - lane.vMin)}`,
+    `${lane.voltsPerDiv ? `${formatVolts(lane.voltsPerDiv)}/div   ` : ""}` +
+      `pk-pk ${formatVolts(lane.vMax - lane.vMin)}` +
+      `${voltZoom.zoom !== 1 ? `   ×${voltZoom.zoom.toFixed(1)}` : ""}`,
     32,
     y0 + (lane.decoded.length ? 54 : 38),
   );
 
-  // Trace: one vertical min/max segment per pixel column (fast at any depth).
+  // Trace: one vertical min/max segment per pixel column (fast at any depth). Clipped to the
+  // band, since a vertical zoom pushes the signal past the lane's bounds.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotX, bandY, plotW, bandH);
+  ctx.clip();
   ctx.strokeStyle = lane.color;
   ctx.lineWidth = 1.4;
   ctx.beginPath();
@@ -599,6 +750,7 @@ function drawLane(
   }
   ctx.stroke();
   ctx.lineWidth = 1;
+  ctx.restore();
 
   // Measurement cursors: a full-height time marker (so two lanes can be compared) plus a
   // dot at the sampled value on the lane the cursor was placed in.
@@ -791,9 +943,21 @@ function laneBand(lane: Lane, y0: number, laneH: number): { bandY: number; bandH
   };
 }
 
-/** Where a voltage sits vertically within a lane's band. */
-function voltToY(lane: Lane, bandY: number, bandH: number, v: number): number {
-  return bandY + bandH - ((v - lane.vMin) / (lane.vMax - lane.vMin)) * bandH;
+/** The volt range a lane shows, after the vertical zoom is applied about its centre. */
+function laneRange(lane: Lane, view: VoltView): { vMin: number; vMax: number } {
+  const centre = (lane.vMin + lane.vMax) / 2 + view.pan;
+  const half = (lane.vMax - lane.vMin) / 2 / Math.max(view.zoom, 0.01);
+  return { vMin: centre - half, vMax: centre + half };
+}
+
+/** Where a voltage sits vertically within a lane's band, for a given shown range. */
+function voltToY(
+  range: { vMin: number; vMax: number },
+  bandY: number,
+  bandH: number,
+  v: number,
+): number {
+  return bandY + bandH - ((v - range.vMin) / (range.vMax - range.vMin)) * bandH;
 }
 
 /** Volts at a readable scale: `3.3 V`, `500 mV`, `-1.2 V`. */

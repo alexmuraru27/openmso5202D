@@ -14,7 +14,6 @@ interface Props {
   connected: boolean;
   prepared: boolean;
   busy: null | "connect" | "prepare" | "capture" | "card";
-  error: string | null;
   onPrepare: () => void;
   onCapture: () => void;
   /** Card operations share the USB link, so they lock the other actions while running. */
@@ -40,7 +39,7 @@ const LINES: Record<Protocol, { clock?: string; data?: string }> = {
 };
 
 export function ControlPanel(props: Props) {
-  const { config, onChange, connected, prepared, busy, error } = props;
+  const { config, onChange, connected, prepared, busy } = props;
   const toggleChannel = (ch: number) => {
     const has = config.channels.includes(ch);
     const next = has
@@ -110,12 +109,6 @@ export function ControlPanel(props: Props) {
             {busy === "capture" ? "Capturing…" : "② Arm capture"}
           </button>
         </div>
-
-        {error && (
-          <span className="hint err" style={{ color: "var(--danger)" }}>
-            {error}
-          </span>
-        )}
       </div>
     </div>
   );
