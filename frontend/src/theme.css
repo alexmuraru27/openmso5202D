@@ -443,6 +443,19 @@ input[type="range"]::-moz-range-thumb {
   opacity: 0.45;
   cursor: not-allowed;
 }
+/* A quieter button for a secondary action sitting alongside status text. */
+.btn.subtle {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  border-color: var(--border);
+  background: transparent;
+  white-space: nowrap;
+}
+.btn.subtle:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);

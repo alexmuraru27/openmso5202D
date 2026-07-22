@@ -13,20 +13,12 @@ import {
 } from "./api";
 import { ControlPanel } from "./components/ControlPanel";
 import { WaveformView } from "./components/WaveformView";
-
-const DEFAULT_CONFIG: CaptureConfig = {
-  channels: [1, 2],
-  maxFreqHz: 1_000_000,
-  samplesPerCycle: 20,
-  depth: "40k",
-  protocol: "none",
-  clockChannel: 1,
-  dataChannel: 2,
-};
+import { clearConfig, DEFAULT_CONFIG, loadConfig, saveConfig } from "./settings";
 
 export function App() {
   const [status, setStatus] = useState<ScopeStatus>({ connected: false });
-  const [config, setConfig] = useState<CaptureConfig>(DEFAULT_CONFIG);
+  // Restore the last configuration, so the app comes back set up as it was left.
+  const [config, setConfig] = useState<CaptureConfig>(loadConfig);
   const [prepared, setPrepared] = useState(false);
   const [busy, setBusy] = useState<null | "connect" | "prepare" | "capture" | "card">(null);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
@@ -36,6 +28,19 @@ export function App() {
   // Learn the connection state the backend already established at startup.
   useEffect(() => {
     scopeStatus().then(setStatus).catch(() => {});
+  }, []);
+
+  // Remember every settings change for the next run.
+  useEffect(() => {
+    saveConfig(config);
+  }, [config]);
+
+  /** Put every setting back to its default and forget the stored one. */
+  const resetSettings = useCallback(() => {
+    setConfig({ ...DEFAULT_CONFIG });
+    clearConfig();
+    // The scope is still set up for the old configuration, so it must be prepared again.
+    setPrepared(false);
   }, []);
 
   // Card work streams its own progress. Subscribed for the app's lifetime rather than per
@@ -174,6 +179,14 @@ export function App() {
             {result.decoded.length > 0 && ` · ${result.decoded.filter((d) => d.kind === "byte" || d.kind === "address").length} bytes`}
           </span>
         )}
+        <button
+          className="btn subtle"
+          disabled={busy !== null}
+          onClick={resetSettings}
+          title="Reset all settings to their defaults"
+        >
+          Reset settings
+        </button>
       </div>
 
       <ControlPanel
