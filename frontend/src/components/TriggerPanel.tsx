@@ -11,6 +11,14 @@ import {
 interface Props {
   /** True while a plan is running; its settings are about to be read, so they are locked. */
   busy: boolean;
+  /**
+   * Probe attenuation on the trigger's source channel.
+   *
+   * It multiplies every voltage on that channel — measured: the same level read 20 mV at
+   * 1× and 20.0 V at 1000×, while the settings block reported the 1× figure throughout. So
+   * a level shown here has to be scaled by it or it understates by up to a thousandfold.
+   */
+  probeFactor: number;
   /** The configuration being edited. Applied to the scope by Prepare, not by this panel. */
   value: TriggerConfig;
   onChange: (next: TriggerConfig) => void;
@@ -225,7 +233,7 @@ const VOLTAGE_SOURCES: TriggerConfig["source"][] = ["ch1", "ch2"];
  * scope offers no keyed entry for those, only its multipurpose knob, so they cannot be part
  * of a configuration that is replayed later — they are live nudges, and act at once.
  */
-export function TriggerPanel({ busy, value, onChange }: Props) {
+export function TriggerPanel({ busy, probeFactor, value, onChange }: Props) {
   const [scale, setScale] = useState(DEFAULT_LEVEL_SCALE);
 
   // What a level will be worth in volts, from the plan rather than the instrument — Prepare
@@ -251,6 +259,9 @@ export function TriggerPanel({ busy, value, onChange }: Props) {
 
   // Nothing here talks to the scope, so the only reason to lock is that a plan is running
   // and its settings are about to be read.
+  // The stored scale is at the probe tip's 1× value; the attenuation multiplies it.
+  const scaled = { perUnit: scale.perUnit * probeFactor, zero: scale.zero };
+
   const locked = busy;
   const isAlter = value.kind === "alter";
   const polarity = POLARITY[value.kind];
@@ -388,7 +399,7 @@ export function TriggerPanel({ busy, value, onChange }: Props) {
             >
               −
             </button>
-            <span className="level-value">{levelText(value, scale)}</span>
+            <span className="level-value">{levelText(value, scaled)}</span>
             <button
               className="btn"
               disabled={locked}
@@ -422,7 +433,7 @@ export function TriggerPanel({ busy, value, onChange }: Props) {
               <button className="btn" disabled={locked} onClick={() => move(-spec.step)}>
                 −
               </button>
-              <span className="level-value">{formatValue(target, spec.unit, scale)}</span>
+              <span className="level-value">{formatValue(target, spec.unit, scaled)}</span>
               <button className="btn" disabled={locked} onClick={() => move(spec.step)}>
                 +
               </button>

@@ -49,6 +49,19 @@ fn run() -> Result<()> {
         depth: args.depth,
         timebase_ns: args.timebase_ns,
         delete_after: args.clear,
+        // Every non-default vertical option, all on CH1 — deliberately *not* on the channel
+        // the trigger watches. Inverting the trigger source turns its rising edge into a
+        // falling one, and AC-coupling it shifts the level off the signal, so exercising the
+        // options there would only prove the capture can be broken.
+        channel_setup: [
+            mso5202d::control::capture::ChannelSetup {
+                probe: mso5202d::settings::Probe::X10,
+                coupling: mso5202d::settings::Coupling::Ac,
+                bandwidth_limited: true,
+                inverted: true,
+            },
+            mso5202d::control::capture::ChannelSetup::default(),
+        ],
         trigger: Some(mso5202d::control::trigger::TriggerSetup {
             source: mso5202d::control::trigger::TriggerSource::Ch2,
             coupling: mso5202d::control::trigger::TriggerCoupling::Ac,
@@ -63,6 +76,30 @@ fn run() -> Result<()> {
     let t0 = Instant::now();
     control::capture::prepare(&context, &spec)?;
     println!("[prepare] done in {:.1}s", t0.elapsed().as_secs_f64());
+
+    // The per-channel vertical options must have taken.
+    {
+        let st = scope.read_settings()?;
+        let checks = [
+            ("VERT-CH1-PROBE", 1u64, "CH1 10x probe"),
+            ("VERT-CH1-COUP", 1, "CH1 AC coupling"),
+            ("VERT-CH1-20MHZ", 1, "CH1 20 MHz limit"),
+            ("VERT-CH1-RPHASE", 1, "CH1 inverted"),
+            ("VERT-CH2-PROBE", 0, "CH2 1x probe"),
+            ("VERT-CH2-COUP", 0, "CH2 DC coupling"),
+            ("VERT-CH2-20MHZ", 0, "CH2 full bandwidth"),
+            ("VERT-CH2-RPHASE", 0, "CH2 not inverted"),
+        ];
+        for (field, wanted, what) in checks {
+            if st.field(field) != Some(wanted) {
+                return Err(mso5202d::Error::Unexpected(format!(
+                    "{what}: {field} is {:?}, wanted {wanted}",
+                    st.field(field)
+                )));
+            }
+        }
+        println!("[prepare] channel setup applied: CH1 10x + AC + 20 MHz + inverted, CH2 default");
+    }
 
     // The trigger must have survived the Default Setup that opens the plan.
     {

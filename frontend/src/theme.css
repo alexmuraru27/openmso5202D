@@ -552,6 +552,13 @@ body {
   letter-spacing: 0.04em;
   color: var(--text-dim);
 }
+.alter-head .off-note {
+  margin-left: auto;
+  font-weight: 500;
+  color: var(--text-faint);
+  text-transform: none;
+  letter-spacing: 0;
+}
 .alter-head .sw {
   width: 8px;
   height: 8px;

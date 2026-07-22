@@ -72,6 +72,18 @@ const DEPTH_WALK_ATTEMPTS: u32 = 3;
 /// Softkey that cycles probe attenuation while a channel menu is open.
 const PROBE_SOFTKEY: Key = Key::Fn4;
 
+/// Channel-menu softkeys, from the boxes the menu draws: Coupling, 20 MHz BW, Volts/Div,
+/// Probe, Invert — slots one to five, the same on both channels. [verified on hardware]
+const COUPLING_SOFTKEY: Key = Key::Fn1;
+/// Positions in the coupling box: DC, AC, GND.
+const COUPLING_RING: u32 = 3;
+/// The bandwidth-limit toggle: unlimited or 20 MHz.
+const BANDWIDTH_SOFTKEY: Key = Key::Fn2;
+/// The invert toggle.
+const INVERT_SOFTKEY: Key = Key::Fn5;
+/// Both are two-position boxes.
+const TOGGLE_RING: u32 = 2;
+
 /// Softkey that cycles store depth while the Acquire menu is open.
 const DEPTH_SOFTKEY: Key = Key::Fn5;
 
@@ -412,6 +424,30 @@ fn run(context: &Context, op: &Op) -> Result<()> {
         Op::DefaultSetup => default_setup(device),
         Op::SetChannel { channel, on } => set_channel(device, channel, on),
         Op::SetProbe { channel, probe } => set_probe(device, channel, probe),
+        Op::SetCoupling { channel, coupling } => set_channel_option(
+            device,
+            channel,
+            COUPLING_SOFTKEY,
+            COUPLING_RING,
+            "COUP",
+            i64::from(coupling.code()),
+        ),
+        Op::SetBandwidthLimit { channel, limited } => set_channel_option(
+            device,
+            channel,
+            BANDWIDTH_SOFTKEY,
+            TOGGLE_RING,
+            "20MHZ",
+            i64::from(limited),
+        ),
+        Op::SetInvert { channel, inverted } => set_channel_option(
+            device,
+            channel,
+            INVERT_SOFTKEY,
+            TOGGLE_RING,
+            "RPHASE",
+            i64::from(inverted),
+        ),
         Op::SetVoltsPerDiv { channel, millivolts } => {
             set_volts_per_div(device, channel, millivolts)
         }
@@ -487,7 +523,7 @@ fn set_probe(device: &Device, channel: u8, probe: Probe) -> Result<()> {
     // next operation on it fails with a channel that "is not enabled".
     let was_shown = device.read_settings()?.channel_shown(channel);
 
-    converge::open_menu(device, channel_key(channel)?, &[channel_menu(channel)?])?;
+    ensure_channel_menu(device, channel)?;
     let field = format!("VERT-CH{channel}-PROBE");
     let code = probe_code(probe)?;
     converge::cycle_until(
@@ -503,6 +539,52 @@ fn set_probe(device: &Device, channel: u8, probe: Probe) -> Result<()> {
         set_channel(device, channel, was_shown)?;
     }
     debug!(channel, target, "probe set");
+    Ok(())
+}
+
+/// Open a channel's menu, but only if it is not already the one on screen.
+///
+/// This matters because the button that opens it also **toggles the channel**. Pressing it
+/// when the menu is already showing costs a toggle for nothing — and a run of options set
+/// back to back would toggle the channel once per option, each restoring from a display
+/// state the previous one had already disturbed. That is how setting three options in a row
+/// ended with "CH1 would not turn off".
+fn ensure_channel_menu(device: &Device, channel: u8) -> Result<()> {
+    let wanted = channel_menu(channel)?;
+    let settings = device.read_settings()?;
+    if settings.menu_id() == wanted && settings.field("CONTROL-DISP-MENU") == Some(1) {
+        return Ok(());
+    }
+    converge::open_menu(device, channel_key(channel)?, &[wanted])?;
+    Ok(())
+}
+
+/// Set one of a channel's two-or-three-position vertical options.
+///
+/// Coupling, the bandwidth limit and invert all live in the same menu and are set the same
+/// way, so they share an implementation — including the awkward part: the only way to open a
+/// channel's menu is its front-panel button, and that button also **toggles the channel on
+/// or off**. The display state is noted first and put back afterwards, or setting an option
+/// silently turns the channel off and the next operation on it fails.
+fn set_channel_option(
+    device: &Device,
+    channel: u8,
+    key: Key,
+    ring: u32,
+    field: &str,
+    code: i64,
+) -> Result<()> {
+    let was_shown = device.read_settings()?.channel_shown(channel);
+    ensure_channel_menu(device, channel)?;
+    let field = format!("VERT-CH{channel}-{field}");
+    converge::cycle_until(device, key, ring, |settings| {
+        settings.field(&field).map(|value| value as i64)
+    }, code)?;
+    if device.read_settings()?.channel_shown(channel) != was_shown {
+        debug!(channel, "restoring channel display after opening its menu");
+        set_channel(device, channel, was_shown)?;
+    }
+    debug!(channel, field, code, "channel option set");
     Ok(())
 }
 

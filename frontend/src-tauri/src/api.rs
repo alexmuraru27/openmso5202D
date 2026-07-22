@@ -42,6 +42,41 @@ struct LoadedTraces {
 
 // --- data the UI sends and receives -----------------------------------------
 
+/// One channel's vertical options, as the UI names them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSetupConfig {
+    /// `"1x"`, `"10x"`, `"100x"`, or `"1000x"`.
+    pub probe: String,
+    /// `"dc"`, `"ac"`, or `"gnd"`.
+    pub coupling: String,
+    /// Whether the 20 MHz bandwidth limit is on.
+    pub bandwidth_limited: bool,
+    /// Whether the trace is inverted.
+    pub inverted: bool,
+}
+
+impl ChannelSetupConfig {
+    fn to_setup(&self) -> control::capture::ChannelSetup {
+        use mso5202d::settings::Coupling;
+        control::capture::ChannelSetup {
+            probe: match self.probe.as_str() {
+                "10x" => mso5202d::settings::Probe::X10,
+                "100x" => mso5202d::settings::Probe::X100,
+                "1000x" => mso5202d::settings::Probe::X1000,
+                _ => mso5202d::settings::Probe::X1,
+            },
+            coupling: match self.coupling.as_str() {
+                "ac" => Coupling::Ac,
+                "gnd" => Coupling::Ground,
+                _ => Coupling::Dc,
+            },
+            bandwidth_limited: self.bandwidth_limited,
+            inverted: self.inverted,
+        }
+    }
+}
+
 /// Everything the UI chooses for a capture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +91,9 @@ pub struct CaptureConfig {
     pub depth: String,
     /// Decoder to run: `"none"`, `"uart"`, `"spi"`, or `"i2c"`.
     pub protocol: String,
+    /// Per-channel vertical options, `[CH1, CH2]`. Absent means the defaults.
+    #[serde(default)]
+    pub channels_setup: Vec<ChannelSetupConfig>,
     /// Channel carrying the clock (SPI SCLK, I²C SCL). `None` for UART.
     pub clock_channel: Option<u8>,
     /// Channel carrying the data (UART line, SPI MOSI, I²C SDA).
@@ -534,10 +572,15 @@ impl CaptureConfig {
     /// trigger level, and reset policy are the workflow's defaults; only the channels, depth,
     /// and timebase come from the UI.
     fn to_spec(&self) -> Result<CaptureSpec, String> {
+        let mut channel_setup = [control::capture::ChannelSetup::default(); 2];
+        for (slot, config) in channel_setup.iter_mut().zip(&self.channels_setup) {
+            *slot = config.to_setup();
+        }
         Ok(CaptureSpec {
             channels: self.channels.clone(),
             depth: parse_depth(&self.depth)?,
             timebase_ns: Some(self.timebase_ns()),
+            channel_setup,
             ..CaptureSpec::default()
         })
     }

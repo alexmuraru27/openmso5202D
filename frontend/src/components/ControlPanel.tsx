@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CaptureConfig, Depth, Protocol } from "../api";
 import { capturePlan, formatDuration } from "../timebase";
+import { ChannelSetup, channelSummary, DEFAULT_CHANNEL_SETUP, probeFactor } from "./ChannelSetup";
 import { Section } from "./Section";
 import { TriggerPanel, triggerSummary } from "./TriggerPanel";
 import type { TriggerConfig } from "../api";
@@ -23,6 +24,17 @@ interface Props {
   /** The trigger configuration, applied to the scope by Prepare. */
   trigger: TriggerConfig;
   onTriggerChange: (next: TriggerConfig) => void;
+}
+
+/**
+ * Which channel the trigger's level is measured against.
+ *
+ * Under Alter only CH1's level is reachable, so that is the channel whose probe scales it.
+ * A non-analog source has no volts figure at all, and the level falls back to divisions.
+ */
+function triggerSourceChannel(trigger: TriggerConfig): number {
+  if (trigger.kind === "alter") return 1;
+  return trigger.source === "ch2" ? 2 : 1;
 }
 
 const DEPTHS: Depth[] = ["4k", "40k", "512k", "1m"];
@@ -76,6 +88,15 @@ export function ControlPanel(props: Props) {
         </Section>
 
         <Section
+          title="Channel setup"
+          open={open("channels")}
+          onToggle={() => props.onTogglePanel("channels")}
+          summary={channelSummary(config)}
+        >
+          <ChannelSetup config={config} onChange={onChange} disabled={busy !== null} />
+        </Section>
+
+        <Section
           title="Trigger"
           open={open("trigger")}
           onToggle={() => props.onTogglePanel("trigger")}
@@ -83,6 +104,10 @@ export function ControlPanel(props: Props) {
         >
           <TriggerPanel
             busy={busy !== null}
+            probeFactor={probeFactor(
+              (config.channelsSetup[triggerSourceChannel(props.trigger) - 1] ??
+                DEFAULT_CHANNEL_SETUP).probe,
+            )}
             value={props.trigger}
             onChange={props.onTriggerChange}
           />

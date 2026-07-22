@@ -34,7 +34,34 @@
 
 use crate::control::{execute, Context, CsvSource, Op};
 use crate::error::Result;
-use crate::settings::{Probe, StoreDepth};
+use crate::settings::{Coupling, Probe, StoreDepth};
+/// One channel's vertical options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelSetup {
+    /// Probe attenuation. Scales what every volts figure on this channel means.
+    pub probe: Probe,
+    /// How the input is coupled.
+    pub coupling: Coupling,
+    /// Whether the 20 MHz bandwidth limit is on.
+    pub bandwidth_limited: bool,
+    /// Whether the trace is inverted.
+    pub inverted: bool,
+}
+
+impl Default for ChannelSetup {
+    /// DC, full bandwidth, not inverted — what a Default Setup leaves, and what a decoder
+    /// wants: AC coupling shifts a logic signal off its baseline, and inverting it flips
+    /// every bit.
+    fn default() -> Self {
+        Self {
+            probe: Probe::X1,
+            coupling: Coupling::Dc,
+            bandwidth_limited: false,
+            inverted: false,
+        }
+    }
+}
+
 
 /// What a capture asks of the scope — the analog subset of the Python `deep_capture`
 /// parameters (LA dropped).
@@ -66,6 +93,11 @@ pub struct CaptureSpec {
     /// trigger *is*: the scope has no way of being told them, so they are walked to with the
     /// knob, and only a plan has the standing to spend that time.
     pub trigger_values: Vec<(crate::control::trigger::Adjustable, i64)>,
+    /// Per-channel vertical options: coupling, the 20 MHz bandwidth limit, and invert.
+    ///
+    /// Indexed by channel number − 1, so `[0]` is CH1. Applied only to channels that are on:
+    /// the menu they live in is opened with the channel's own front-panel button.
+    pub channel_setup: [ChannelSetup; 2],
     /// Do a factory Default Setup first, for an idempotent known start state.
     pub reset: bool,
     /// How long to wait for the single sequence to trigger, in seconds.
@@ -88,6 +120,7 @@ impl Default for CaptureSpec {
             trigger_position: 13,
             trigger: None,
             trigger_values: Vec::new(),
+            channel_setup: [ChannelSetup::default(); 2],
             reset: true,
             wait_trig_s: 30,
             delete_after: false,
@@ -112,13 +145,28 @@ impl CaptureSpec {
             let on = self.channels.contains(&channel);
             plan.push(Op::SetChannel { channel, on });
             if on {
+                let setup = self.channel_setup[usize::from(channel) - 1];
+                // The probe goes before the vertical scale: it multiplies what every volts
+                // figure on this channel means, so the scale has to be set knowing it.
                 plan.push(Op::SetProbe {
                     channel,
-                    probe: Probe::X1,
+                    probe: setup.probe,
                 });
                 plan.push(Op::SetVoltsPerDiv {
                     channel,
                     millivolts: self.volts_per_div_mv,
+                });
+                plan.push(Op::SetCoupling {
+                    channel,
+                    coupling: setup.coupling,
+                });
+                plan.push(Op::SetBandwidthLimit {
+                    channel,
+                    limited: setup.bandwidth_limited,
+                });
+                plan.push(Op::SetInvert {
+                    channel,
+                    inverted: setup.inverted,
                 });
             }
         }

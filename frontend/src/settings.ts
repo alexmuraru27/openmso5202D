@@ -5,6 +5,7 @@
 // data is small and non-critical: if it is missing or malformed the defaults simply apply.
 
 import type { CaptureConfig, Depth, Protocol, TriggerConfig } from "./api";
+import { DEFAULT_CHANNEL_SETUP } from "./components/ChannelSetup";
 import { DEFAULT_ALTER_CHANNEL, DEFAULT_TRIGGER } from "./components/TriggerPanel";
 
 /** Bumped when a stored shape can no longer be merged sensibly, so old data is ignored. */
@@ -12,6 +13,7 @@ const KEY = "openmso5202d.config.v1";
 
 export const DEFAULT_CONFIG: CaptureConfig = {
   channels: [1, 2],
+  channelsSetup: [{ ...DEFAULT_CHANNEL_SETUP }, { ...DEFAULT_CHANNEL_SETUP }],
   maxFreqHz: 1_000_000,
   samplesPerCycle: 20,
   depth: "40k",
@@ -56,6 +58,13 @@ export function sanitise(raw: Partial<CaptureConfig> | null | undefined): Captur
   for (const line of ["clockChannel", "dataChannel"] as const) {
     if (merged[line] !== 1 && merged[line] !== 2) merged[line] = DEFAULT_CONFIG[line];
   }
+
+  // A stored record written before this field existed, or a half-written one, would leave
+  // the panel with no channel to read.
+  merged.channelsSetup = [0, 1].map((i) => ({
+    ...DEFAULT_CHANNEL_SETUP,
+    ...(merged.channelsSetup?.[i] ?? {}),
+  }));
 
   // 1M uses the whole acquisition memory, so it only exists single-channel. A stored pair
   // would otherwise be rejected by the backend the moment Prepare ran.

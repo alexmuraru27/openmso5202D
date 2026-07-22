@@ -10,7 +10,7 @@
 
 use crate::control::csv::CsvSource;
 use crate::control::trigger::{Adjustable, TriggerSetup};
-use crate::settings::{Probe, StoreDepth};
+use crate::settings::{Coupling, Probe, StoreDepth};
 
 /// One semantic operation in a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,27 @@ pub enum Op {
         channel: u8,
         /// Desired attenuation.
         probe: Probe,
+    },
+    /// Set a channel's input coupling.
+    SetCoupling {
+        /// Channel number, 1 or 2.
+        channel: u8,
+        /// Desired coupling.
+        coupling: Coupling,
+    },
+    /// Limit a channel's bandwidth to 20 MHz, or leave it full.
+    SetBandwidthLimit {
+        /// Channel number, 1 or 2.
+        channel: u8,
+        /// Whether the 20 MHz limit should be on.
+        limited: bool,
+    },
+    /// Invert a channel.
+    SetInvert {
+        /// Channel number, 1 or 2.
+        channel: u8,
+        /// Whether the trace should be inverted.
+        inverted: bool,
     },
     /// Set a channel's vertical scale.
     SetVoltsPerDiv {
@@ -133,6 +154,17 @@ impl Op {
             Op::SetProbe { channel, probe } => {
                 format!("Setting CH{channel} probe to {}", probe_label(*probe))
             }
+            Op::SetCoupling { channel, coupling } => {
+                format!("Setting CH{channel} coupling to {}", coupling_label(*coupling))
+            }
+            Op::SetBandwidthLimit { channel, limited: true } => {
+                format!("Limiting CH{channel} to 20 MHz")
+            }
+            Op::SetBandwidthLimit { channel, limited: false } => {
+                format!("Removing CH{channel} bandwidth limit")
+            }
+            Op::SetInvert { channel, inverted: true } => format!("Inverting CH{channel}"),
+            Op::SetInvert { channel, inverted: false } => format!("Un-inverting CH{channel}"),
             Op::SetVoltsPerDiv { channel, millivolts } => {
                 format!("Setting CH{channel} to {}/div", format_volts(*millivolts))
             }
@@ -157,6 +189,16 @@ impl Op {
         }
     }
 
+}
+
+/// `DC`, `AC`, `GND`.
+fn coupling_label(coupling: Coupling) -> &'static str {
+    match coupling {
+        Coupling::Dc => "DC",
+        Coupling::Ac => "AC",
+        Coupling::Ground => "GND",
+        Coupling::Unknown(_) => "an unknown setting",
+    }
 }
 
 /// `1x`, `10x`, …

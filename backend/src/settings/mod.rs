@@ -217,6 +217,16 @@ pub enum Coupling {
 }
 
 impl Coupling {
+    /// The `VERT-CHx-COUP` code.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Dc => 0,
+            Self::Ac => 1,
+            Self::Ground => 2,
+            Self::Unknown(code) => code,
+        }
+    }
+
     /// Decode the raw `VERT-CHx-COUP` byte.
     pub fn from_code(code: u8) -> Self {
         match code {
@@ -334,6 +344,24 @@ impl Settings {
     ///
     /// Note the firmware quirk that 10 V/div also stores index 0 (wraps mod 11), so this
     /// reports 2 mV/div for both — the ambiguity is inherent to the field.
+    /// **At the probe tip**, in millivolts per division.
+    ///
+    /// [`Settings::volts_per_div_mv`] reports the ladder position, which the instrument
+    /// keeps at its 1× value whatever the probe is set to — measured: switching CH1 through
+    /// 1× / 10× / 100× / 1000× left `VERT-CH1-VB` and the millivolt figure untouched while
+    /// the scope's own display went 100 mV → 1.00 V → 10.0 V → 100 V per division. So the
+    /// real scale at the probe tip is the ladder value multiplied by the attenuation, and
+    /// anything reporting volts to a user has to say *this*, not the ladder.
+    pub fn input_volts_per_div_mv(&self, ch: u8) -> Option<u32> {
+        let factor = self.probe(ch).factor()?;
+        Some(self.volts_per_div_mv(ch)? * factor)
+    }
+
+    /// The vertical scale's position on the scope's **ladder**, in millivolts per division.
+    ///
+    /// This is what the volts/division knob steps through and what the settings block holds,
+    /// so it is the right value to converge on — but it ignores the probe, so it is *not*
+    /// what the signal measures. Use [`Settings::input_volts_per_div_mv`] for that.
     pub fn volts_per_div_mv(&self, ch: u8) -> Option<u32> {
         let index = self.field(&format!("VERT-CH{ch}-VB"))? as usize;
         VB_TO_MV.get(index).copied()
@@ -394,7 +422,9 @@ impl Settings {
             1 => 2,
             _ => return None,
         };
-        let volts_per_div = self.volts_per_div_mv(source_ch)? as f64;
+        // At the probe tip: a level is a voltage on the signal, not a position on the
+        // ladder, so the attenuation belongs in it.
+        let volts_per_div = self.input_volts_per_div_mv(source_ch)? as f64;
         let offset = (self.trigger_position() - self.channel_position(source_ch)) as f64;
         Some(offset * volts_per_div / DIV_UNIT as f64)
     }

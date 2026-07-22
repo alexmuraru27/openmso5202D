@@ -7,8 +7,18 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type Protocol = "none" | "uart" | "spi" | "i2c";
 export type Depth = "4k" | "40k" | "512k" | "1m";
 
+/** One channel's vertical options. */
+export interface ChannelSetupConfig {
+  probe: "1x" | "10x" | "100x" | "1000x";
+  coupling: "dc" | "ac" | "gnd";
+  bandwidthLimited: boolean;
+  inverted: boolean;
+}
+
 export interface CaptureConfig {
   channels: number[];
+  /** Vertical options, `[CH1, CH2]`. */
+  channelsSetup: ChannelSetupConfig[];
   maxFreqHz: number;
   samplesPerCycle: number;
   depth: Depth;

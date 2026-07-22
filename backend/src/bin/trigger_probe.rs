@@ -121,6 +121,11 @@ fn run() -> Result<()> {
     // What every knob-only value reads after a factory Default Setup — the state Prepare
     // always starts from, and therefore the value a target is walked from.
     let defaults = std::env::args().any(|a| a == "--defaults");
+    // The vertical (CH) menu: coupling, bandwidth limit, invert.
+    let chmenu = std::env::args().any(|a| a == "--chmenu");
+    // Does the probe factor change what the settings block reports for volts/division, and
+    // what the scope shows for the trigger level?
+    let probescale = std::env::args().any(|a| a == "--probescale");
     // Does an Alter channel have its own trigger level, and does the level knob reach it?
     let alterlevel = std::env::args().any(|a| a == "--alterlevel");
 
@@ -394,6 +399,107 @@ fn run() -> Result<()> {
                 }
                 scope.press(Key::Fn6)?;
                 sleep(MENU_SETTLE);
+            }
+        }
+        return Ok(());
+    }
+    if probescale {
+        let dir = std::env::args()
+            .skip_while(|a| a != "--probescale")
+            .nth(1)
+            .filter(|a| !a.starts_with("--"))
+            .unwrap_or_else(|| ".".into());
+        scope.press(Key::DefaultSetup)?;
+        sleep(std::time::Duration::from_millis(1800));
+        scope.clear_link();
+        // A level a few steps off centre, so the reported millivolts are not zero.
+        for _ in 0..5 {
+            scope.press(Key::TriggerLevelUp)?;
+            sleep(SETTLE);
+        }
+        for _ in 0..4 {
+            let st = scope.read_settings()?;
+            if st.menu_id() == 1 && st.field("CONTROL-DISP-MENU") == Some(1) {
+                break;
+            }
+            scope.press(Key::Ch1Menu)?;
+            sleep(MENU_SETTLE);
+        }
+        for round in 0..4 {
+            let st = scope.read_settings()?;
+            println!(
+                "probe code {:?}: VERT-CH1-VB {:?}  volts_per_div_mv {:?}  TRIG-VPOS {}  trigger_level_mv {:?}",
+                st.field("VERT-CH1-PROBE"),
+                st.field("VERT-CH1-VB"),
+                st.volts_per_div_mv(1),
+                st.trigger_position(),
+                st.trigger_level_mv()
+            );
+            let shot = scope.screenshot()?;
+            std::fs::write(format!("{dir}/probe-{round}.rgb"), shot.rgb())
+                .map_err(|e| mso5202d::Error::Unexpected(e.to_string()))?;
+            scope.press(Key::Fn4)?;
+            sleep(SETTLE);
+        }
+        return Ok(());
+    }
+    if chmenu {
+        let dir = std::env::args()
+            .skip_while(|a| a != "--chmenu")
+            .nth(1)
+            .filter(|a| !a.starts_with("--"))
+            .unwrap_or_else(|| ".".into());
+        scope.press(Key::DefaultSetup)?;
+        sleep(std::time::Duration::from_millis(1800));
+        scope.clear_link();
+
+        for (channel, menu_key, menu_id) in [(1u8, Key::Ch1Menu, 1u8), (2, Key::Ch2Menu, 2)] {
+            // The CH key toggles the channel as well as opening its menu, so press it only
+            // until the menu is showing and the channel is still on.
+            for _ in 0..4 {
+                let st = scope.read_settings()?;
+                if st.menu_id() == menu_id
+                    && st.field("CONTROL-DISP-MENU") == Some(1)
+                    && st.field(&format!("VERT-CH{channel}-DISP")) == Some(1)
+                {
+                    break;
+                }
+                scope.press(menu_key)?;
+                sleep(MENU_SETTLE);
+            }
+            println!("\n=== CH{channel} menu (id {}) ===", scope.read_settings()?.menu_id());
+            let shot = scope.screenshot()?;
+            std::fs::write(format!("{dir}/chmenu-ch{channel}.rgb"), shot.rgb())
+                .map_err(|e| mso5202d::Error::Unexpected(e.to_string()))?;
+
+            for key in [Key::Fn1, Key::Fn2, Key::Fn3, Key::Fn4, Key::Fn5, Key::Fn6] {
+                let mut moves: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+                let mut previous = scope.read_settings()?;
+                let mut menus = Vec::new();
+                for _ in 0..5 {
+                    scope.press(key)?;
+                    sleep(SETTLE);
+                    let now = scope.read_settings()?;
+                    for (f, v) in diff(&previous, &now) {
+                        moves.entry(f).or_default().push(v.1);
+                    }
+                    if !menus.contains(&now.menu_id()) {
+                        menus.push(now.menu_id());
+                    }
+                    previous = now;
+                }
+                println!(
+                    "  {key:?}: {}  [menus {menus:?}]",
+                    if moves.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        moves
+                            .iter()
+                            .map(|(f, v)| format!("{f} {v:?}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    }
+                );
             }
         }
         return Ok(());
