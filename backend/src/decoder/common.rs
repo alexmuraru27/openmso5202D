@@ -72,14 +72,24 @@ pub fn percentile(sig: &[f64], q: f64) -> f64 {
 ///
 /// A sample above `hi` forces the state high, below `lo` forces it low, and in between the
 /// state holds — hysteresis, which is what stops noise around the trigger point from
-/// producing a burst of false edges. Samples before the first forcing one take the level
-/// implied by the first sample.
-fn schmitt(sig: &[f64], lo: &dyn Fn(usize) -> f64, hi: &dyn Fn(usize) -> f64) -> Vec<bool> {
+/// producing a burst of false edges. Samples before the first forcing one take `initial`.
+///
+/// `initial` must be judged against the record's *global* rails, never the band in force at
+/// sample 0. With a local band those thresholds collapse onto the signal during a long idle
+/// — the envelope over a flat stretch is flat — so nothing forces the state and the seed
+/// decides the level for as long as the line stays quiet. Comparing against a collapsed
+/// band makes that seed a coin toss settled by one LSB of noise, and the wrong call held an
+/// idle-low line high right up to the first transfer.
+fn schmitt(
+    sig: &[f64],
+    lo: &dyn Fn(usize) -> f64,
+    hi: &dyn Fn(usize) -> f64,
+    initial: bool,
+) -> Vec<bool> {
     if sig.is_empty() {
         return Vec::new();
     }
-    // Until something forces the state, fall back to which side of the band we start on.
-    let mut state = sig[0] > (lo(0) + hi(0)) / 2.0;
+    let mut state = initial;
     let mut out = Vec::with_capacity(sig.len());
     for (i, &value) in sig.iter().enumerate() {
         if value > hi(i) {
@@ -108,7 +118,7 @@ pub fn threshold_global(sig: &[f64]) -> Vec<bool> {
     }
     let mid = lo + span * 0.5;
     let band = span * 0.3 / 2.0;
-    schmitt(sig, &|_| mid - band, &|_| mid + band)
+    schmitt(sig, &|_| mid - band, &|_| mid + band, sig[0] > mid)
 }
 
 /// Digitize against the signal's **local** envelope rather than one global level.
@@ -136,7 +146,23 @@ pub fn threshold_local(sig: &[f64]) -> Vec<bool> {
 
     // A coarse global pass first, purely to estimate the bit period the envelope window
     // needs to span.
-    let coarse = schmitt(sig, &|_| lo + span * 0.35, &|_| lo + span * 0.65);
+    //
+    // Its hysteresis is deliberately *narrow*. A wide band is the right choice for the
+    // digitisation itself, but here it is actively harmful: a bandwidth-limited fast line
+    // no longer reaches its rails — a 20 MHz clock through a 1× probe swings only over the
+    // middle third of the record's span — so a ±0.15·span band never sees a crossing, the
+    // period comes out as the whole record, and the envelope window grows so wide that the
+    // local pass degenerates into the global one it exists to replace. Since this pass only
+    // has to yield a *timescale*, sensitivity beats noise immunity: the band still clears
+    // the digitiser's LSB by an order of magnitude, and the median of the gaps shrugs off
+    // the odd spurious edge.
+    const COARSE_BAND: f64 = 0.05;
+    let coarse = schmitt(
+        sig,
+        &|_| lo + span * (0.5 - COARSE_BAND),
+        &|_| lo + span * (0.5 + COARSE_BAND),
+        sig[0] > lo + span * 0.5,
+    );
     let transitions = edges(&coarse);
     if transitions.len() < 4 {
         return threshold_global(sig);
@@ -162,7 +188,7 @@ pub fn threshold_local(sig: &[f64]) -> Vec<bool> {
         .map(|(h, l)| ((h - l) * HYSTERESIS_FRACTION).max(span * FLOOR_FRACTION))
         .collect();
 
-    schmitt(sig, &|i| mid[i] - band[i], &|i| mid[i] + band[i])
+    schmitt(sig, &|i| mid[i] - band[i], &|i| mid[i] + band[i], sig[0] > lo + span * 0.5)
 }
 
 /// Threshold an already-in-volts analog trace into a logic trace.
@@ -254,15 +280,38 @@ pub fn idle_level(trace: &[bool]) -> bool {
     trace[best.1]
 }
 
-/// Refine samples-per-bit and phase by least-squares fitting the edges to an integer grid.
+/// Refine samples-per-bit and phase so the edges land on a common grid.
 ///
-/// Every edge sits on a bit boundary — an integer number of bit periods from any other —
-/// so snapping each to its nearest grid index and regressing recovers the true period from
-/// the data. That removes the slow drift a nominal (baud-derived) period accumulates across
-/// a long record, which is what otherwise walks a decode out of alignment near the end.
+/// Every edge sits on a bit boundary — an integer number of bit periods from any other — so
+/// the true period is the one that puts all of them on grid lines at once. Recovering it
+/// from the record matters because the nominal period usually is not the real one: a
+/// transmitter's clock divider rarely hits the requested rate exactly, and an error of a
+/// tenth of a percent, harmless over a few bytes, walks a decode a whole bit out of step
+/// across a deep record.
+///
+/// The search is what makes this reliable. Snapping edges to a grid and regressing is the
+/// obvious method and it is treacherous: the snapping is only valid once the period is
+/// already close, so on a jittery capture it settles into a false basin and returns a
+/// period *worse* than the one it started from. Measured on a 350-byte capture, that basin
+/// sat 0.4 % away from the truth and cost two thirds of the bytes. So the period is found
+/// first by direct search — maximising how tightly the edges cluster around grid lines,
+/// which is well defined however far off the starting guess is — and the regression is used
+/// only to polish the winner, and only if it stays in the basin the search picked.
+///
+/// The search is hierarchical: a short prefix cannot resolve the period finely but brackets
+/// it cheaply, and each doubling of the span both sharpens the resolution and narrows the
+/// bracket to a few steps around the previous answer.
 ///
 /// Falls back to the input estimate if the fit is degenerate.
 pub fn refine_period(edge_indices: &[usize], initial_spb: f64) -> (f64, f64) {
+    /// Edges in the first search stage.
+    const FIRST_SPAN: usize = 128;
+    /// How far the true period may sit from the nominal one, as a fraction.
+    const REACH: f64 = 0.02;
+    /// Step size as a fraction of a bit period of accumulated drift across the span — fine
+    /// enough that the true period cannot fall between two steps.
+    const DRIFT_PER_STEP: f64 = 0.25;
+
     let fallback = (
         initial_spb,
         edge_indices.first().map(|&e| e as f64).unwrap_or(0.0),
@@ -270,16 +319,78 @@ pub fn refine_period(edge_indices: &[usize], initial_spb: f64) -> (f64, f64) {
     if edge_indices.len() < 3 || initial_spb < 1.0 {
         return fallback;
     }
+
+    let mut spb = initial_spb;
+    let (mut low, mut high) = (-REACH, REACH);
+    let mut span = FIRST_SPAN;
+    loop {
+        let take = span.min(edge_indices.len());
+        let window = &edge_indices[..take];
+        let cells = (window[take - 1] - window[0]) as f64 / spb;
+        let step = (DRIFT_PER_STEP / cells.max(1.0)).min(REACH / 4.0);
+
+        let mut best = (f64::NEG_INFINITY, spb);
+        let mut offset = low;
+        while offset <= high {
+            let candidate = spb * (1.0 + offset);
+            let score = grid_concentration(window, candidate);
+            if score > best.0 {
+                best = (score, candidate);
+            }
+            offset += step;
+        }
+        spb = best.1;
+
+        if take == edge_indices.len() {
+            break;
+        }
+        // The next span resolves finer; only a couple of this stage's steps of doubt remain.
+        low = -2.0 * step;
+        high = 2.0 * step;
+        span *= 2;
+    }
+
+    // Polish by regression, which is now snapping against a period already in the right
+    // basin — but discard it if it wanders out of one search step, which means it is not.
+    let tolerance = spb * DRIFT_PER_STEP
+        / ((edge_indices[edge_indices.len() - 1] - edge_indices[0]) as f64 / spb).max(1.0);
+    match fit_grid(edge_indices, spb) {
+        Some((refined, phase)) if (refined - spb).abs() <= tolerance => (refined, phase),
+        _ => (spb, edge_indices[0] as f64),
+    }
+}
+
+/// How tightly the edges cluster on a grid of period `spb`, in [0, 1].
+///
+/// This is the magnitude of the edge train's Fourier component at that period: every edge
+/// contributes a unit vector at its phase within the cell, so they add up when the period is
+/// right and cancel when it is not. Phase is measured circularly, which is what makes the
+/// score meaningful at any distance from the truth — an edge that has drifted past a cell
+/// boundary counts as slightly early rather than as a whole period of error.
+fn grid_concentration(edge_indices: &[usize], spb: f64) -> f64 {
+    let (mut re, mut im) = (0.0, 0.0);
+    for &e in edge_indices {
+        let angle = std::f64::consts::TAU * (e as f64 / spb);
+        re += angle.cos();
+        im += angle.sin();
+    }
+    (re * re + im * im).sqrt() / edge_indices.len() as f64
+}
+
+/// One least-squares pass: snap each edge to a grid index using `spb`, then fit `e = phase + k·spb`.
+fn fit_grid(edge_indices: &[usize], spb: f64) -> Option<(f64, f64)> {
+    if edge_indices.len() < 3 {
+        return None;
+    }
     let first = edge_indices[0] as f64;
     let grid: Vec<f64> = edge_indices
         .iter()
-        .map(|&e| round_half_even((e as f64 - first) / initial_spb))
+        .map(|&e| round_half_even((e as f64 - first) / spb))
         .collect();
     if grid[grid.len() - 1] == grid[0] {
-        return fallback;
+        return None;
     }
 
-    // Least squares for e = phase + k·spb.
     let n = grid.len() as f64;
     let sum_k: f64 = grid.iter().sum();
     let sum_e: f64 = edge_indices.iter().map(|&e| e as f64).sum();
@@ -292,14 +403,13 @@ pub fn refine_period(edge_indices: &[usize], initial_spb: f64) -> (f64, f64) {
 
     let denominator = n * sum_kk - sum_k * sum_k;
     if denominator.abs() < 1e-12 {
-        return fallback;
+        return None;
     }
-    let spb = (n * sum_ke - sum_k * sum_e) / denominator;
-    if spb <= 1.0 || !spb.is_finite() {
-        return fallback;
+    let refined = (n * sum_ke - sum_k * sum_e) / denominator;
+    if refined <= 1.0 || !refined.is_finite() {
+        return None;
     }
-    let phase = (sum_e - spb * sum_k) / n;
-    (spb, phase)
+    Some((refined, (sum_e - refined * sum_k) / n))
 }
 
 /// Sample every bit cell on the grid `phase + k·spb`.
@@ -326,27 +436,35 @@ pub fn sample_grid(trace: &[bool], spb: f64, phase: f64, vote: bool) -> (Vec<boo
 
     let mut bits = Vec::with_capacity((k1 - k0) as usize);
     let mut centres = Vec::with_capacity((k1 - k0) as usize);
-    let half = ((spb * 0.25) as usize).max(1);
 
     for k in k0..k1 {
-        let centre = phase + (k as f64 + 0.5) * spb;
-        let index = (round_half_even(centre) as i64).clamp(0, n as i64 - 1) as usize;
+        let (bit, index) = sample_cell(trace, phase + (k as f64 + 0.5) * spb, spb, vote);
+        bits.push(bit);
         centres.push(index);
-
-        if !vote || spb < 4.0 {
-            bits.push(trace[index]);
-            continue;
-        }
-        let mut high = 0usize;
-        let mut total = 0usize;
-        for offset in -(half as i64)..=(half as i64) {
-            let i = (index as i64 + offset).clamp(0, n as i64 - 1) as usize;
-            high += trace[i] as usize;
-            total += 1;
-        }
-        bits.push(high * 2 >= total);
     }
     (bits, centres)
+}
+
+/// Sample one bit cell centred at `centre` samples, returning its level and centre index.
+///
+/// With `vote`, the level is the majority over the cell's middle half rather than the one
+/// sample at the centre, which absorbs edge jitter. Below four samples per bit there is no
+/// middle to speak of, so the centre sample is taken as-is.
+pub fn sample_cell(trace: &[bool], centre: f64, spb: f64, vote: bool) -> (bool, usize) {
+    let n = trace.len();
+    let index = (round_half_even(centre) as i64).clamp(0, n as i64 - 1) as usize;
+    if !vote || spb < 4.0 {
+        return (trace[index], index);
+    }
+    let half = ((spb * 0.25) as usize).max(1) as i64;
+    let mut high = 0usize;
+    let mut total = 0usize;
+    for offset in -half..=half {
+        let i = (index as i64 + offset).clamp(0, n as i64 - 1) as usize;
+        high += trace[i] as usize;
+        total += 1;
+    }
+    (high * 2 >= total, index)
 }
 
 /// Run a decoder forwards and on the time-reversed trace, keeping the better result.

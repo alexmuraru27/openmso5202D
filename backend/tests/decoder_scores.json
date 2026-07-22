@@ -264,27 +264,27 @@
     "spc": 100
   },
   "uart/921600/40k/12spc": {
-    "bytes": 361,
+    "bytes": 368,
     "depth": "40k",
     "freq": 921600,
     "proto": "uart",
-    "ramp": 0.683,
+    "ramp": 0.984,
     "spc": 12
   },
   "uart/921600/512k/100spc": {
-    "bytes": 366,
+    "bytes": 369,
     "depth": "512k",
     "freq": 921600,
     "proto": "uart",
-    "ramp": 0.868,
+    "ramp": 0.981,
     "spc": 100
   },
   "uart/921600/512k/12spc": {
-    "bytes": 7136,
+    "bytes": 7377,
     "depth": "512k",
     "freq": 921600,
     "proto": "uart",
-    "ramp": 0.735,
+    "ramp": 0.979,
     "spc": 12
   },
   "uart/9600/40k/100spc": {

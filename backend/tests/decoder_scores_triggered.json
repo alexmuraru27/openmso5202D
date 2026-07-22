@@ -55,7 +55,7 @@
     "expected": 522
   },
   "spi/10000/40k/100spc": {
-    "accuracy": 0.95,
+    "accuracy": 1.0,
     "decoded": 20,
     "expected": 20
   },
@@ -85,18 +85,18 @@
     "expected": 160
   },
   "spi/2000000/512k/12spc": {
-    "accuracy": 0.961,
+    "accuracy": 1.0,
     "decoded": 1600,
     "expected": 1600
   },
   "spi/20000000/40k/12spc": {
-    "accuracy": 0.0,
-    "decoded": 35,
+    "accuracy": 1.0,
+    "decoded": 160,
     "expected": 160
   },
   "spi/20000000/512k/12spc": {
-    "accuracy": 0.002,
-    "decoded": 252,
+    "accuracy": 1.0,
+    "decoded": 1280,
     "expected": 1280
   },
   "spi/500000/40k/100spc": {
@@ -121,7 +121,7 @@
   },
   "uart/115200/40k/12spc": {
     "accuracy": 1.0,
-    "decoded": 185,
+    "decoded": 184,
     "expected": 184
   },
   "uart/115200/512k/100spc": {
@@ -131,7 +131,7 @@
   },
   "uart/115200/512k/12spc": {
     "accuracy": 1.0,
-    "decoded": 1844,
+    "decoded": 1843,
     "expected": 1843
   },
   "uart/921600/40k/100spc": {
@@ -141,22 +141,22 @@
   },
   "uart/921600/40k/12spc": {
     "accuracy": 1.0,
-    "decoded": 148,
+    "decoded": 147,
     "expected": 147
   },
   "uart/921600/512k/100spc": {
     "accuracy": 1.0,
-    "decoded": 148,
+    "decoded": 147,
     "expected": 147
   },
   "uart/921600/512k/12spc": {
-    "accuracy": 0.145,
-    "decoded": 1454,
+    "accuracy": 1.0,
+    "decoded": 1474,
     "expected": 1474
   },
   "uart/9600/40k/100spc": {
     "accuracy": 1.0,
-    "decoded": 16,
+    "decoded": 15,
     "expected": 15
   },
   "uart/9600/40k/12spc": {
@@ -166,7 +166,7 @@
   },
   "uart/9600/512k/100spc": {
     "accuracy": 1.0,
-    "decoded": 154,
+    "decoded": 153,
     "expected": 153
   }
 }

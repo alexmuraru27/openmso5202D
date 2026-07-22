@@ -106,6 +106,16 @@ pub fn detect_sample_rising(clock: &[bool], data: &[bool]) -> bool {
 /// advantage a passive scope capture has over edge-triggered hardware. The middle of the
 /// gap is inspected, away from the transition tails: a real idle stays near one level
 /// while a missed pulse still swings.
+///
+/// "Still swings" means two things, and both are required. The excursion has to be a real
+/// fraction of the line's full swing, *and* it has to reach the mid-level — because a pulse
+/// that never even got halfway is not one any digitiser could have been expected to catch,
+/// whereas the ring-down at the end of a burst routinely lifts the idle rail by a third of
+/// the swing without ever approaching mid. Size alone cannot separate those: measured over
+/// a 1600-byte SPI record, the ring-down after each 64-byte chunk reached 10-44 % of the
+/// swing, which straddles any size threshold, while its distance from mid never did.
+/// Getting this wrong is expensive — a gap misread as a pulse injects phantom bits and
+/// shifts every byte until the next burst boundary.
 fn gap_has_pulse(clock_analog: &[f64], a: usize, b: usize, median_period: f64) -> bool {
     let m = (round_half_even(median_period) as usize).max(1);
     let lo_index = (a + m / 2).min(b.saturating_sub(1));
@@ -126,7 +136,8 @@ fn gap_has_pulse(clock_analog: &[f64], a: usize, b: usize, median_period: f64) -
     }
     let seg_min = segment.iter().copied().fold(f64::INFINITY, f64::min);
     let seg_max = segment.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    (seg_max - seg_min) > 0.4 * swing
+    let mid = (lo + hi) / 2.0;
+    (seg_max - seg_min) > 0.4 * swing && seg_min < mid && seg_max > mid
 }
 
 /// Decode an SPI data line clocked by `clock`.

@@ -2335,9 +2335,20 @@ from the transport, not the decoder:
   few bit-periods between clock edges is ambiguous: it can be a bandwidth-dropped clock pulse
   (reconstruct the edge) OR a real inter-word transaction idle (start a new byte). Timing alone
   can't tell them apart — no edge-triggered logic analyzer can. But a passive scope capture has
-  the raw clock waveform: inspect the MIDDLE of the gap — **flat at idle ⇒ real gap (reframe);
-  a sub-threshold swing ⇒ missed pulse (reconstruct)**. This fixes low-frequency continuous
-  streams (10 kHz: 0.25 → 0.94 ramp on hardware) with no regression on fast lines. [verified 2026-07-15]
+  the raw clock waveform: inspect the MIDDLE of the gap — **flat ⇒ real gap (reframe); a swing
+  that crosses the mid-level ⇒ missed pulse (reconstruct)**. This fixes low-frequency
+  continuous streams (10 kHz: 0.25 → 0.94 ramp on hardware) with no regression on fast lines.
+  [verified 2026-07-15]
+
+  **Correction 2026-07-22:** the test was originally "a sub-threshold *swing* ⇒ missed pulse",
+  sized at >40 % of the line's full swing. Size alone is not sufficient — the **ring-down after
+  a burst ends** lifts the idle rail by a varying amount that overlaps any size threshold. On a
+  1600-byte 2 MHz SPI record the ESP32 sends in 64-byte FIFO chunks; the ring-down in the 24
+  inter-chunk gaps measured **10 – 44 %** of the swing, so one gap out of 24 tripped the 40 %
+  rule, injected 5 phantom bits and corrupted the 64 bytes that followed. The gap must also
+  **reach the mid-level**: a pulse that never got halfway is not one the digitiser could have
+  been expected to catch, and ring-down never approaches mid (max 1.36 V against a 1.60 V mid
+  on that record). With both conditions required, all 24 gaps classify correctly. [verified]
 - **Short messages only** — the record is ≤ 3840 samples (no deep memory over USB), so a
   message must fit one screen. **Set the timebase** for the bit rate (recipe 10.2,
   ≈ 15–25 samples/bit). [verified]
@@ -2348,14 +2359,42 @@ from the transport, not the decoder:
   still resets every cycle where a single global threshold would drop edges. Use the
   **STOP-then-read** synchronized capture (recipe 10.6) so the clock and data channels come
   from one frozen acquisition. [verified]
+
+  Two details of that threshold decide whether a fast or a quiet line survives it:
+  - The **period estimate** that sizes the sliding window must be taken with a *narrow*
+    hysteresis band (±5 % of span), not the wide one used for the digitisation itself. A
+    20 MHz clock through a 1× probe never reaches its rails — it swings only over the middle
+    third of the record's span (measured 0.8 – 2.4 V against a −0.12 – 2.48 V span) — so a
+    ±15 % band sees **6 edges in the whole record** instead of 2560, the period comes out as
+    the record length, and the sliding window grows so wide that the local threshold
+    degenerates into the global one. At ±5 % the same record yields all 2560 edges. [verified]
+  - The digitiser's **initial state** must be judged against the record's *global* rails. A
+    local band collapses onto the signal during a long idle — the envelope over a flat stretch
+    is flat — so nothing forces the state and the seed decides the level until the first
+    transfer. Seeding from the collapsed band is a coin toss settled by one LSB of noise, and
+    losing it holds an idle-low line high into the first bits of the first byte. [verified]
+- **The transmitter's real bit rate is not the nominal one, and must be recovered from the
+  record.** A clock divider rarely hits the requested rate exactly: an ESP32 asked for
+  921600 baud delivered ≈922.5 kbaud (0.1 % high), and 20 MHz SPI came out at 16.7 MHz.
+  A tenth of a percent is harmless over a few bytes and fatal over a deep one — it walks the
+  decode a full bit out of step across ~500 bit periods, and a 512K record holds thousands.
+  Recover the period by **searching for the value that puts every edge on a common grid**
+  (maximise the edge train's Fourier component at that period), hierarchically: a short prefix
+  brackets it cheaply, each doubling of the span sharpens it. Snapping edges to a grid and
+  regressing is the obvious method and it is *treacherous* — the snap is only valid once the
+  period is already close, so on a jittery capture it settles into a false basin and returns a
+  period **worse than the one it started from** (measured: 0.4 % off, two thirds of the bytes
+  lost). Use regression only to polish a searched period, and discard the polish if it wanders.
+  [verified 2026-07-22]
 - **Some frozen acquisitions come back glitched** (more so at slow timebases) — re-capture;
   the decoders are deterministic. [verified]
 
-Verified bit-rate ranges (ESP32 sources, ramp decoded byte-for-byte): UART 8N1
-**9600 – 115200 baud**; SPI mode 0 MSB **10 kHz – 20 MHz SCLK** (20 MHz decoded from a
-512K deep capture at ~10 samples/clock via the local-envelope threshold); I²C
-**~17 – 167 kHz SCL** (source ceiling; the edge-driven decoder has no inherent limit).
-[verified]
+Verified bit-rate ranges (ESP32 sources). Against a **triggered** corpus — one commanded
+burst per capture, so the expected bytes are known exactly rather than inferred — all 34
+cases decode **byte-for-byte perfect** (2026-07-22): UART 8N1 **9600 / 115200 / 921600 baud**
+(up to 1474 bytes in one 512K record), SPI mode 0 MSB **10 kHz – 20 MHz SCLK** (1600 bytes at
+2 MHz, 1280 at 20 MHz), I²C **10 kHz – 1 MHz SCL** (522 bytes). Both depths (40K, 512K) and
+both resolutions (≈10 and ≈100 samples/bit) are covered. [verified]
 
 ## 11. Hardware & device background (appendix)
 
