@@ -162,6 +162,9 @@ impl CaptureSpec {
 /// Run the **prepare** half — the idempotent setup. Leaves the scope configured and running,
 /// ready for [`capture`]. Streams one progress event per op.
 pub fn prepare(context: &Context, spec: &CaptureSpec) -> Result<()> {
+    // Start from a clean frame boundary — a previous run can leave frames queued, and they
+    // would be read as this operation's replies.
+    context.device().clear_link();
     execute(context, &spec.prepare_plan())
 }
 
@@ -171,6 +174,7 @@ pub fn prepare(context: &Context, spec: &CaptureSpec) -> Result<()> {
 /// the outcome, the scope is left live and clean: RUN resumed from the single-sequence stop
 /// and the file list closed. Re-pressable — no reset, no re-configure.
 pub fn capture(context: &Context, spec: &CaptureSpec) -> Result<()> {
+    context.device().clear_link();
     let result = execute(context, &spec.capture_plan());
     // Best-effort tidy-up, run whether the plan succeeded or failed, so the scope is never
     // left stopped on the file list.

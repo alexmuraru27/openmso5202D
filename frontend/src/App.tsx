@@ -8,11 +8,18 @@ import {
   scopeStatus,
   type CaptureConfig,
   type CaptureResult,
+  type DecodedItem,
   type ProgressPayload,
   type ScopeStatus,
 } from "./api";
 import { ControlPanel } from "./components/ControlPanel";
-import { WaveformView } from "./components/WaveformView";
+import {
+  triggerTime,
+  WaveformView,
+  type Cursor,
+  type FocusRequest,
+} from "./components/WaveformView";
+import { ByteList } from "./components/ByteList";
 import { clearConfig, DEFAULT_CONFIG, loadConfig, saveConfig } from "./settings";
 
 export function App() {
@@ -24,6 +31,19 @@ export function App() {
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CaptureResult | null>(null);
+  // Reported by the plot so the byte list can highlight whatever a cursor sits on.
+  const [cursors, setCursors] = useState<Cursor[]>([]);
+  // A byte picked from the list; the plot zooms to it and brackets it with cursors.
+  const [focus, setFocus] = useState<FocusRequest | null>(null);
+  const focusByte = useCallback((item: DecodedItem) => {
+    setFocus({
+      startS: item.startS,
+      endS: item.endS,
+      channel: item.channel,
+      // A fresh nonce so picking the same byte again re-applies the zoom.
+      nonce: performance.now(),
+    });
+  }, []);
 
   // Learn the connection state the backend already established at startup.
   useEffect(() => {
@@ -203,7 +223,17 @@ export function App() {
       />
 
       <div className="main">
-        <WaveformView result={result} />
+        <div className="plot-area">
+          <WaveformView result={result} onCursors={setCursors} focus={focus} />
+        </div>
+        {result && (
+          <ByteList
+            decoded={result.decoded}
+            cursors={cursors}
+            triggerS={triggerTime(result)}
+            onSelect={focusByte}
+          />
+        )}
       </div>
     </div>
   );

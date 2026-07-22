@@ -140,9 +140,108 @@ body {
 
 .main {
   grid-area: main;
-  position: relative;
+  display: flex;
+  min-width: 0;
   background: var(--bg-plot);
   overflow: hidden;
+}
+
+/* The plot fills what the byte list leaves; it positions its own overlays, so it stays the
+   containing block for them. */
+.plot-area {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* --- decoded byte list ---------------------------------------------------- */
+
+.bytes-panel {
+  flex: 0 0 auto;
+  width: 236px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.bytes-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+.bytes-head .label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.bytes-head .count {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.bytes-cols,
+.byte-row {
+  display: grid;
+  grid-template-columns: 34px 46px 34px 18px 1fr;
+  gap: 6px;
+  padding: 3px 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.bytes-cols {
+  color: var(--text-faint);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 5px;
+}
+.bytes-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+.byte-row {
+  color: var(--text-dim);
+  border-left: 2px solid transparent;
+}
+.byte-row .i,
+.byte-row .t {
+  color: var(--text-faint);
+}
+.byte-row .hex {
+  color: var(--text);
+}
+.byte-row .chr {
+  color: var(--text-faint);
+}
+.byte-row.pick {
+  cursor: pointer;
+}
+.byte-row:hover {
+  background: var(--bg-panel-2);
+}
+/* A byte a measurement cursor is sitting on, keyed to that cursor's colour. */
+.byte-row.a {
+  background: rgba(74, 222, 128, 0.14);
+  border-left-color: #4ade80;
+  color: var(--text);
+}
+.byte-row.b {
+  background: rgba(251, 146, 60, 0.14);
+  border-left-color: #fb923c;
+  color: var(--text);
+}
+.byte-row.bad .hex {
+  color: #ef5a6f;
 }
 
 /* --- connection pill ------------------------------------------------------ */

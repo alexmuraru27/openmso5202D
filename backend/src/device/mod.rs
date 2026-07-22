@@ -119,6 +119,17 @@ impl Device {
         self.transport.reconnect(reset)
     }
 
+    /// Discard anything still queued on the link so the next operation starts from a clean
+    /// frame boundary.
+    ///
+    /// Worth doing at the head of a multi-step operation. A previous run — or a screen grab
+    /// that was cut short — can leave frames on the endpoint, and because those are valid
+    /// frames they pass the transport's checks and get handed to whichever command reads
+    /// next, surfacing as a nonsense reply to an unrelated request.
+    pub fn clear_link(&self) {
+        self.transport.resync();
+    }
+
     // --- keys and knobs --------------------------------------------------------
 
     /// Inject one front-panel key event (selector `0x13`).
@@ -186,6 +197,13 @@ impl Device {
         let mut last = Error::Unexpected("settings never read".into());
         for attempt in 0..SETTINGS_ATTEMPTS {
             if attempt > 0 {
+                // A payload of the wrong SHAPE means the stream is misaligned, not that the
+                // scope was busy — typically a leftover framebuffer frame, which is a
+                // perfectly valid `0x53` frame and so sails through `verify` and the
+                // transport's own retry. Drain before retrying: a framebuffer is ~75 such
+                // frames, so retrying without a resync just reads the next stale one and
+                // burns the whole attempt budget on the same burst.
+                self.transport.resync();
                 thread::sleep(Duration::from_millis(150));
             }
             match self
@@ -314,6 +332,10 @@ impl Device {
             }
             // Short/garbled (a stale frame, or the scope busy) — retry from a clean start.
         }
+        // Give up, but not while leaving the transfer half-read: a framebuffer is ~75 frames
+        // and any left queued would be picked up by the NEXT command as its own reply (a
+        // 10210-byte "settings" payload, say). Failing must not poison the link.
+        self.transport.resync();
         Err(Error::Unexpected(format!(
             "framebuffer grab did not return a full {}-byte screen after {FRAMEBUFFER_ATTEMPTS} attempts",
             screen::FRAMEBUFFER_BYTES

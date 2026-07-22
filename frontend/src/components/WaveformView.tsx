@@ -22,7 +22,7 @@ interface View {
 }
 
 /** A measurement cursor: a point on a trace, in record time and volts. */
-interface Cursor {
+export interface Cursor {
   /** Time within the record, seconds. */
   t: number;
   /** The trace's value there, volts. */
@@ -31,7 +31,30 @@ interface Cursor {
   lane: number;
 }
 
-export function WaveformView({ result }: { result: CaptureResult | null }) {
+/** A request to zoom to a span and bracket it with cursors. */
+export interface FocusRequest {
+  startS: number;
+  endS: number;
+  /** Channel the span belongs to, so the cursors land on the right lane. */
+  channel: number;
+  /** Changes on every request, so selecting the same item twice re-applies it. */
+  nonce: number;
+}
+
+/** How much of the view a focused span should occupy — the rest is context either side. */
+const FOCUS_ZOOM = 8;
+
+export function WaveformView({
+  result,
+  onCursors,
+  focus,
+}: {
+  result: CaptureResult | null;
+  /** Reports cursor placement/movement, so a side panel can follow it. */
+  onCursors?: (cursors: Cursor[]) => void;
+  /** Zoom to a span and bracket it with cursors (e.g. a byte picked from the list). */
+  focus?: FocusRequest | null;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ t0: 0, t1: 1 });
   const dragRef = useRef<{ x: number; y: number; moved: boolean; grabbed: number | null } | null>(
@@ -62,6 +85,7 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
   const putCursors = (next: Cursor[]) => {
     cursorsRef.current = next;
     setCursors(next);
+    onCursors?.(next);
     draw();
   };
 
@@ -105,18 +129,21 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
     draw();
   };
 
-  /** Record time at a canvas x, and the trace-snapped cursor for a lane at that time. */
-  const cursorAt = (x: number, rect: DOMRect, laneIndex: number): Cursor | null => {
-    const view = viewRef.current;
-    const t = Math.min(
-      model.duration,
-      Math.max(0, view.t0 + ((x - GUTTER) / (rect.width - GUTTER)) * (view.t1 - view.t0)),
-    );
+  /** A trace-snapped cursor for a lane at a given record time. */
+  const cursorAtTime = (time: number, laneIndex: number): Cursor | null => {
     const lane = model.lanes[laneIndex];
     if (!lane) return null;
+    const t = Math.min(model.duration, Math.max(0, time));
     const index = Math.min(lane.volts.length - 1, Math.max(0, Math.round(t / model.dt)));
     if (!Number.isFinite(lane.volts[index])) return null;
     return { t, v: lane.volts[index], lane: laneIndex };
+  };
+
+  /** The same, for a pointer position on the canvas. */
+  const cursorAt = (x: number, rect: DOMRect, laneIndex: number): Cursor | null => {
+    const view = viewRef.current;
+    const t = view.t0 + ((x - GUTTER) / (rect.width - GUTTER)) * (view.t1 - view.t0);
+    return cursorAtTime(t, laneIndex);
   };
 
   /** Index of a cursor whose dot is within the grab radius of (x, y), if any. */
@@ -212,6 +239,24 @@ export function WaveformView({ result }: { result: CaptureResult | null }) {
     canvasRef.current?.classList.remove("dragging");
     canvasRef.current?.classList.remove("grabbing");
   };
+
+  // Zoom to a requested span and bracket it with cursors. Bracketing rather than dropping a
+  // single marker means the readout immediately gives the span's own duration — for a byte,
+  // that is its bit time — and both ends stay draggable afterwards.
+  useEffect(() => {
+    if (!focus || model.lanes.length === 0 || !model.duration) return;
+    const laneIndex = Math.max(
+      0,
+      model.lanes.findIndex((lane) => lane.channel === focus.channel),
+    );
+    const width = Math.max(focus.endS - focus.startS, model.dt);
+    const span = Math.min(model.duration, Math.max(width * FOCUS_ZOOM, model.dt * 16));
+    const centre = (focus.startS + focus.endS) / 2;
+    viewRef.current = clampView({ t0: centre - span / 2, t1: centre + span / 2 });
+    const ends = [cursorAtTime(focus.startS, laneIndex), cursorAtTime(focus.endS, laneIndex)];
+    putCursors(ends.filter((c): c is Cursor => c !== null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.nonce]);
   const resetView = () => {
     viewRef.current = { t0: 0, t1: Math.max(model.duration, 1e-9) };
     draw();
@@ -305,6 +350,14 @@ interface Model {
   /** Time of the trigger, for a centred, signed axis. */
   triggerS: number;
   lanes: Lane[];
+}
+
+/** Where the trigger sits in a record — its midpoint, as the acquisition centres it. */
+export function triggerTime(result: CaptureResult | null): number {
+  if (!result || result.channels.length === 0) return 0;
+  const dt = result.sampleIntervalS || 1e-9;
+  const maxLen = result.channels.reduce((n, c) => Math.max(n, c.volts.length), 0);
+  return (maxLen * dt) / 2;
 }
 
 function buildModel(result: CaptureResult | null): Model {

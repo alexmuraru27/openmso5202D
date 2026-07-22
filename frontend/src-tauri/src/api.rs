@@ -294,6 +294,8 @@ fn download_dir() -> std::path::PathBuf {
 pub async fn list_card_files(state: State<'_, AppState>) -> Result<Vec<CardFile>, String> {
     let guard = state.device.lock().unwrap();
     let device = guard.as_ref().ok_or("scope not connected")?;
+    // Start from a clean frame boundary; a previous transfer can leave frames queued.
+    device.clear_link();
     let entries = device
         .list_dir(control::CARD_PATH)
         .map_err(|e| e.to_string())?;
@@ -412,6 +414,10 @@ pub async fn load_csvs(
         None => None,
     };
 
+    if let Some(dev) = device {
+        dev.clear_link();
+    }
+
     // Sizes up front, so a card transfer can report real progress.
     let listing = match device {
         Some(dev) => dev
@@ -475,6 +481,7 @@ pub async fn clear_card_files(
 ) -> Result<(), String> {
     let guard = state.device.lock().unwrap();
     let device = guard.as_ref().ok_or("scope not connected")?;
+    device.clear_link();
     let sink = EmitProgress {
         app: &app,
         event_name: "card:progress",
