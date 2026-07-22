@@ -63,8 +63,17 @@ export function connectScope(): Promise<ScopeStatus> {
   return invoke("connect_scope");
 }
 
-export function prepare(config: CaptureConfig): Promise<void> {
-  return invoke("prepare", { config });
+/**
+ * Configure the scope for a capture, including its trigger.
+ *
+ * The trigger goes in here rather than being applied on its own because prepare starts with
+ * a factory Default Setup, which would undo it.
+ */
+export function prepare(
+  config: CaptureConfig,
+  trigger: TriggerConfig | null,
+): Promise<void> {
+  return invoke("prepare", { config, trigger });
 }
 
 export function capture(): Promise<CaptureResult> {
@@ -140,8 +149,75 @@ export function clearCardFiles(): Promise<void> {
 
 /** Subscribe to a progress stream. */
 export function onProgress(
-  event: "prepare:progress" | "capture:progress" | "card:progress",
+  event: "prepare:progress" | "capture:progress" | "card:progress" | "trigger:progress",
   handler: (p: ProgressPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<ProgressPayload>(event, (e) => handler(e.payload));
 }
+
+// --- trigger ---------------------------------------------------------------
+
+export type TriggerKind = "edge" | "video" | "pulse" | "slope" | "overtime" | "alter";
+export type AlterKind = "edge" | "video" | "pulse" | "overtime";
+export type TriggerSource = "ch1" | "ch2" | "ext" | "ext5" | "acline";
+
+/** The trigger configuration, mirroring `TriggerConfig` in `src-tauri/src/api.rs`. */
+export interface TriggerConfig {
+  kind: TriggerKind;
+  source: TriggerSource;
+  mode: "auto" | "normal";
+  coupling: "dc" | "ac" | "noise" | "hfreject" | "lfreject";
+  polarity: "positive" | "negative";
+  videoStandard: "ntsc" | "pal";
+  videoSync: "alllines" | "linenumber" | "oddfield" | "evenfield" | "allfields";
+  qualifier: "equal" | "notequal" | "greater" | "less";
+  /** Level in the scope's 1/25-division units, relative to screen centre. */
+  level: number;
+  /** Targets for the knob-only values, keyed by `TriggerValue.id`. Walked to by Prepare. */
+  valueTargets: Record<string, number>;
+  /** Level in millivolts — reported by the scope, never sent. */
+  levelMv?: number;
+  /** Millivolts per unit of `level` (the source's volts/div ÷ 25), so an edit can be shown
+   *  in volts before it is applied. Absent when the source is not an analog channel. */
+  levelMvPerUnit?: number;
+  /** The `level` at which the trigger sits on the source's ground. */
+  levelZero: number;
+  /** Whether the level applies at all — false for Slope, whose level knob is inert. */
+  levelApplies: boolean;
+  /** Alter only: CH1's own trigger. */
+  alterCh1: AlterChannelConfig;
+  /** Alter only: CH2's own trigger. */
+  alterCh2: AlterChannelConfig;
+}
+
+/** One channel's trigger inside Alter mode. */
+export interface AlterChannelConfig {
+  kind: AlterKind;
+  polarity: "positive" | "negative";
+  coupling: TriggerConfig["coupling"];
+  qualifier: TriggerConfig["qualifier"];
+  videoStandard: TriggerConfig["videoStandard"];
+  videoSync: TriggerConfig["videoSync"];
+}
+
+
+/** What a trigger level is worth in volts, once Prepare has set the channel scales. */
+export interface LevelScale {
+  /** Millivolts per unit of `level` — the volts/division Prepare sets, divided by 25. */
+  millivoltsPerUnit: number;
+  /** The level at which the source sits on ground. */
+  zero: number;
+}
+
+/**
+ * The scale a trigger level will be measured in after Prepare.
+ *
+ * Not read from the instrument: Prepare sets each channel's volts/division and re-centres
+ * it, so the scale that matters is the one Prepare establishes — and asking for it needs no
+ * connection, which is when most of the setting-up happens.
+ */
+export function levelScale(): Promise<LevelScale> {
+  return invoke("level_scale");
+}
+
+

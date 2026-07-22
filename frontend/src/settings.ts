@@ -4,7 +4,8 @@
 // left. Stored in the webview's localStorage — it is per-app and needs no plugin, and the
 // data is small and non-critical: if it is missing or malformed the defaults simply apply.
 
-import type { CaptureConfig, Depth, Protocol } from "./api";
+import type { CaptureConfig, Depth, Protocol, TriggerConfig } from "./api";
+import { DEFAULT_ALTER_CHANNEL, DEFAULT_TRIGGER } from "./components/TriggerPanel";
 
 /** Bumped when a stored shape can no longer be merged sensibly, so old data is ignored. */
 const KEY = "openmso5202d.config.v1";
@@ -118,5 +119,53 @@ export function savePanels(panels: PanelState): void {
     window.localStorage.setItem(PANELS_KEY, JSON.stringify(panels));
   } catch {
     /* storage unavailable — sections simply reopen next run */
+  }
+}
+
+// --- trigger ---------------------------------------------------------------
+
+const TRIGGER_KEY = "openmso5202d.trigger.v1";
+
+/**
+ * The last saved trigger, or the defaults.
+ *
+ * Stored separately from the capture configuration because it is a different kind of thing:
+ * the capture config describes how to acquire, the trigger describes what to wait for, and
+ * the two are versioned independently. Merged over the defaults so a stored record written
+ * before a field existed still loads.
+ */
+export function loadTrigger(): TriggerConfig {
+  try {
+    const stored = window.localStorage.getItem(TRIGGER_KEY);
+    if (!stored) return { ...DEFAULT_TRIGGER };
+    const raw = JSON.parse(stored) as Partial<TriggerConfig>;
+    return {
+      ...DEFAULT_TRIGGER,
+      ...raw,
+      alterCh1: { ...DEFAULT_ALTER_CHANNEL, ...(raw.alterCh1 ?? {}) },
+      alterCh2: { ...DEFAULT_ALTER_CHANNEL, ...(raw.alterCh2 ?? {}) },
+      // Targets are settings and are restored; the merge above already did that.
+      valueTargets: { ...(raw.valueTargets ?? {}) },
+    };
+  } catch {
+    return { ...DEFAULT_TRIGGER };
+  }
+}
+
+/** Remember the trigger for the next run. */
+export function saveTrigger(trigger: TriggerConfig): void {
+  try {
+    window.localStorage.setItem(TRIGGER_KEY, JSON.stringify(trigger));
+  } catch {
+    /* storage unavailable — the defaults simply apply next time */
+  }
+}
+
+/** Forget the stored trigger. */
+export function clearTrigger(): void {
+  try {
+    window.localStorage.removeItem(TRIGGER_KEY);
+  } catch {
+    /* nothing to do */
   }
 }

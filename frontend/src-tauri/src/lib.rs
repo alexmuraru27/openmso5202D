@@ -3,7 +3,7 @@
 //! Thin: it owns the application state and registers the [`api`] commands the webview
 //! calls. All scope logic lives in the `mso5202d` driver, reached through [`api`].
 
-mod api;
+pub mod api;
 
 use api::AppState;
 

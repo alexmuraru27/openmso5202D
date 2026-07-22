@@ -54,6 +54,18 @@ pub struct CaptureSpec {
     pub timebase_ns: Option<u64>,
     /// Trigger level in 1/25-division units above screen centre.
     pub trigger_position: i64,
+    /// What the trigger should look for.
+    ///
+    /// Applied during **prepare**, after the reset and the channel setup — the reset would
+    /// undo it, and Alter mirrors settings per channel, so both have to be settled first.
+    /// `None` keeps whatever the scope is already triggering on and only sets the level.
+    pub trigger: Option<crate::control::trigger::TriggerSetup>,
+    /// Targets for the trigger's knob-only values, applied after the trigger itself.
+    ///
+    /// Kept here rather than in [`TriggerSetup`] because they are not part of what the
+    /// trigger *is*: the scope has no way of being told them, so they are walked to with the
+    /// knob, and only a plan has the standing to spend that time.
+    pub trigger_values: Vec<(crate::control::trigger::Adjustable, i64)>,
     /// Do a factory Default Setup first, for an idempotent known start state.
     pub reset: bool,
     /// How long to wait for the single sequence to trigger, in seconds.
@@ -74,6 +86,8 @@ impl Default for CaptureSpec {
             // a real burst, not on idle-noise 0 V crossings, yet well below the 3.3 V peak so
             // every burst crosses it. The value `_set_trig_level_via_keys` targets by default.
             trigger_position: 13,
+            trigger: None,
+            trigger_values: Vec::new(),
             reset: true,
             wait_trig_s: 30,
             delete_after: false,
@@ -111,9 +125,21 @@ impl CaptureSpec {
         if let Some(nanoseconds) = self.timebase_ns {
             plan.push(Op::SetTimePerDiv { nanoseconds });
         }
-        plan.push(Op::SetTriggerLevel {
-            position: self.trigger_position,
-        });
+        // The trigger goes after the channels: a Default Setup would undo it, and Alter
+        // configures each channel on its own page, which needs the channels settled.
+        if let Some(setup) = self.trigger {
+            plan.push(Op::SetTrigger { setup });
+        }
+        for &(what, target) in &self.trigger_values {
+            plan.push(Op::SetTriggerValue { what, target });
+        }
+        // The level is meaningless in the modes whose knob is inert, and converging on it
+        // there fails with a phantom end stop.
+        if self.trigger.is_none_or(|setup| setup.kind.has_level()) {
+            plan.push(Op::SetTriggerLevel {
+                position: self.trigger_position,
+            });
+        }
         plan.push(Op::SetDepth { depth: self.depth });
         plan
     }

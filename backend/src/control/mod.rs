@@ -35,6 +35,7 @@ pub mod converge;
 pub mod csv;
 pub mod ops;
 pub mod progress;
+pub mod trigger;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +52,7 @@ pub use capture::CaptureSpec;
 pub use csv::CsvSource;
 pub use ops::Op;
 pub use progress::{ProgressEvent, ProgressSink, SilentProgress, StepState};
+pub use trigger::TriggerSetup;
 
 /// Number of positions in the probe-attenuation ring (1x, 10x, 100x, 1000x).
 const PROBE_RING: u32 = 4;
@@ -79,9 +81,24 @@ const ACQUIRE_MENU: u8 = 17;
 /// Menu id shown after a Default Setup.
 const DEFAULT_SETUP_MENU: u8 = 25;
 
-/// Trigger level tolerance, in 1/25-division units. The knob does not land on every
-/// integer, so demanding an exact value would spin until the step budget ran out.
-const TRIGGER_TOLERANCE: i64 = 2;
+/// Trigger level tolerance, in 1/25-division units.
+///
+/// **Zero**: the knob lands on every integer. Measured at 20 mV, 100 mV and 500 mV per
+/// division, five presses each, and every press moved the level by exactly one unit — the
+/// step is a fixed fraction of a division, so it does not vary with the vertical scale.
+///
+/// It was 2, on the assumption that the knob skipped values. It does not, and the slack was
+/// visible: a level the panel showed as 440 mV could be applied as 360 mV, because ±2 units
+/// is ±80 mV at 1 V/division. A trigger level is a number the user typed a specific value
+/// for; landing near it is landing wrong.
+const TRIGGER_TOLERANCE: i64 = 0;
+
+/// Step budget for the trigger level.
+///
+/// The level spans ±8 divisions at 25 units each, and every press moves one unit, so
+/// crossing from centre to a rail is 200 presses. The generic budget is sized for knobs that
+/// step through a scale and is nowhere near enough.
+const TRIGGER_LEVEL_STEPS: u32 = 220;
 
 /// Attempts to toggle a channel into the wanted state.
 ///
@@ -399,6 +416,15 @@ fn run(context: &Context, op: &Op) -> Result<()> {
             set_volts_per_div(device, channel, millivolts)
         }
         Op::SetTimePerDiv { nanoseconds } => set_time_per_div(device, nanoseconds),
+        Op::SetTrigger { ref setup } => trigger::apply_reporting(device, setup, &mut |done, total| {
+            context.advance(done, total)
+        }),
+        Op::SetTriggerValue { what, target } => {
+            let kind = trigger::read(&device.read_settings()?)
+                .map(|setup| setup.kind)
+                .ok_or_else(|| Error::Unexpected("the trigger type is not readable".into()))?;
+            trigger::set_value(device, kind, what, target).map(|_| ())
+        }
         Op::SetTriggerLevel { position } => set_trigger_level(device, position),
         Op::SetDepth { depth } => set_depth(device, depth),
         Op::ArmSingle => arm_single(device),
@@ -507,12 +533,13 @@ fn set_time_per_div(device: &Device, nanoseconds: u64) -> Result<()> {
 
 /// Set the trigger level by stepping the trigger knob.
 fn set_trigger_level(device: &Device, position: i64) -> Result<()> {
-    converge::converge(
+    converge::converge_within(
         device,
         Knob::TriggerLevel,
         position,
         TRIGGER_TOLERANCE,
-        |settings| Some(settings.trigger_position()),
+        TRIGGER_LEVEL_STEPS,
+        trigger::level_for_convergence,
     )?;
     Ok(())
 }

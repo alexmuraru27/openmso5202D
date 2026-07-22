@@ -299,6 +299,234 @@ conversion is needed or wanted on the host. Examples: 40K @ 20 kHz → **101 byt
 
 ---
 
+## 3.9 Trigger menu softkey map (menus 5 / 8 / 6 / 22 / 38 → 7 / 23 / 39)
+
+Discovered on hardware with `cargo run -p mso5202d --bin trigger_probe`, which presses one
+softkey from a known page and diffs the settings blob — whatever field moves is what the key
+owns. Ring lengths are read from the value sequence the repeated presses walk through.
+`[verified 2026-07-22]`
+
+**Reaching a page.** The trigger key opens whichever page matches the **current**
+`TRIG-TYPE`, so it cannot be used to get back to a page after the type has been cycled away
+— it silently lands on Edge. Navigate by *type*: press `Fn1` until `TRIG-TYPE` reads the
+wanted code; `CONTROL-MENUID` follows it (0→5, 1→8, 2→6, 3→22, 4→38, 5→24).
+
+**Edge has two page ids.** `5` is where the type softkey lands, but an Edge trigger is also
+shown as **`11`**, the trigger *base* page. A driver must accept either: when the type is
+already Edge no softkey is pressed, so whatever page was open stays open, and a check that
+demands `5` rejects a correct state. `[verified 2026-07-22]` The route that produces `11`
+was not isolated — pressing the trigger key from a closed menu gives `5` every time, and
+turning the trigger level knob opens no menu at all. `[gap]`
+
+**The menu bar must be visible, not merely selected.** `CONTROL-MENUID` keeps its value
+while the bar is hidden (`Fn0` toggles `CONTROL-DISP-MENU`), and softkeys sent to a hidden
+bar do nothing whatsoever — indistinguishable from a run of dropped presses. Check
+`CONTROL-DISP-MENU == 1` alongside the id. `[verified 2026-07-22]`
+
+**Do not count a press that moved nothing as a step round a ring.** The key mailbox holds a
+single slot and drops presses while the scope is busy, so a press that changed nothing is
+far more often dropped than an end of the road. Counting it walks the ring budget to zero
+while the value has not moved, and the failure reads "value unavailable in this mode" for a
+value that was available all along — intermittent, and a different setting each run.
+Re-press with a growing wait, and only give up after several in a row go nowhere.
+`[verified 2026-07-22]`
+
+### Page 1
+
+| key | Edge (5) | Video (8) | Pulse (6) | Slope (22) | Overtime (38) |
+|---|---|---|---|---|---|
+| `Fn0` | hides / shows the menu bar (`CONTROL-DISP-MENU`) — not a setting | ← | ← | ← | ← |
+| `Fn1` | **Type** — cycles `TRIG-TYPE` 0→1→2→3→4→5, and the menu id with it | ← | ← | ← | ← |
+| `Fn2` | **Source** `TRIG-SRC`, ring of **5** | ring of **4** | ring of **4** | ring of **4** | ring of **2** |
+| `Fn3` | **Slope** `TRIG-EDGE-SLOPE` | **Polarity** `TRIG-VIDEO-NEG` | **Polarity** `TRIG-PULSE-NEG` | **Slope** `TRIG-SLOPE-SET` | **Polarity** `TRIG-OVERTIME-NEG` |
+| `Fn4` | **Mode** `TRIG-MODE` | **Standard** `TRIG-VIDEO-PAL` | **Mode** | **Mode** | **Mode** |
+| `Fn5` | **Coupling** `TRIG-COUP`, ring of 5 | **Sync** `TRIG-VIDEO-SYN`, ring of 5; then the **multipurpose knob** sets `TRIG-VIDEO-LINE` | **Coupling** | **Coupling** | — |
+| `Fn6` | — | — | → page 2 (**7**) | → page 2 (**23**) | → page 2 (**39**) |
+| `Fn7` | opens the **Logic Analyzer** menu (61) — not a trigger key | ← | ← | ← | ← |
+
+The source ring length is the selectable set for that type, and matches the restriction in
+§8 of protocol.md: Edge = CH1/CH2/EXT/EXT-5/AC-line, Video/Pulse/Slope drop AC-line,
+Overtime is CH1/CH2 only. A ring that is shorter than the enum is the *scope* refusing the
+value, not a decode error.
+
+### The slot model
+
+Every trigger page follows the same layout, and knowing it makes the rest fall out:
+
+- `Fn0` — the title bar (`Trigger ✕`); pressing it hides the menu, it is not a setting.
+- `Fn1`–`Fn5` — the **five boxes, top to bottom**. A page with fewer boxes leaves slots
+  empty, and they are empty *by position*: Overtime page 2 holds only `Coupling`, in the
+  bottom slot, so it answers to `Fn5`.
+- `Fn6` — the page turn.
+- `Fn7` — **never press** (see below).
+
+A softkey in an empty slot changes nothing and leaves the multipurpose knob wherever it was.
+That is a trap for a diff-only probe: it reads as "this key selects the parameter the knob is
+currently on", which looks like a working mapping and is not one. `[verified 2026-07-22]`
+
+### Page 2
+
+| key | Pulse (7) | Slope (23) | Overtime (39) |
+|---|---|---|---|
+| `Fn3` | — | **Vertical** — press cycles `TRIG-SLOPE-WIN` (V1 ↔ V2); the knob then tunes the selected threshold, `TRIG-SLOPE-V1` or `-V2` | — |
+| `Fn4` | **When** `TRIG-PULSE-WHEN`, ring of 4 (`=` `≠` `>` `<`) | **When** `TRIG-SLOPE-WHEN`, ring of 4 | — |
+| `Fn5` | **Pulse Width** — knob owns `TRIG-PULSE-TIME` | **Time** — knob owns `TRIG-SLOPE-TIME` | **Coupling** `TRIG-COUP`, ring of 5 |
+| `Fn6` | back to page 1 — there is **no third page** | ← | ← |
+
+**Overtime's time is on page 1, not page 2** — slot 5, where the other types put Coupling.
+Its page 2 holds nothing but Coupling. A page-2 sweep therefore cannot find it, which is why
+it was long thought unreachable. `[verified 2026-07-22]`
+
+### What the scope tells you itself
+
+The status bar carries two things a settings-blob diff cannot give you, and both were read
+directly off `0x20` framebuffer grabs. `[verified 2026-07-22]`
+
+- **An orange banner naming the knob and what it adjusts** — "Use V0 knob to adjust line
+  number", "Use V0 knob to adjust time for overtime trigger". `V0` is the multipurpose knob.
+  Where the scope says this, the parameter has no keyed entry.
+- **The trigger readout**, which is the level in millivolts (`CH1 ∫ 240mV`) *except* under
+  Video with Sync = LineNumber, where it shows the **line number** instead (`CH1 ⌐ 4`). The
+  level is still live and still moves with the level knob in that mode — the readout simply
+  gives the line the position a voltage normally occupies.
+
+Overtime, for the avoidance of doubt, has **both**: a trigger level shown in millivolts, and
+a hold time in nanoseconds adjusted with V0. Its menu has an `Overtime` box and no `Level`
+box — but no trigger page has a Level box; the level is always the physical knob.
+
+### The video line number
+
+Only a parameter while Sync reads `LineNumber`, and it has **no box of its own** — it belongs
+to the Sync box, and the knob picks it up once that box is selected. That makes it awkward to
+reach: selecting the Sync box means *pressing* it, and each press advances Sync, so pressing
+once to select it would move Sync off `LineNumber` and lose the parameter. Press it a whole
+ring (5) instead: the box ends up selected and Sync back where it started.
+`[verified 2026-07-22]`
+
+Range is 1–525 on NTSC and 1–625 on PAL/SECAM.
+
+### Continuous parameters
+
+`TRIG-PULSE-TIME`, `TRIG-SLOPE-V1`, `TRIG-SLOPE-V2`, `TRIG-SLOPE-TIME`,
+`TRIG-OVERTIME-TIME`, `TRIG-VIDEO-LINE` and their `TRIG-SWAP-CHx-*` counterparts have **no
+keyed entry**. The softkey in their slot changes no field —
+it hands the *multipurpose knob* that parameter — and the knob then moves it one step per
+press. The knob's **push** does not step between parameters; it resets the current one.
+
+**The step is fixed, and presses can be fired far faster than a verified one.** Measured on
+the pulse width: 400 consecutive presses walked 0.5 → 4.5 µs at a constant **10 ns** per
+press, with no scaling across the decade; the thresholds and the line number step one unit.
+And a run of 40 presses landed in full at 200, 120, 80 and **50 ms** apart, beginning to drop
+at 30 ms (36/40) and 20 ms (28/40). `[verified 2026-07-22]`
+
+So these values *can* be set, not merely nudged: estimate the presses from the distance and
+the step, fire them back to back at ~60 ms, read once, and make up any shortfall. A 76-step
+walk costs about 8 s including the menu navigation — against roughly a minute if each press
+were separately verified, and minutes more if each were a separate menu trip.
+
+### Reading the screen instead of guessing
+
+The `0x20` framebuffer grab is the fastest way to map a menu: it shows the softkey **labels**,
+which name the keys that move no field at all — exactly where a settings-blob diff is blind.
+`cargo run -p mso5202d --bin trigger_probe -- --shots <dir>` writes one 800×480 RGB frame per
+trigger page. Both remaining gaps in this section were closed by looking at two of them.
+
+### Two traps that produce confident, wrong maps
+
+- **Press each key more than once.** A key that *steps* through the parameters a box holds
+  is indistinguishable from one that selects the first, if it is only ever pressed once.
+  `Fn3` on Slope page 2 looked like "selects V1" until the second press revealed V2.
+- **Verify the page you are on before every press.** An early sweep reported `Fn3`/`Fn5` on
+  page 2 as "navigates back to page 1". They do no such thing — the probe's own navigation
+  had already dropped to page 1, and those were page-1 keys being read. Every conclusion
+  from that run was wrong.
+
+**`Fn7` must never be pressed.** It is not a menu softkey — it opens the dual-window /
+logic-analyzer view, toggling `LA-SWI` and jumping to menu 61, which strands any navigation
+in progress. Use `Fn0`–`Fn6` only. `[verified 2026-07-22]`
+
+**The trigger level knob is inert in Slope.** Three presses moved `TRIG-VPOS` by 3 in Edge,
+Video, Pulse and Overtime, and by **0** in Slope — on both pages, moving no other field
+either. Slope compares against V1/V2 instead, so a driver must not converge on the level in
+that mode: it presses until it concludes it has hit an end stop and fails the whole
+configuration. `[verified 2026-07-22]`
+
+### Alter (alternating trigger) — menu 24 and sub-pages 26–33
+
+Alter runs a **separate trigger per channel**, alternating between them, so its settings live
+in `TRIG-SWAP-CH1-*` / `TRIG-SWAP-CH2-*` rather than the main `TRIG-*` fields.
+`[verified 2026-07-22]`
+
+**Base page (24)** — `Type` box, then a `Setting` box holding two buttons:
+
+| key | does |
+|---|---|
+| `Fn1` | Type — the main ring, same as every other trigger page |
+| `Fn2` | **CH1** → opens that channel's page |
+| `Fn3` | **CH2** → opens that channel's page |
+
+**Channel pages.** Each channel has four, one per sub-type, and the id encodes both:
+
+| | Edge | Pulse | Video | O.T. |
+|---|---|---|---|---|
+| CH1 | 26 | 27 | 28 | 29 |
+| CH2 | 30 | 31 | 32 | 33 |
+
+`Fn1` cycles `TRIG-SWAP-CHx-TYPE` over a ring of **4** — Slope and Alter are not offered —
+and the menu id follows: from Edge the walk is 26 → 28 → 27 → 29 → 26 for codes 1, 2, 3, 0.
+So the codes are 0 = Edge, 1 = Video, 2 = Pulse, 3 = O.T., while the *ids* run
+Edge, Pulse, Video, O.T. — the two orders differ, which is easy to trip over.
+
+`Fn6` is **Back** to menu 24, in the slot where a paged menu puts its page turn.
+
+Slots 2–5 hold that sub-type's own settings, and the layout differs per sub-type. Read off
+the screens themselves (`--alter <dir>` writes one frame per page):
+
+| page | `Fn2` | `Fn3` | `Fn4` | `Fn5` |
+|---|---|---|---|---|
+| Edge (26/30) | Slope | Coupling ▲ | Coupling ▼ | — |
+| Pulse (27/31) | Polarity | When | **Set PW** *(knob)* | Coupling |
+| Video (28/32) | Polarity | Standard | Sync ▲ | Sync ▼ |
+| O.T. (29/33) | Polarity | **Overtime** *(knob)* | Coupling ▲ | Coupling ▼ |
+
+Two consequences that are easy to miss and that a settings-blob diff will not tell you:
+
+- **A Video channel has no Coupling box at all.** `TRIG-SWAP-CHx-COUP` still holds whatever
+  an earlier sub-type left in it, so reading it back for a Video channel reports a coupling
+  the scope is not offering — and comparing it fails on a setting neither side ever applied.
+- **Pulse and O.T. channels each have a knob-only value** — `TRIG-SWAP-CHx-PULSE-TIME` and
+  `TRIG-SWAP-CHx-OVERTIME-TIME` — in slots 4 and 3 respectively. They sit *higher* than the
+  equivalents on the main pages (slot 5), because the Alter pages carry one box fewer.
+
+A list too long for one box gets **two** keys, one per scroll direction — the ▲▼ arrows are
+drawn on screen. Measured on the Edge page: `Fn3` walked coupling 4→3→2→1 while `Fn4` walked
+2→3→4→0.
+
+**The trigger level under Alter.** The screen shows **two** trigger readouts, one per channel
+(`CH1 ∏ 240mV` beside `CH2 ∫ 0.00V`), but the settings block has only one `TRIG-VPOS`. It
+holds the level of whichever channel **`TRIG-SRC`** names, and the alternation moves that on
+its own — so a read taken at the wrong instant reports the other channel's level as though it
+were this one. Read it only while `TRIG-SRC` says the channel you mean.
+
+**Only CH1's level is reachable by the level knob.** Twelve presses across both channel
+pages walked CH1's on-screen level 0.00 V → 240 mV → 480 mV while CH2's stayed at 0.00 V
+throughout — the knob does not follow the open page. `[verified 2026-07-22]` With the
+acquisition **stopped** the knob moves nothing at all, on either page. How CH2's Alter level
+is set is unknown. `[gap]`
+
+**Opening a channel page mirrors that channel's settings into the main `TRIG-*` fields.**
+Entering CH1's page moved `TRIG-SRC`, `TRIG-COUP` and `TRIG-EDGE-SLOPE`, none of which
+describe the trigger in Alter mode — they track whichever channel page was last open. So the
+main fields must **not** be read as the trigger configuration while `TRIG-TYPE` is 5; that is
+why the driver reports Alter as "not readable" rather than decoding it into a single trigger.
+`[verified 2026-07-22]`
+
+**Not driven by this app** `[gap]`: Alter is mapped but not implemented — it needs a whole
+per-channel configuration model, and the two channels' settings are independent of the single
+`TriggerSetup` the rest of the app speaks.
+
+---
+
 ## 4. Save→CSV softkey map (menu 47 → 48)
 
 Verified by screenshotting each menu (`0x20`):

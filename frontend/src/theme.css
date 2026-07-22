@@ -415,6 +415,10 @@ body {
 /* Each settings group folds to a single row. The header doubles as the collapsed state
    readout, so folding a section hides its controls but never its values. */
 .section {
+  /* A flex item shrinks by default, so in a scrolling column a tall section is squashed —
+     and with `overflow: hidden` that silently *clips* its last controls instead of letting
+     the sidebar scroll. Sections keep their natural height and the column scrolls. */
+  flex: 0 0 auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-panel-2);
@@ -516,6 +520,69 @@ body {
 .hint strong {
   color: var(--text-dim);
   font-weight: 650;
+}
+
+/* A segmented control that wraps, for option sets too wide for one row (trigger sources,
+   coupling modes). Buttons keep a sensible minimum rather than shrinking to nothing. */
+.segmented.wrap {
+  flex-wrap: wrap;
+}
+.segmented.wrap button {
+  flex: 1 0 auto;
+  min-width: 44px;
+}
+
+/* Alter gives each channel its own trigger, so each gets its own bordered block with a
+   channel-coloured heading — the nesting is real and the UI should show it. */
+.alter-channel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+}
+.alter-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.alter-head .sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.alter-head.ch1 .sw {
+  background: var(--ch1);
+}
+.alter-head.ch2 .sw {
+  background: var(--ch2);
+}
+
+/* The trigger level: a value flanked by its adjustments, so the number stays the focus. */
+.level-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.level-row .btn {
+  flex: 0 0 auto;
+  min-width: 32px;
+  padding: 6px 8px;
+}
+.level-row .level-value {
+  flex: 1;
+  text-align: center;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
 
 /* segmented control */

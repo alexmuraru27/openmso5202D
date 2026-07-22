@@ -9,6 +9,7 @@
 //! progress bar needs.
 
 use crate::control::csv::CsvSource;
+use crate::control::trigger::{Adjustable, TriggerSetup};
 use crate::settings::{Probe, StoreDepth};
 
 /// One semantic operation in a plan.
@@ -41,6 +42,29 @@ pub enum Op {
     SetTimePerDiv {
         /// Desired scale in nanoseconds per division; must be a value the scope offers.
         nanoseconds: u64,
+    },
+    /// Configure what the trigger looks for: type, source, slope, mode, coupling and the
+    /// per-type options.
+    ///
+    /// One op rather than one per field: an operator thinks "set the trigger", and the
+    /// fields are not independently meaningful — the type decides which of the others even
+    /// exist. It reports sub-progress as each field lands, because a full change is several
+    /// seconds of key presses and a bar that does not move looks like a hang.
+    SetTrigger {
+        /// The configuration to apply.
+        setup: TriggerSetup,
+    },
+    /// Drive one of the trigger's knob-only values to a target.
+    ///
+    /// These have no keyed entry — pulse width, slope thresholds, overtime, video line — so
+    /// the only way to set one is to walk the multipurpose knob to it. Doing that once here
+    /// is why the panel can offer them as ordinary settings instead of a live control that
+    /// costs a USB round trip per click.
+    SetTriggerValue {
+        /// Which value.
+        what: Adjustable,
+        /// Where it should end up, in the units its field is stored in.
+        target: i64,
     },
     /// Set the trigger level, in 1/25-division units relative to screen centre.
     SetTriggerLevel {
@@ -115,6 +139,12 @@ impl Op {
             Op::SetTimePerDiv { nanoseconds } => {
                 format!("Setting timebase to {}/div", format_time(*nanoseconds))
             }
+            Op::SetTrigger { setup } => format!(
+                "Setting the {} trigger on {}",
+                setup.kind.name(),
+                setup.source.name()
+            ),
+            Op::SetTriggerValue { what, .. } => format!("Setting {}", what.label().to_lowercase()),
             Op::SetTriggerLevel { position } => format!("Setting trigger level to {position}"),
             Op::SetDepth { depth } => {
                 format!("Setting acquisition depth to {}", depth_label(*depth))

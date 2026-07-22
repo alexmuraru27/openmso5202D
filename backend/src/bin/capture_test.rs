@@ -42,11 +42,18 @@ fn run() -> Result<()> {
         println!("[capture_test] connected — bus {bus} address {address}");
     }
 
+    // Prepare owns the trigger now: it begins with a Default Setup, so anything applied
+    // beforehand would be wiped. Exercise a non-default one so the ordering is really tested.
     let spec = CaptureSpec {
         channels: args.channels.clone(),
         depth: args.depth,
         timebase_ns: args.timebase_ns,
         delete_after: args.clear,
+        trigger: Some(mso5202d::control::trigger::TriggerSetup {
+            source: mso5202d::control::trigger::TriggerSource::Ch2,
+            coupling: mso5202d::control::trigger::TriggerCoupling::Ac,
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -56,6 +63,23 @@ fn run() -> Result<()> {
     let t0 = Instant::now();
     control::capture::prepare(&context, &spec)?;
     println!("[prepare] done in {:.1}s", t0.elapsed().as_secs_f64());
+
+    // The trigger must have survived the Default Setup that opens the plan.
+    {
+        let settings = scope.read_settings()?;
+        match mso5202d::control::trigger::read(&settings) {
+            Some(got) if got.source == mso5202d::control::trigger::TriggerSource::Ch2
+                && got.coupling == mso5202d::control::trigger::TriggerCoupling::Ac =>
+            {
+                println!("[prepare] trigger applied after the reset: CH2 / AC");
+            }
+            other => {
+                return Err(mso5202d::Error::Unexpected(format!(
+                    "prepare did not leave the requested trigger in place: {other:?}"
+                )))
+            }
+        }
+    }
 
     // Verify the depth actually cycled to what we asked for — the headline check.
     let after = scope.read_settings()?;

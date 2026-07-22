@@ -54,15 +54,44 @@ pub fn converge(
     tolerance: i64,
     read: impl Fn(&Settings) -> Option<i64>,
 ) -> Result<i64> {
+    converge_within(device, knob, target, tolerance, MAX_STEPS, read)
+}
+
+/// [`converge`] with an explicit step budget.
+///
+/// The default suits knobs that step through a scale — volts/division spans about a dozen
+/// positions, the timebase 32. A knob that moves in fine units needs far more: the trigger
+/// level covers ±8 divisions at 25 units each, so crossing the screen is hundreds of presses
+/// even though every one of them lands.
+pub fn converge_within(
+    device: &Device,
+    knob: Knob,
+    target: i64,
+    tolerance: i64,
+    max_steps: u32,
+    read: impl Fn(&Settings) -> Option<i64>,
+) -> Result<i64> {
+    // A `None` from `read` means "not readable *right now*", not "never readable" — the
+    // trigger level under an alternating trigger shares its field with the other channel and
+    // only reports this one's value while the alternation is on it. So look again rather
+    // than give up; only a value that stays unreadable is a real failure.
+    const READ_ATTEMPTS: u32 = 12;
     let current = |device: &Device| -> Result<i64> {
-        let settings = device.read_settings()?;
-        read(&settings).ok_or_else(|| {
-            Error::Unexpected(format!("{knob:?} value is not readable from the settings block"))
-        })
+        for attempt in 0..READ_ATTEMPTS {
+            if let Some(value) = read(&device.read_settings()?) {
+                return Ok(value);
+            }
+            if attempt + 1 < READ_ATTEMPTS {
+                sleep(Duration::from_millis(150));
+            }
+        }
+        Err(Error::Unexpected(format!(
+            "{knob:?} value never became readable from the settings block"
+        )))
     };
 
     let mut value = current(device)?;
-    for _ in 0..MAX_STEPS {
+    for _ in 0..max_steps {
         if (value - target).abs() <= tolerance {
             return Ok(value);
         }
@@ -96,7 +125,7 @@ pub fn converge(
         value = moved;
     }
     Err(Error::Unexpected(format!(
-        "{knob:?} did not reach {target} within {MAX_STEPS} steps (stopped at {value})"
+        "{knob:?} did not reach {target} within {max_steps} steps (stopped at {value})"
     )))
 }
 
@@ -123,11 +152,18 @@ pub fn open_menu(device: &Device, key: crate::device::Key, wanted: &[u8]) -> Res
 }
 
 /// Press `key` until `read` reports `target`, for settings that **cycle** through a ring
-/// of values rather than moving up and down (probe attenuation, store depth).
+/// of values rather than moving up and down (probe attenuation, store depth, trigger type).
 ///
-/// Each press advances one position, so this walks the ring at most `ring_size` times
-/// before concluding the value is unreachable — typically because it is greyed out in the
-/// current mode.
+/// Each press that lands advances one position, so walking the whole ring without finding
+/// the target means the value is genuinely unreachable — typically because it is greyed out
+/// in the current mode.
+///
+/// A press that does *not* land is a different matter and must not be counted as a lap. The
+/// key mailbox holds a single slot and drops presses when the scope is busy, so a press that
+/// moved nothing is far more often a dropped one than an end of the road — and counting it
+/// as a lap walks the budget down to zero while the value has not moved at all, failing with
+/// "unavailable in this mode" on a value that was perfectly available. Re-press instead,
+/// waiting longer each time, and only give up once several in a row have gone nowhere.
 pub fn cycle_until(
     device: &Device,
     key: crate::device::Key,
@@ -139,16 +175,36 @@ pub fn cycle_until(
         Ok(read(&device.read_settings()?))
     };
 
-    for _ in 0..=ring_size {
-        if current(device)? == Some(target) {
+    let mut laps = 0;
+    let mut stalls = 0;
+    loop {
+        let before = current(device)?;
+        if before == Some(target) {
             return Ok(target);
         }
         device.press(key)?;
         sleep(SETTLE);
+
+        if current(device)? == before {
+            stalls += 1;
+            if stalls > NONMOVE_RETRIES {
+                return Err(Error::Unexpected(format!(
+                    "{key:?} moved nothing in {stalls} presses (stuck at {before:?}, wanted \
+                     {target}); the menu may not be open"
+                )));
+            }
+            sleep(SETTLE * stalls);
+            continue;
+        }
+
+        stalls = 0;
+        laps += 1;
+        if laps > ring_size {
+            return Err(Error::Unexpected(format!(
+                "cycling {key:?} walked all {ring_size} positions without reaching {target} \
+                 (now {:?}); the value may be unavailable in this mode",
+                current(device)?
+            )));
+        }
     }
-    Err(Error::Unexpected(format!(
-        "cycling {key:?} did not reach {target} in {ring_size} steps \
-         (now {:?}); the value may be unavailable in this mode",
-        current(device)?
-    )))
 }

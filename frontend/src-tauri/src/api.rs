@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
-use mso5202d::control::{self, Context, CsvSource, Op, ProgressEvent, ProgressSink};
+use mso5202d::control::{self, trigger, Context, CsvSource, Op, ProgressEvent, ProgressSink};
 use mso5202d::decoder::{self, i2c, spi, uart, Event, Kind};
 use mso5202d::settings::{StoreDepth, TB_TO_NS};
 use mso5202d::{waveform, CaptureSpec, Device};
@@ -232,9 +232,23 @@ pub async fn prepare(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     config: CaptureConfig,
+    trigger: Option<TriggerConfig>,
 ) -> Result<(), String> {
     config.validate()?;
-    let spec = config.to_spec()?;
+    let mut spec = config.to_spec()?;
+    // The trigger is configured as part of prepare rather than on its own: a Default Setup
+    // would undo it, so it has to happen inside the same sequence, after the reset and the
+    // channels.
+    spec.trigger = trigger.as_ref().map(|t| t.to_setup()).transpose()?;
+    // The knob-only values are walked to during prepare too — that is the whole reason the
+    // panel can treat them as settings rather than as a live control.
+    if let Some(config) = trigger.as_ref() {
+        spec.trigger_values = config
+            .value_targets
+            .iter()
+            .filter_map(|(id, &target)| Some((adjustable_from_id(id)?, target)))
+            .collect();
+    }
     let guard = state.device.lock().unwrap();
     let device = guard.as_ref().ok_or("scope not connected")?;
 
@@ -737,3 +751,235 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Stop => "stop",
     }
 }
+
+// --- trigger -----------------------------------------------------------------
+
+/// The trigger configuration, as the UI names it.
+///
+/// Strings rather than numbers on the wire: the scope's codes are an implementation detail
+/// of the settings block, and a UI that spoke them would break silently if one ever moved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerConfig {
+    /// `"edge"`, `"video"`, `"pulse"`, `"slope"`, or `"overtime"`.
+    pub kind: String,
+    /// `"ch1"`, `"ch2"`, `"ext"`, `"ext5"`, or `"acline"`.
+    pub source: String,
+    /// `"auto"` or `"normal"`.
+    pub mode: String,
+    /// `"dc"`, `"ac"`, `"noise"`, `"hfreject"`, or `"lfreject"`.
+    pub coupling: String,
+    /// `"positive"` or `"negative"` — edge direction, or pulse/video polarity.
+    pub polarity: String,
+    /// Video only: `"ntsc"` or `"pal"`.
+    pub video_standard: String,
+    /// Video only: `"alllines"`, `"linenumber"`, `"oddfield"`, `"evenfield"`, `"allfields"`.
+    pub video_sync: String,
+    /// Pulse and Slope only: `"equal"`, `"notequal"`, `"greater"`, or `"less"`.
+    pub qualifier: String,
+    /// Alter only: CH1's own trigger.
+    pub alter_ch1: AlterChannelConfig,
+    /// Alter only: CH2's own trigger.
+    pub alter_ch2: AlterChannelConfig,
+    /// Trigger level in the scope's 1/25-division units, relative to screen centre.
+    pub level: i64,
+    /// Targets for the knob-only values, keyed by the id in [`TriggerValue`].
+    ///
+    /// Applied by Prepare, which walks the multipurpose knob to each. Absent ids are left
+    /// wherever the instrument has them.
+    #[serde(default)]
+    pub value_targets: std::collections::BTreeMap<String, i64>,
+    /// Trigger level in millivolts, derived from the source's scale. Read-only — the scope
+    /// computes it, so it is reported but never sent.
+    #[serde(skip_deserializing)]
+    pub level_mv: Option<f64>,
+    /// Millivolts per unit of `level`, i.e. the source's volts/division ÷ 25.
+    ///
+    /// Reported so the UI can put an edit into volts *before* it is applied. Without it a
+    /// level being adjusted could only be shown in divisions, and the panel would flip
+    /// between units as you clicked. `None` when the source is not an analog channel, which
+    /// is the same condition under which the scope itself has no volts figure.
+    #[serde(skip_deserializing)]
+    pub level_mv_per_unit: Option<f64>,
+    /// The `level` at which the trigger sits on the source's ground — its 0 V point.
+    #[serde(skip_deserializing)]
+    pub level_zero: i64,
+    /// Whether the trigger level applies at all. False for Slope, which compares against two
+    /// thresholds of its own and whose level knob is inert.
+    #[serde(skip_deserializing)]
+    pub level_applies: bool,
+    /// The continuous parameters this trigger type offers, already formatted.
+    ///
+    /// Sent as a list rather than named fields because which ones exist depends entirely on
+    /// the type, and the UI's job is the same for all of them: show the value, offer a nudge.
+    #[serde(skip_deserializing)]
+    pub values: Vec<TriggerValue>,
+}
+
+/// One channel's trigger inside Alter mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlterChannelConfig {
+    /// `"edge"`, `"video"`, `"pulse"`, or `"overtime"` — Slope is not offered per channel.
+    pub kind: String,
+    /// `"positive"` or `"negative"`.
+    pub polarity: String,
+    /// `"dc"`, `"ac"`, `"noise"`, `"hfreject"`, or `"lfreject"`.
+    pub coupling: String,
+    /// Pulse only.
+    pub qualifier: String,
+    /// Video only.
+    pub video_standard: String,
+    /// Video only.
+    pub video_sync: String,
+}
+
+impl AlterChannelConfig {
+    fn to_channel(&self) -> trigger::AlterChannel {
+        use trigger::*;
+        AlterChannel {
+            kind: match self.kind.as_str() {
+                "video" => AlterType::Video,
+                "pulse" => AlterType::Pulse,
+                "overtime" => AlterType::Overtime,
+                _ => AlterType::Edge,
+            },
+            polarity: match self.polarity.as_str() {
+                "negative" => Polarity::Negative,
+                _ => Polarity::Positive,
+            },
+            coupling: coupling_from(&self.coupling),
+            qualifier: qualifier_from(&self.qualifier),
+            video_standard: match self.video_standard.as_str() {
+                "pal" => VideoStandard::PalSecam,
+                _ => VideoStandard::Ntsc,
+            },
+            video_sync: video_sync_from(&self.video_sync),
+        }
+    }
+}
+
+/// Shared enum translation, so the top-level trigger and each Alter channel agree.
+fn coupling_from(name: &str) -> trigger::TriggerCoupling {
+    use trigger::TriggerCoupling::*;
+    match name {
+        "ac" => Ac,
+        "noise" => NoiseReject,
+        "hfreject" => HighFrequencyReject,
+        "lfreject" => LowFrequencyReject,
+        _ => Dc,
+    }
+}
+
+fn qualifier_from(name: &str) -> trigger::Qualifier {
+    use trigger::Qualifier::*;
+    match name {
+        "equal" => Equal,
+        "notequal" => NotEqual,
+        "less" => Less,
+        _ => Greater,
+    }
+}
+
+fn video_sync_from(name: &str) -> trigger::VideoSync {
+    use trigger::VideoSync::*;
+    match name {
+        "linenumber" => LineNumber,
+        "oddfield" => OddField,
+        "evenfield" => EvenField,
+        "allfields" => AllFields,
+        _ => AllLines,
+    }
+}
+
+/// One continuous trigger parameter.
+///
+/// Reported raw rather than formatted so the panel can move it locally: it edits a *target*
+/// and Prepare walks the knob there, which means it has to render values the instrument has
+/// never held. One formatter, in the UI, keeps the current value and the target in the same
+/// words.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerValue {
+    /// Stable identifier, used to send a target back.
+    pub id: String,
+    /// What the scope calls it.
+    pub label: String,
+    /// Where it stands now, in the units its field is stored in.
+    pub raw: i64,
+    /// How far one knob press moves it, in the same units.
+    pub step: i64,
+    /// `time` (picoseconds), `count`, or `level` (1/25 division).
+    pub unit: String,
+}
+
+impl TriggerConfig {
+    /// Translate into the control layer's vocabulary.
+    pub fn to_setup(&self) -> Result<trigger::TriggerSetup, String> {
+        use trigger::*;
+        Ok(TriggerSetup {
+            kind: match self.kind.as_str() {
+                "edge" => TriggerType::Edge,
+                "video" => TriggerType::Video,
+                "pulse" => TriggerType::Pulse,
+                "slope" => TriggerType::Slope,
+                "overtime" => TriggerType::Overtime,
+                "alter" => TriggerType::Alter,
+                other => return Err(format!("unknown trigger type {other:?}")),
+            },
+            source: match self.source.as_str() {
+                "ch1" => TriggerSource::Ch1,
+                "ch2" => TriggerSource::Ch2,
+                "ext" => TriggerSource::External,
+                "ext5" => TriggerSource::ExternalDiv5,
+                "acline" => TriggerSource::AcLine,
+                other => return Err(format!("unknown trigger source {other:?}")),
+            },
+            mode: match self.mode.as_str() {
+                "normal" => TriggerMode::Normal,
+                _ => TriggerMode::Auto,
+            },
+            coupling: coupling_from(&self.coupling),
+            polarity: match self.polarity.as_str() {
+                "negative" => Polarity::Negative,
+                _ => Polarity::Positive,
+            },
+            video_standard: match self.video_standard.as_str() {
+                "pal" => VideoStandard::PalSecam,
+                _ => VideoStandard::Ntsc,
+            },
+            video_sync: match self.video_sync.as_str() {
+                "linenumber" => VideoSync::LineNumber,
+                "oddfield" => VideoSync::OddField,
+                "evenfield" => VideoSync::EvenField,
+                "allfields" => VideoSync::AllFields,
+                _ => VideoSync::AllLines,
+            },
+            qualifier: qualifier_from(&self.qualifier),
+            alter_ch1: self.alter_ch1.to_channel(),
+            alter_ch2: self.alter_ch2.to_channel(),
+        })
+    }
+}
+
+/// Parse one back.
+pub fn adjustable_from_id(id: &str) -> Option<trigger::Adjustable> {
+    use trigger::Adjustable::*;
+    Some(match id {
+        "pulseWidth" => PulseWidth,
+        "slopeV1" => SlopeV1,
+        "slopeV2" => SlopeV2,
+        "slopeTime" => SlopeTime,
+        "overtimeTime" => OvertimeTime,
+        "alterCh1PulseWidth" => AlterCh1PulseWidth,
+        "alterCh1OvertimeTime" => AlterCh1OvertimeTime,
+        "alterCh2PulseWidth" => AlterCh2PulseWidth,
+        "alterCh2OvertimeTime" => AlterCh2OvertimeTime,
+        "videoLine" => VideoLine,
+        "alterCh1VideoLine" => AlterCh1VideoLine,
+        "alterCh2VideoLine" => AlterCh2VideoLine,
+        _ => return None,
+    })
+}
+
+

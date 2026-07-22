@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { CaptureConfig, Depth, Protocol } from "../api";
 import { capturePlan, formatDuration } from "../timebase";
 import { Section } from "./Section";
+import { TriggerPanel, triggerSummary } from "./TriggerPanel";
+import type { TriggerConfig } from "../api";
 
 /** Bounds for the samples-per-clock control (slider and typed input share them). */
 const SPC_MIN = 4;
@@ -18,6 +20,9 @@ interface Props {
   /** Which sections are expanded, and how to fold one. */
   panels: Record<string, boolean>;
   onTogglePanel: (id: string) => void;
+  /** The trigger configuration, applied to the scope by Prepare. */
+  trigger: TriggerConfig;
+  onTriggerChange: (next: TriggerConfig) => void;
 }
 
 const DEPTHS: Depth[] = ["4k", "40k", "512k", "1m"];
@@ -55,6 +60,7 @@ export function ControlPanel(props: Props) {
   // A collapsed section still has to answer "how is this set", so each carries a summary.
   const open = (id: string) => props.panels[id] !== false;
 
+
   return (
     <div className="sidebar">
       {/* Settings scroll; the actions below stay pinned so Prepare/Capture are reachable
@@ -67,6 +73,19 @@ export function ControlPanel(props: Props) {
           summary={`${config.channels.map((c) => `CH${c}`).join("+") || "no channels"} · ${config.depth.toUpperCase()}`}
         >
           <Acquisition config={config} onChange={onChange} toggleChannel={toggleChannel} />
+        </Section>
+
+        <Section
+          title="Trigger"
+          open={open("trigger")}
+          onToggle={() => props.onTogglePanel("trigger")}
+          summary={triggerSummary(props.trigger)}
+        >
+          <TriggerPanel
+            busy={busy !== null}
+            value={props.trigger}
+            onChange={props.onTriggerChange}
+          />
         </Section>
 
         <Section

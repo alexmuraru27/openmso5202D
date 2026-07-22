@@ -20,20 +20,26 @@ import {
   type FocusRequest,
 } from "./components/WaveformView";
 import { ByteList } from "./components/ByteList";
+import { DEFAULT_TRIGGER } from "./components/TriggerPanel";
 import { FilesDialog } from "./components/FilesDialog";
 import {
   clearConfig,
+  clearTrigger,
   DEFAULT_CONFIG,
   loadConfig,
   loadPanels,
+  loadTrigger,
   savePanels,
   saveConfig,
+  saveTrigger,
 } from "./settings";
 
 export function App() {
   const [status, setStatus] = useState<ScopeStatus>({ connected: false });
   // Restore the last configuration, so the app comes back set up as it was left.
   const [config, setConfig] = useState<CaptureConfig>(loadConfig);
+  // The trigger is a setting like any other: edited freely, saved, and applied by Prepare.
+  const [trigger, setTrigger] = useState(loadTrigger);
   const [prepared, setPrepared] = useState(false);
   const [busy, setBusy] = useState<null | "connect" | "prepare" | "capture" | "card">(null);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
@@ -73,21 +79,32 @@ export function App() {
   useEffect(() => {
     saveConfig(config);
   }, [config]);
+  useEffect(() => {
+    saveTrigger(trigger);
+  }, [trigger]);
+
+  // The trigger is applied during Prepare, so changing it invalidates a prior one.
+  const updateTrigger = useCallback((next: typeof DEFAULT_TRIGGER) => {
+    setTrigger(next);
+    setPrepared(false);
+  }, []);
 
   /** Put every setting back to its default and forget the stored one. */
   const resetSettings = useCallback(() => {
     setConfig({ ...DEFAULT_CONFIG });
+    setTrigger({ ...DEFAULT_TRIGGER });
     clearConfig();
+    clearTrigger();
     // The scope is still set up for the old configuration, so it must be prepared again.
     setPrepared(false);
   }, []);
 
   // Card work streams its own progress. Subscribed for the app's lifetime rather than per
-  // operation, because a card job can start from the panel without going through here.
+  // operation, because a card job can start from a sidebar panel without going through here.
   useEffect(() => {
-    const pending = onProgress("card:progress", setProgress);
+    const pending = [onProgress("card:progress", setProgress)];
     return () => {
-      pending.then((unlisten) => unlisten());
+      for (const p of pending) p.then((unlisten) => unlisten());
     };
   }, []);
 
@@ -97,7 +114,6 @@ export function App() {
     setBusy((prev) => (on ? "card" : prev === "card" ? null : prev));
     if (on) setProgress(null);
   }, []);
-
   // Changing an ACQUISITION setting invalidates a prior prepare — the scope must be set up
   // again before the next capture reflects it. Decode-only settings (protocol, line
   // assignment) change nothing on the instrument, so they must NOT force a re-prepare;
@@ -168,7 +184,7 @@ export function App() {
     let unlisten: (() => void) | undefined;
     try {
       unlisten = await onProgress("prepare:progress", setProgress);
-      await prepare(config);
+      await prepare(config, trigger);
       setPrepared(true);
     } catch (e) {
       setError(String(e));
@@ -177,7 +193,7 @@ export function App() {
       unlisten?.();
       setBusy(null);
     }
-  }, [config]);
+  }, [config, trigger]);
 
   const doCapture = useCallback(async () => {
     setBusy("capture");
@@ -266,6 +282,8 @@ export function App() {
         onCapture={doCapture}
         panels={panels}
         onTogglePanel={togglePanel}
+        trigger={trigger}
+        onTriggerChange={updateTrigger}
       />
 
       {/* Kept mounted so a card listing and the channel assignment survive closing it. */}
