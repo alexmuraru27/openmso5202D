@@ -15,8 +15,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
-repository = "https://github.com/openmso5202D/openmso5202D"
+license = "Apache-2.0"
+repository = "https://github.com/alexmuraru27/openmso5202D"
 
 # Optimise dependencies even in dev so USB throughput (waveform decode) is usable
 # while iterating; our own crates stay unoptimised for fast rebuilds.

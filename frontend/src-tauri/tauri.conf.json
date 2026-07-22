@@ -30,9 +30,32 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/32x32.png",
+      "icons/icon.png",
+      "icons/128x128@2x.png",
       "icons/128x128.png",
-      "icons/icon.png"
-    ]
+      "icons/32x32.png",
+      "icons/icon.ico"
+    ],
+    "publisher": "openmso5202D",
+    "homepage": "https://github.com/alexmuraru27/openmso5202D",
+    "license": "Apache-2.0",
+    "licenseFile": "../../LICENSE",
+    "category": "Utility",
+    "shortDescription": "Capture and protocol-decode workbench for the Hantek MSO5202D oscilloscope",
+    "longDescription": "An open driver and desktop GUI for the Hantek MSO5202D oscilloscope (USB 049f:505a), reverse-engineered from USB captures of the vendor Windows app.\n\nTakes deep, trigger-aligned records of up to 1M samples, plots them with measurement cursors, and decodes UART, SPI and I2C traffic on them. Requires a USB flash drive in the scope's front-panel port: captures are routed through the instrument's own CSV export and read back over USB.",
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/udev/rules.d/70-mso5202d.rules": "../../70-mso5202d.rules"
+        },
+        "postInstallScript": "packaging/postinstall.sh"
+      },
+      "rpm": {
+        "files": {
+          "/usr/lib/udev/rules.d/70-mso5202d.rules": "../../70-mso5202d.rules"
+        },
+        "postInstallScript": "packaging/postinstall.sh"
+      }
+    }
   }
 }

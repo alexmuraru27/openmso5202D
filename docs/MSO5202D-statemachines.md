@@ -4,10 +4,12 @@ How to *drive* the scope over USB: the command sequences, the waits, and the
 verification between steps. This is the procedural companion to the two reference
 docs — `MSO5202D-protocol.md` (the byte-level wire protocol) and
 `MSO5202D-rendering.md` (turning samples into a trace). Everything here is
-hardware-verified; the flows are what `scripts/mso5202d_plot.py`,
-`scripts/mso5202d_decode.py`, and `scripts/mso5202d_shell.py` implement, and what the
-Rust backend (`backend/src`) mirrors one-to-one — the host-side USB stack that carries
-them all is §8.
+hardware-verified.
+
+The implementation is the Rust driver crate: the flows below are the operation plans in
+`backend/src/control/` (`capture.rs` builds them, `mod.rs` runs them), and the host-side
+USB stack that carries them is `backend/src/usb/transport.rs` (§8). The Python scripts in
+`scripts/` are the reverse-engineering reference tooling the crate was derived from.
 
 The scope is a small embedded instrument with a slow key-scan loop and a
 **fragile USB/SD-card coupling**. Driving it reliably is less about individual
@@ -22,25 +24,22 @@ commands than about *ordering, pacing, and reading state back between steps*.
    write. Never fire a key blind and assume it landed (the key mailbox is
    single-slot and the scan loop is slow). This is *closed-loop* control.
 
-2. **Do NOT `dev.reset()` when the SD card is needed.** A USB reset disturbs the
-   scope's USB **host** controller (the same silicon that hosts the SD flash
-   drive), dropping the card → Save→CSV fails with **"USB device undetected."**
-   Connect with `Scope(reset=False)` for any deep-capture/save flow. `[verified]`
+2. **Never USB-reset the device.** A USB reset disturbs the scope's USB **host**
+   controller — the same silicon that hosts the front-panel flash drive — dropping the
+   drive → Save→CSV fails with **"USB device undetected."** Connect without a reset; a
+   no-reset connection is fully functional (§1). `[verified]`
 
-3. **Minimise `0x11` settings-block writes around a save.** A `0x11` write also
-   disturbs card detection (same failure mode as the reset). The vendor virtual
-   panel **never** writes `0x11` and **never** resets — it drives everything via key
-   events and only *reads* settings. Do `0x11` prep *before* the save path, not
-   inside it, and expect that a physical panel press (or menu re-navigation) may be
-   needed to re-detect the card if the flow was `0x11`-heavy. `[verified]`
+3. **The settings block is READ-ONLY. Configure with keys.** The scope is driven
+   exclusively by key events (`0x13`) and knob steps; `0x01` settings reads are only
+   ever used to *verify*. A `0x11` block write sets the field but skips the key handler's
+   side effects — LED, on-screen radio, acquisition reconfiguration, card detection — so
+   the field and the instrument disagree (4a/4b), and a `0x11` depth write on a running
+   scope crash-reboots it. The vendor virtual panel behaves the same way: keys and reads
+   only. Shell `0x43` and the reads `0x01`/`0x02`/`0x10`/`0x20` are the only non-key
+   operations. `[verified]`
 
-4. **Prefer buttons to `0x11` writes; never stop during prepare.** Anything with a
-   front-panel LED/menu indicator (store depth, channel on/off, trigger source) must be
-   driven by **key events**, not `0x11` settings writes — a `0x11` write can change the
-   field yet leave the physical indicator wrong (see 4a/4b), and a `0x11` *depth change*
-   on a running scope crash-reboots it. The scope stays **RUNNING** the whole prepare; the
-   only STOP is the capture single-seq. (Shell `0x43` and raw reads `0x01`/`0x02`/`0x10`/
-   `0x20` are the only non-button operations.) `[verified 2026-07-11]`
+4. **Never stop the scope during prepare.** It stays **RUNNING** the whole way through
+   configuration; the only STOP is the capture's single sequence. `[verified 2026-07-11]`
 
 4a. **Set store depth with the Acquire-menu F5 softkey, single-edge + poll — not `0x11`.** A
    `0x11` depth write leaves the on-screen **LongMem radio stale at 4K** (scope moves slower
@@ -50,7 +49,8 @@ commands than about *ordering, pacing, and reading state back between steps*.
    frame per step** and, after each, **poll `ACQURIE-STORE-DEPTH` until it reaches the next step**
    before sending the next — one frame = one step, so never send a second frame for the same step.
    No render delay — the field settles within ~1–2 s and the poll catches it; whole ring 4K→1M in
-   ~4 s (`_set_depth_via_keys`). From the Default-Setup 4K start it takes exactly the ring distance.
+   ~4 s (`depth_walk` in `backend/src/control/mod.rs`). From the Default-Setup 4K start it takes
+   exactly the ring distance.
    1M is single-channel (DS baseline CH1-only satisfies it). `[verified on-screen 2026-07-11]`
 
 4b. **Turn channels on/off with the CH1/CH2 buttons (keyid 24/30), not a `0x11`
@@ -62,9 +62,9 @@ commands than about *ordering, pacing, and reading state back between steps*.
    ~0.5–1 s button-to-state latency → settle ~1 s. **Verify with 4K wave data, not the field** (`_channel_enabled`): a disabled
    channel's `0x02` acquire returns EMPTY, an enabled one returns ~3200 samples (double-read to
    defeat the one-deep `0x02` channel pipeline). Set channels **before** the depth walk — 1M
-   needs CH2 off first (`_set_channels_via_keys`). **`TRIG-SRC` is likewise not writable via
-   `0x11`** (verified: a write stays on the old source) — trigger source needs its own menu keys
-   (not yet wired; trigger currently stays on CH1). `[verified 2026-07-11]`
+   needs CH2 off first (`set_channel` / `Device::channel_has_data`). **`TRIG-SRC` is likewise not
+   writable via `0x11`** — a write stays on the old source, so the trigger source is driven from
+   its own menu softkey (§3.9). `[verified 2026-07-11]`
 
 5. **Space key presses out (~0.3–0.8 s) and verify the effect.** The vendor app
    spams each key many times because its round-trip is slow; the scope registers
@@ -81,11 +81,11 @@ commands than about *ordering, pacing, and reading state back between steps*.
 find 049f:505a → detach cdc_subset → (NO reset) → claim interface 0 → clear_halt EP 0x02/0x81
 ```
 
-`Scope(reset=False)`. The kernel auto-binds `cdc_subset` (the VID:PID is that
-driver's default), so it must be detached, but the `dev.reset()` in the default
-recipe is what breaks the card — skip it. A no-reset connection is otherwise fully
-functional (settings, waveform, framebuffer, keys, file-read all verified over it).
-Stale RX bytes after a dirty prior session are cleared with `_resync()`.
+The kernel auto-binds `cdc_subset` (the VID:PID happens to be that driver's default), so
+it must be detached — but the USB reset that a naive recipe does at this point is what
+breaks the card, so it is skipped. A no-reset connection is fully functional: settings,
+waveform, framebuffer, keys and file-read are all verified over it. Stale RX bytes left
+by a dirty prior session are cleared with a resync (§8.10).
 
 ---
 
@@ -110,9 +110,9 @@ Relevant `CONTROL-MENUID` values: `1`=CH1 menu, `17`=Acquire, `47`=Save/Recall b
 top* of the CSV page — `CONTROL-MENUID` stays `48`, so use a screenshot (`0x20`) to
 see FileList state, not the menuid.
 
-**Return to the main screen** (close any open side menu): write
-`CONTROL-DISP-MENU = 0` via `0x11`. `[verified]` (This is a `0x11` write — do it at the
-*end* of a flow, not just before a save; see rule 3.)
+**Return to the main screen** (close any open side menu): press **Back** (keyid 6). `Fn0`
+also hides the menu bar, clearing `CONTROL-DISP-MENU`. A side menu left visible is cosmetic
+— the next capture's Default Setup clears it.
 
 ---
 
@@ -127,39 +127,48 @@ bulk-USB frames — leader `0x53` unless noted; the IN payload echoes `selector 
 | Op | OUT | IN | Purpose |
 |---|---|---|---|
 | settings read | `01` | `81` + 213 B | poll `TRIG-STATE` / `CONTROL-MENUID` / depth |
-| settings write | `11` + 213 B | `91` | configure (prep); scope busy ~3.4 s after |
-| key event | `13 <keyid> <state>` | `93` | front-panel key (softkey ids in §4) |
+| key event | `13 <keyid> <state>` | `93` | front-panel key (softkey ids in §4) — the only way to configure |
 | framebuffer | `20` | `a0` (~768 KB) | read the screen — Source radio, save banner |
 | acquire | `02 01 <ch>` | `82` size/data/end | screen-buffer waveform (**probe only**) |
 | file read | `10 <path>` | `90` multi-frame | pull a WaveData CSV back (~800 KB/s) |
 | shell `ls` | `0x43 11 "ls …"` | `0x91` + stdout | list `/mnt/udisk` (read-only) |
 
-### ① `prepare_capture()` — slow, once — **KEY-ONLY (settings memory is READ-only)**
-Every step is a front-panel key; the settings block is only *read* (`01`→`81`) to verify. No
-`0x11` config write — a `0x11` sets the field but skips the key handler's side-effects (LED,
-on-screen radios, acquisition reconfig, SD-card detection), so config-by-`0x11` is what broke
-Save→CSV and rebooted the scope. The scope stays RUNNING throughout (only the capture stops it).
+### ① prepare — slow, once — **KEY-ONLY (settings memory is READ-only)**
+
+Every step is a front-panel key; the settings block is only *read* (`01`→`81`) to verify. The
+scope stays RUNNING throughout — only the capture stops it. The plan is built by
+`CaptureSpec::prepare_plan` and each step is a closed-loop op in `backend/src/control/mod.rs`:
+
 ```
-Default Setup ....... OUT 13 21 01 · poll 01→81 MENUID==25     idempotent known state, all side-effects
-channels on ......... OUT 13 18 (CH1) / 13 1e (CH2) · verify    CH buttons (LED + acquisition correct)
-                       via 4K wave-data
-V/div → 1 V ......... OUT 13 1d/1c (CH1 ±) 23/22 (CH2 ±)        off the 100 mV DS DEFAULT — a 3.3 V
-                       · poll CHn-VDIV-mV until 1000            signal at 100 mV/div is 33 div (clipped!)
+Default Setup ....... OUT 13 21 · poll 01→81 MENUID==25         idempotent known state, all side-effects
+per channel (CH1 then CH2):
+  on / off .......... OUT 13 18 (CH1) / 13 1e (CH2)             CH button is a TOGGLE — press only when
+                       · verify via 4K wave-data                 the state does not already match
+  probe → 1× ........ channel menu softkey, ring                off the 10× DS default: a direct-wired
+                       · poll VERT-CHx-PROBE                     3.3 V reads 33 V at 10× and clips
+  V/div ............. OUT 13 1d/1c (CH1 ±) 23/22 (CH2 ±)        off the 100 mV DS default — a 3.3 V
+                       · poll CHn-VDIV-mV                        signal at 100 mV/div is 33 div (clipped)
+  coupling / 20 MHz / invert ..... channel menu softkeys, rings
+SEC/DIV ............. OUT 13 28/29 · poll ns/div (=SI×200)      computed from the stated max signal
+                                                                 frequency (§3.0.2); ±labels INVERTED
+trigger ............. type/source/slope/… softkeys (§3.9)       only when a trigger is specified
+trigger values ...... multipurpose-knob walks (§3.9)            knob-only params: pulse width, V1/V2, …
+trigger level ....... OUT 13 2b/2c · poll TRIG-VPOS             skipped in modes whose knob is inert
 set depth (F5) ...... OUT 13 0d (open Acquire 17) · OUT 13 05   cycle LongMem 4K→40K→512K→1M until depth
-                       · poll 01→81 until depth==target
-SEC/DIV ............. OUT 13 28/29 · poll ns/div (=SI×200)      step to target; known rate → compute it,
-                                                               else auto-probe. ±labels are INVERTED
-trigger level ....... left at TRIG-VPOS 0 (DS default)          0 V already triggers a 3.3 V CMOS signal
-                                                               (its low rail = 0 V = screen centre)
-                                                               → leaves scope RUNNING, ready
+                       · poll 01→81 until depth==target          → leaves scope RUNNING, ready
 ```
-Knob key ids used (keyprotocol.inf §9.2): CH1 V/div −/+ = `1c`/`1d` (28/29), CH2 = `22`/`23`
+
+**Ordering is load-bearing.** The probe goes before the volts/div, because it multiplies what
+every volts figure on that channel means. The trigger goes after the channels, because a
+Default Setup would undo it and Alter configures per channel. Channels come before the depth
+walk, because 1M needs CH2 off first.
+
+Knob key ids (keyprotocol.inf §9.2): CH1 V/div −/+ = `1c`/`1d` (28/29), CH2 = `22`/`23`
 (34/35), SEC/DIV = `28`/`29` (40/41, slower/faster **inverted** — resolve from the read-back),
 trigger level −/+/push = `2b`/`2c`/`2d` (43/44/45). Set-50% = `2e` (46) is a **no-op over USB
-injection** (works on the physical key) — not used. The ONE remaining `0x11` is the LA-pod
-enable (`LA-SWI`, no mapped key yet).
+injection** — it works on the physical key only, so it is not used.
 
-### ② `capture_prepared()` — fast, re-pressable
+### ② capture — fast, re-pressable (`CaptureSpec::capture_plan`)
 ```
 SINGLE-SEQ .......... OUT 13 18 01 · poll 01→81 until TRIG-STATE ∈ {0,5}   self-stops, button RED
 open CSV menu ....... OUT 13 11, 13 03 · poll 01→81 CONTROL-MENUID 47→48
@@ -168,26 +177,26 @@ for each enabled channel (deterministic CH1→CH2→LA):
   Save .............. OUT 13 02   (×2 if FileList closed, ×1 if already open)  → WaveData<n>.csv
   wait file ......... 0x43 ls until the file appears + size stable
   wait "busy" ....... grab 20→a0 until the orange "Operation in progress" banner clears
-read back ........... OUT 10 <path> → 90  per file  → parse_wavedata_csv
+read back ........... OUT 10 <path> → 90  per file  → parse_csv
 [delete_after] ...... OUT 13 04 ×(N+1) · 0x43 ls verify        front-panel delete, NEVER shell rm
 ```
 
-Three rules are baked into the DAG (details in §3.0.1): a single-seq stops at **TRIG-STATE 5**
-(not 0) — never toggle Run/Stop after; the save is **async** ("Operation in progress" banner) —
-press Save **once** and wait it out; a Save **leaves the FileList open**, so channels after the
-first need **one** Save press, not two (else a spurious extra file).
+Three rules are baked into the plan (details in §3.0.1): a single sequence stops at
+**TRIG-STATE 5**, not 0 — never toggle Run/Stop after it; the save is **asynchronous**
+("Operation in progress" banner) — press Save **once** and wait it out; a Save **leaves the
+FileList open**, so every channel after the first needs **one** Save press, not two, or it
+writes a spurious extra file.
 
-> **Historical note:** a removed 4K-only fast path read the screen buffer **directly** over
-> `0x02` (freeze + double-read; the `0x02` channel switch is one-deep pipelined, protocol.md §5).
-> The direct read still lives in `_direct_acquire` — used only by the auto-timebase probe above.
+Saves for all channels come first, read-backs after, so a multi-megabyte transfer never sits
+between two Source changes.
 
-### 3.0.0 Two GUI buttons
+### 3.0.0 The two GUI buttons
 
-- **① `prepare_capture()`** — slow idempotent SETUP, **all via key presses** (no `0x11`): Default
-  Setup → channels on → V/div → depth (F5) → SEC/DIV. Everything is set by stepping a knob key and
-  polling the read-back; the scope stays **running** throughout. Run once (~15 s).
-- **② `capture_prepared()`** — the fast trigger + read-back (the ② DAG above). **Re-pressable**
-  (a fresh record per press, no re-configure). `deep_capture()` = the two back-to-back.
+- **① Prepare** (`control::capture::prepare`) — the slow idempotent setup above, key-only.
+  Run once, ~15 s.
+- **② Arm capture** (`control::capture::capture`) — the fast trigger and read-back.
+  **Re-pressable**: a fresh record per press with no reconfiguration.
+- `control::capture::deep_capture` runs the two back to back.
 
 ### 3.0.1 The rules the DAG bakes in `[verified 2026-07-11]`
 
@@ -198,9 +207,9 @@ first need **one** Save press, not two (else a spurious extra file).
   trigger-aligned and can latch a stale/partial buffer; every record (4K and deep) is a single-seq
   that lets the scope stop itself on a real trigger. Ensure the scope is RUNNING before arming
   SINGLE (a single-seq armed from STOPPED latches the stale buffer).
-- **Single-seq stops at TRIG-STATE 5**, not 0 — the RUN/STOP button goes red at 5.
-  `_STOPPED_STATES = {0,5}`. Misreading 5 as "running" made `_run_stop` toggle it back into RUN
-  (the "512K kept running / only CH1" bug). Wait for state ∈ {0,5}; **never toggle Run/Stop after**.
+- **Single-seq stops at TRIG-STATE 5**, not 0 — the RUN/STOP button goes red at 5, and the
+  stopped set is therefore `{0, 5}`. Wait for state ∈ {0,5} and **never toggle Run/Stop after**:
+  read as "running", 5 turns a stop request into a start and the scope runs on through the save.
 - **Verify the triggered/stopped state BEFORE the Save/Recall menu.** After the single-seq, check
   `TRIG-STATE ∈ {0,5}` before opening the CSV menu — if it is still armed/running (no trigger
   caught), Force-Trig a couple of times and, if it still never stops, **abort the save** rather
@@ -222,23 +231,18 @@ first need **one** Save press, not two (else a spurious extra file).
 - **A Save leaves the FileList open.** First channel = **two** Save presses (open + write); every
   later channel = **one** (write) — two would spawn a spurious extra file (the "3rd waveform").
 - **Source select (deterministic).** Order CH1→CH2→LA (keyid 1 advances one). Cycle **directly,
-  not via Back** (Back goes up to the S/R base where keyid 1 = Ref). `_select_source` reads the
-  radio off the `0x20` framebuffer and presses until it matches → files are CH1, CH2, … correctly
-  labelled (no blind cycling / "CH2 twice"). Read-back is **deferred** (save all, then read) so a
-  7.7 MB read doesn't sit between Source changes.
+  not via Back** — Back goes *up* to the S/R base, where keyid 1 is Ref instead. `select_source`
+  reads the radio off the `0x20` framebuffer (`control::csv::selected_source`) and presses until
+  it matches, so each file is correctly labelled with the channel it holds. Read-back is
+  **deferred** — save every channel, then read — so a 7.7 MB transfer never sits between two
+  Source changes.
 - **Needs a mounted SD card** (`df /mnt/udisk` = vfat, not `ubi0:rootfs`). No card → Save is a
-  silent no-op. Saving Source = **LA with the pod off** also writes nothing (a common false
-  "card disturbed"). **Configuring by `0x11` instead of keys was associated with Save→CSV writing
-  no file and with reboots; the fully key-only prepare (above) saves reliably.** A `0x11` field
-  write does not run the key handler's side-effects (LED / on-screen radio verified; card
-  detection empirically), so drive config by key and only *read* settings memory. `[2026-07-15]`
-- **512K is dual-channel** — CH1/CH2 come back genuinely different (86 % of samples differ, decode
-  as SPI). Delete-after uses the front-panel delete key (keyid 4), **never** shell `rm`.
-- **End-of-capture cleanup.** Leave the scope live + clean: **resume RUN first** (from the
-  single-seq STOP), then press **Back** (keyid 6) to close the FileList. Key-only — the side menu
-  staying visible is cosmetic and the next capture's Default Setup clears it, so there is no need
-  to write `CONTROL-DISP-MENU = 0` (the old `0x11` menu-hide, now dropped along with every other
-  config write).
+  silent no-op. Saving Source = **LA with the pod off** also writes nothing, which reads as a
+  disturbed card and is not one. A key-only prepare (§3 ①) saves reliably. `[2026-07-15]`
+- **512K is dual-channel** — CH1/CH2 come back genuinely different (86 % of samples differ, and
+  decode as SPI). Delete-after uses the front-panel delete key (keyid 4), **never** shell `rm`.
+- **End-of-capture cleanup.** Leave the scope live and clean: **resume RUN first** (out of the
+  single-sequence stop), then press **Back** (keyid 6) to close the FileList. Key-only.
 - **LA over CSV:** Source=LA exports the 16-channel pod (`#threshold` header → `is_la`); LA forces
   the record to 4K (deep memory is analog-only).
 
@@ -258,11 +262,11 @@ base 200 samples/div. Timebase steps 2-4-8 per decade, index 0 = 2 ns/div.)
 
 Choosing SEC/DIV is a **trade-off**: too coarse → too few samples/clock → aliased/undecodable; too
 fine → the 20-div window holds too few bytes. Aim for **~10–12 samples/clock** on the fastest edge.
-**The caller supplies the highest frequency to resolve** (the GUI's `MAX_SIGNAL_FRQ` field, e.g.
-`20M`) and we solve `deep_dt = period/target` for SEC/DIV:
+**The caller supplies the highest frequency to resolve** — the GUI's *Max frequency* field —
+and `deep_dt = period/target` is solved for SEC/DIV:
 `TDIV = period · (200·mult) / samples_per_clock` = `period·(deep_samples−64)/(20·samples_per_clock)`
-— `deep_tdiv_for_bit()`, set closed-loop via the SEC/DIV ± keys. No signal probe: the earlier
-`auto_tb` (`_probe_pulse_ns`/`_direct_acquire`) was **removed** — you know the rate, so you state it.
+— `control::capture::deep_tdiv_for_bit`, set closed-loop via the SEC/DIV ± keys. The rate is
+stated by the caller, not probed off the signal.
 Two limits from the sample-rate behaviour: past the ADC ceiling a finer SEC/DIV stops
 helping (200 ns = 8 ns/div → same CSV); zooming out drops the rate (`rate = 200·mult/SEC_per_div`,
 capped at the ADC max) — 1 ms/div on 40K is only ~2 MSa/s.
@@ -545,12 +549,12 @@ Verified by screenshotting each menu (`0x20`):
 ### 4.1 Clearing the card (front-panel delete, no `rm`)
 
 Deep CSVs are big (512K ≈ 7.7 MB, 1M ≈ 19 MB), so the card fills fast. Delete them with
-the scope's own delete key — **never** a shell `rm`. Efficient loop (`_clear_wavedata` /
-`clear_wavedata` in `mso5202d_plot.py`): count with **one** `ls`, press **delete `N+1`
-times** (1 opens the FileList, `N` delete), then **one** `ls` to verify — repeat a couple
-of rounds only if the single-slot key mailbox dropped a press. `deep_capture(delete_after=
-True)` runs this after the captures are read back to the PC; there's also a "Clear card
-CSVs" button in the GUI. Uses only front-panel keys + read-only `ls` (no `rm`).
+the scope's own delete key — **never** a shell `rm`. Efficient loop (`clear_card` in
+`backend/src/control/mod.rs`): count with **one** `ls`, press **delete `N+1` times** (1
+opens the FileList, `N` delete), then **one** `ls` to verify — repeat a couple of rounds
+only if the single-slot key mailbox dropped a press. `CaptureSpec::delete_after` runs it
+once the captures are read back; the GUI also exposes it as "Clear all". Uses only
+front-panel keys and a read-only `ls`.
 
 **The `N+1` count applies only while the FileList is CLOSED.** The opening press is what
 costs the extra one, and the FileList **stays open** afterwards — so a second round must
@@ -573,34 +577,29 @@ survived, in 7.7 s. `[verified 2026-07-20]`
 | Step | Wait | Why |
 |---|---|---|
 | After a key press | ~0.3–0.8 s + poll | slow key-scan loop; verify the transition landed |
-| **After a `0x11` write** | **scope busy ~3.4 s** | the block reapplies the whole 213-byte config; **the next read blocks until it's done** (verified: first `0x01` read after a write = 3.4 s, subsequent reads 0.02 s) |
+| Knob-only parameter walk | ~60 ms between presses | fixed step per press; fire in bursts, read once (§3.9) |
 | RUN → STOP transition | press-until-`TRIG-STATE`-observed | Run/Stop is a toggle; presses drop |
 | SINGLE arm → capture | poll `TRIG-STATE` up to ~25 s | waits for a signal edge |
 | Save 1st→2nd press | ~0.6–0.8 s | let the FileList open |
 | After 2nd Save press | poll file **size until stable** | deep CSV writes take seconds (512K ≈ tens of s) |
 | File read-back (0x10) | ~800 KB/s | 512K ≈ 7.7 MB ≈ 10 s; 1M ≈ 19 MB ≈ 25 s |
 
-`_wait_new_csv` scales its hard timeout with depth (4K 30 s … 1M 220 s) but returns
-as soon as the size stabilises.
+`await_new_file` scales its hard timeout with depth (`save_timeout`: 4K 30 s … 1M 220 s) but
+returns as soon as the file size stabilises.
 
-### 5.1 Making capture fast — skip work, act on state `[verified 2026-07-11]`
+### 5.1 Making capture fast — skip work, act on state
 
-The `0x11`-write busy period (~3.4 s) is the single biggest avoidable cost, so:
-
-- **Only write `0x11` when a field actually changed.** `_prep_block` builds the target block
-  from the *current* settings and writes only if it differs — on a repeat capture the scope
-  is already configured, so prep is free (no write, no 3.4 s busy). This alone turns a repeat
-  4K capture from ~13 s into **~2.8 s**.
-- **Don't restore with a `0x11` write on the 4K path.** Leaving the scope stopped + configured
-  (no depth/menu restore write) means the *next* capture's prep also finds nothing changed and
-  skips its write. (The deep/CSV path still restores depth to 4K — it genuinely changed it.)
-- **4K reads never touch the SD card.** The direct `0x02` path returns before opening the shell
-  or `ls`-ing the card (an `ls /mnt/udisk` alone costs ~10 s).
-- **Act on the confirmed state, don't just print it.** After prep, re-apply until the depth
-  reads back correct (a write can silently miss right after a burst of rapid captures); after a
-  direct read, re-freeze + re-read if a channel came back empty/garbled (`_has_signal`).
-- **`_resync` drains in 64 KB chunks with a 60 ms timeout** (bounded ~4 s), so an occasional
-  desync costs a second or two, not the tens of seconds a small-chunk drain took.
+- **Split setup from capture.** Everything slow and idempotent is in prepare, so the
+  re-pressable capture does only the trigger, the export and the read-back. A second record
+  with the same configuration costs nothing extra.
+- **Converge, don't sleep.** Every step polls its own read-back and moves on the moment the
+  value lands, rather than waiting a fixed worst-case delay (`control::converge`).
+- **Act on the confirmed state.** A step that reads back wrong is re-applied, not reported —
+  presses drop, and a dropped press is far more common than a real end stop (§3.9).
+- **Burst the knob-only walks.** Verifying every press of a several-hundred-step walk costs
+  minutes; firing at ~60 ms and reading once costs seconds (§3.9).
+- **Resync drains in 64 KB chunks with a 60 ms timeout** (bounded, ~4 s worst case), so an
+  occasional desync costs a second or two rather than tens of seconds (§8.10).
 
 ---
 
@@ -608,14 +607,14 @@ The `0x11`-write busy period (~3.4 s) is the single biggest avoidable cost, so:
 
 | Symptom | Cause | Recovery |
 |---|---|---|
-| **"USB device undetected, operation fail"** on Save | card detection disturbed by a `dev.reset()` or a `0x11` write | connect `reset=False`; keep `0x11` out of the save path; a physical panel press re-detects the card |
-| **Scope reboots** (USB re-enumerates) on depth change | `0x11` `ACQURIE-STORE-DEPTH` write while **running** | STOP first, then write depth |
-| **Empty screen / no data** after capture | manual RUN→STOP froze before/without a trigger | use SINGLE-seq with a trigger level on the signal; don't manual-stop |
-| **SINGLE never completes** (`TRIG-STATE` stays armed) | trigger level not on the signal | set `TRIG-VPOS` mid-logic; the data is still captured even if STATE≠0 |
+| **"USB device undetected, operation fail"** on Save | card detection disturbed by a USB reset or a `0x11` write | connect without a reset and configure by key only; a physical panel press re-detects the card |
+| **Scope reboots** (USB re-enumerates) on depth change | `0x11` `ACQURIE-STORE-DEPTH` write while **running** | set depth with the Acquire F5 softkey (§0 rule 4a), never a block write |
+| **Empty screen / no data** after capture | manual RUN→STOP froze before/without a trigger | use the single sequence with a trigger level on the signal; never manual-stop |
+| **SINGLE never completes** (`TRIG-STATE` stays armed) | trigger level not on the signal | move `TRIG-VPOS` onto the signal; Force-Trig as a last resort, then abort rather than save a stale record |
 | **`ls /mnt/udisk` returns empty** intermittently | shell one-behind race | retry the read (the card in use always has files) |
 | **Save no-ops, no file, no `/dsocsv.tmp`** | no SD card mounted | insert the card; confirm `df /mnt/udisk` shows a vfat device |
 | **Malformed `0x43 0x01`** crash-reboot | bare `0x01` with no LE16 count arg | never send it; it's the acquisition engine anyway, not an LA tap |
-| **Link desync** (`bad SOF`) | stale RX bytes from a prior session | `_resync()` |
+| **Link desync** (`bad SOF`) | stale RX bytes from a prior session | resync (§8.10) |
 | **`bad leader 0x43`** on a `0x53` read | a trailing shell (`0x43`) reply lingered and was read by the next data-channel request | validate the reply leader **inside** the retry loop → resync + re-send (§8.3/§8.4); resync at the end of a shell command |
 | **`bad leader 0x53` (wanted `0x43`)** during a shell `ls` | leftover `0x53` framebuffer frames bled into the shell read | collect the framebuffer to its real END so nothing is left queued (§8.6); resync before/after each grab (§8.7) |
 | **`framebuffer too short: 212 B`** on a screen grab | a one-behind stale settings block (`0x81`, whose 2nd byte can look like a DATA subtype) was read as the framebuffer | retry the grab with a resync around it, accept only a full screen (§8.7) |
@@ -625,8 +624,9 @@ The `0x11`-write busy period (~3.4 s) is the single biggest avoidable cost, so:
 
 ## 7. Shell (`0x43`) interaction notes
 
-The root shell (`mso5202d_shell.py`) is used here only for read-only card checks
-(`df /mnt/udisk`, `ls /mnt/udisk`). Quirks it handles (protocol.md Appendix F.4):
+The root shell (`backend/src/device/shell.rs`; `scripts/mso5202d_shell.py` is the
+interactive REPL version) is used here only for read-only card checks (`df /mnt/udisk`,
+`ls /mnt/udisk`). Quirks it handles (protocol.md Appendix F.4):
 firmware appends `> msg` to the command (wrap multi-command in `{ …; }`), the reply
 can race one command behind (unique end-marker + retry), and a stalled command trips
 the watchdog reboot — so keep shell commands short and never read a live process's
@@ -648,9 +648,10 @@ becomes visible when the scope renames its temp file at the very end.
 ## 8. USB transport layer — the full host-side stack
 
 Everything above is *what* to send; this section is *how* the host must move bytes so the
-scope answers reliably. It is implemented identically in the Python `Scope` (`mso5202d.py`)
-and the Rust `Transport` (`backend/src/usb/transport.rs`); the byte layout of a frame lives in
-`MSO5202D-protocol.md` §2, this is the procedural handling around it. Two bulk endpoints only:
+scope answers reliably. It is implemented by `Transport` in `backend/src/usb/transport.rs`,
+and identically by the Python reference `Scope` (`scripts/mso5202d.py`); the byte layout of a
+frame lives in `MSO5202D-protocol.md` §2, this is the procedural handling around it. Two bulk
+endpoints only:
 **OUT `0x02`, IN `0x81`**. Every quirk below was needed to make prepare+capture work end to
 end (4K / 40K / 512K, single- and dual-channel, `[verified 2026-07-20]`).
 

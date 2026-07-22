@@ -11,7 +11,7 @@
 //! - **The trigger key cannot navigate.** It opens whichever page matches the *current*
 //!   trigger type, so after changing the type it lands somewhere else entirely. Pages are
 //!   reached by cycling the type softkey until `TRIG-TYPE` reads the wanted code, which is
-//!   what [`goto_type`] does.
+//!   what `goto_type` does.
 //! - **The selectable set depends on the type.** The source softkey cycles a ring of five
 //!   on Edge but only two on Overtime, because the scope refuses the rest. Asking for a
 //!   source the current type does not offer is a real error, not a lost press, and it is

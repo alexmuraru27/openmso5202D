@@ -19,11 +19,11 @@ serve over USB for a screen refresh.
 
 - **`backend/`** — `mso5202d`, a reusable Rust driver crate. The lowest layer is the USB
   transport (`usb::Transport`): connect / reconnect / reset, interface binding, and the
-  reader-thread-before-write transaction dance the scope requires. `Scope` is a thin
-  high-level facade on top.
+  reader-thread-before-write transaction dance the scope requires. `Device` sits on top of
+  it as the device-operations facade, and `control` plans the semantic operations.
 - **`frontend/`** — a [Tauri 2](https://tauri.app) desktop app. It depends on the
-  `mso5202d` crate directly, so **launching the app launches the backend**: Tauri opens
-  the scope over USB at startup and exposes it to the webview through commands.
+  `mso5202d` crate directly, so **the app *is* the backend**: the driver runs in-process
+  and is exposed to the webview through Tauri commands. There is no server or daemon.
 - **`docs/`**, **`scripts/`**, **`scope_dump/`** — the reverse-engineering record: the
   wire-protocol spec, the Python reference tooling the Rust port is based on, and the raw
   captures.
@@ -87,9 +87,11 @@ chmod +x target/release/bundle/appimage/*.AppImage   # portable, copy it anywher
 ```
 
 Installing the `.deb`/`.rpm` registers `openmso5202D` as a normal desktop application, so it
-appears in the launcher and can be started like any other program. The AppImage needs no
-install at all — it is a single file you can move to another machine of the same
-architecture.
+appears in the launcher and can be started like any other program. **It also installs the
+udev rule** (to `/usr/lib/udev/rules.d/`) and reloads udev, so the scope is reachable without
+root — replug it after installing. The AppImage needs no install at all — a single file you
+can move to another machine of the same architecture — but it carries no udev rule, so
+install that yourself as in the prerequisites.
 
 Building only the executable (skipping the installer bundles) is faster:
 
@@ -97,8 +99,8 @@ Building only the executable (skipping the installer bundles) is faster:
 pnpm --filter openmso5202d-frontend tauri build --no-bundle
 ```
 
-Whichever way you run it, the udev rule from the prerequisites still applies — without it the
-app cannot open the scope unless started as root.
+Running the plain executable or the AppImage still needs the udev rule from the prerequisites
+— without it the app cannot open the scope unless started as root.
 
 ### Develop
 
@@ -108,9 +110,10 @@ pnpm dev          # hot-reloading Tauri dev app (Vite dev server + the Rust back
 
 ## Using the app
 
-The app opens the scope over USB at startup; the badge under the title shows the bus and
-address it found. If the scope was plugged in late, or the udev rule was not yet in place,
-press **Connect** to retry.
+Press **Connect** in the top-left to open the scope over USB. The badge under the title then
+shows the bus and address it found; until it is connected, the capture buttons stay disabled.
+If Connect fails, the scope is either unplugged or the udev rule is not installed (see the
+prerequisites above).
 
 ### 1. Set up the acquisition
 
@@ -148,10 +151,11 @@ back to their defaults.
 
 Two buttons, in order:
 
-1. **① Prepare** — the slow one. It resets the scope to a known state, applies the whole
-   sidebar configuration to it, and probes the signal to settle the timebase. A few seconds.
-   Changing any acquisition setting (channel, depth, timebase, trigger, probe…) invalidates
-   it and you must prepare again — the button for step ② greys out to say so.
+1. **① Prepare** — the slow one. It resets the scope to a known state and applies the whole
+   sidebar configuration to it — channels, probe, V/div, timebase, trigger and memory depth —
+   one front-panel key at a time, checking each landed. A few seconds. Changing any
+   acquisition setting invalidates it and you must prepare again; the button for step ②
+   greys out to say so.
 2. **② Arm capture** — the fast one, re-pressable. It arms a single-sequence capture, waits
    for the trigger, and reads the record back. Each press gives a fresh record with the same
    setup.
@@ -201,3 +205,20 @@ re-decoded offline.
   and enabling the pod clamps memory depth to 4K.
 - A deep save is slow: a 512K record is a ~7.7 MB file and takes the scope tens of seconds to
   write before it can be read back.
+
+## Documentation
+
+The full reverse-engineering record and the developer guides live in `docs/`.
+
+| Document | What it covers |
+| --- | --- |
+| [Wire protocol](docs/MSO5202D-protocol.md) | The authoritative, self-contained byte-level spec of the USB protocol: framing, every selector, the 213-byte settings block field by field, key ids, and the shell channel. Written to survive the loss of every other file here. |
+| [State machines & flows](docs/MSO5202D-statemachines.md) | How to *drive* the scope: connection, the prepare/capture sequences, the menu maps, the waits, the failure/recovery table, and the host-side USB transport rules. The procedural companion to the wire spec. |
+| [Rendering model](docs/MSO5202D-rendering.md) | How samples become a trace: the two sample sources, the signed-int8 byte decode, the volts and time axes, and the decoded-byte overlay. |
+| [Backend guide](docs/backend.md) | Developer guide to the `mso5202d` Rust crate: its four layers, every module, the main call chains, the binaries, and the tests. |
+| [Frontend guide](docs/frontend.md) | Developer guide to the Tauri + React app: the command/IPC surface, the state model, every component, the waveform canvas in depth, and the capture-planning maths. |
+
+Alongside them, `scope_dump/` holds the raw material — the firmware filesystem dump, the
+Wireshark captures of the vendor Windows app that the protocol was decoded from, and sample
+deep-capture CSVs — and `scripts/` holds the Python reference tooling the Rust driver was
+derived from. The vendor's own package is in `docs/drivers/`.

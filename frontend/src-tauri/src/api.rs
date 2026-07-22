@@ -87,7 +87,7 @@ pub struct CaptureConfig {
     pub max_freq_hz: f64,
     /// Target samples per signal period — the decoder's resolution.
     pub samples_per_cycle: f64,
-    /// Memory depth: `"4k"`, `"40k"`, or `"512k"`.
+    /// Memory depth: `"4k"`, `"40k"`, `"512k"`, or `"1m"`.
     pub depth: String,
     /// Decoder to run: `"none"`, `"uart"`, `"spi"`, or `"i2c"`.
     pub protocol: String,

@@ -89,7 +89,8 @@ pub struct CaptureSpec {
     pub trigger: Option<crate::control::trigger::TriggerSetup>,
     /// Targets for the trigger's knob-only values, applied after the trigger itself.
     ///
-    /// Kept here rather than in [`TriggerSetup`] because they are not part of what the
+    /// Kept here rather than in [`trigger::TriggerSetup`](crate::control::trigger::TriggerSetup)
+    /// because they are not part of what the
     /// trigger *is*: the scope has no way of being told them, so they are walked to with the
     /// knob, and only a plan has the standing to spend that time.
     pub trigger_values: Vec<(crate::control::trigger::Adjustable, i64)>,

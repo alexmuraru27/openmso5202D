@@ -1,156 +1,151 @@
 # MSO5202D — waveform rendering model
 
-How to turn the raw waveform bytes from the scope into a trace that looks like
-the instrument's own screen. This is the model `scripts/mso5202d_plot.py`
-implements; the wire format the bytes arrive in is in `MSO5202D-protocol.md` §5,
-and a condensed version of this model lives there under "Reference rendering
-model."
-
-The single most important rule: **use a fixed scale, never auto-fit to the
-data.** A real scope's grid never moves; the trace grows and shrinks *within* a
-fixed graticule. Auto-scaling each frame is what makes a naïve plotter look
-"sloppy" — the baseline and amplitude jump around between reads.
+How samples from the scope become a trace on screen: the two sample sources, the
+byte→volts decode each needs, and the axis conventions the viewer draws them on.
+The wire format the samples arrive in is `MSO5202D-protocol.md`; the flows that
+fetch them are `MSO5202D-statemachines.md`.
 
 ---
 
-## 1. The graticule
+## 1. Two sample sources
 
-Draw a fixed **8 divisions tall × 10 divisions wide** grid (the scope face),
-with **5 minor subdivisions per division** and a bold centre line, on a dark
-background. Our acquired block is 3840 samples = **19.2 divisions** wide (see
-§3), so the viewer simply extends the grid to the full captured width; the
-vertical is always exactly 8 divisions (−4 … +4).
+The scope offers samples in two forms, and they need different treatment.
 
-Everything below places the trace onto this grid in **division** units. Because
-CH1 and CH2 can be on different V/div, *divisions* — not volts — are the honest
-shared vertical axis, exactly as printed on the instrument's screen. Each
-channel's volts/div is shown in the title.
+| | Screen block (`0x02`) | Exported CSV |
+| --- | --- | --- |
+| Length | 3840 samples (3200 with a menu open) | 4064 / 40064 / 400064 rows |
+| Value | raw **signed int8 counts** | **volts**, scope-calibrated |
+| Time | implicit — 200 samples/division | explicit `time` column |
+| Channels | one per acquire, sequential | one per file |
+| Needs the card | no | yes |
 
-## 2. Vertical mapping (bytes → divisions)
+**The app plots the CSV path.** A capture arms a single sequence, has the scope
+export the record to the front-panel USB drive, and reads the file back, so the
+value column is already volts and no counts conversion is involved (§3).
+
+The screen block still matters, and §2 is its decode. The driver uses it for two
+things that only need sample *shape*, not calibration: proving a channel is
+actually acquiring (an off channel returns an empty block), and probing the
+finest pulse in the signal so the capture planner can pick a timebase.
+
+## 2. Screen block: bytes → divisions
 
 Each analog sample byte is a **two's-complement signed int8** giving the trace's
 vertical position in **counts at 25 counts per division**, clamped to `[−127, +127]`.
 The device pre-positions the trace (it already folds in `VERT-CHx-POS`), and the
-byte **rises as the trace moves up**. The canonical decode is just a sign-extend:
+byte **rises as the trace moves up**. The canonical decode is a sign-extend:
 
 ```
 s     = byte − 256  if byte ≥ 128  else byte      # sign-extend to signed int8
 y_div = (s − 16) / 25                              # divisions from centre, up = +
 ```
 
-The `25` counts/div scale is hardware-verified; the `−16` removes a ≈0.64-division
-baseline bias (with the channel centred, the zero-signal baseline sits at byte
-`+16`, not `0x00`) and is the one un-nailed constant.
+The `25` counts/div scale is hardware-verified. The `−16` removes a ≈0.64-division
+baseline bias — with the channel centred, the zero-signal baseline sits at byte
+`+16`, not `0x00` — and is the one un-nailed constant.
 
-Two traps to avoid:
+Two traps:
 
-- **Do not decode unsigned, and do not do `128 − byte`** (that inverts the motion).
-- **There is no 8-bit "wrap".** A small signal oscillating around 0 alternates
-  `0xFF` (−1) ↔ `0x00` (0); an *unsigned* reader misreads that zero-crossing as a
-  fake rail-to-rail "hash" block. Decoded signed, it is an ordinary small waveform.
-  The `±127` clamp makes overflow impossible.
+- **Decode signed, and never `128 − byte`** — the latter inverts the motion.
+- **There is no 8-bit wrap.** A small signal oscillating around 0 alternates
+  `0xFF` (−1) ↔ `0x00` (0); read unsigned, that zero-crossing looks like a fake
+  rail-to-rail hash block. Decoded signed it is an ordinary small waveform, and
+  the `±127` clamp makes overflow impossible.
 
-**Equivalent position-unwrap form** — what `to_divs()` in the plotter uses; kept
-for continuity, gives the identical result:
+To label the axis in volts rather than divisions: **volts-per-count = Vdiv/25**,
+so `volts ≈ (s − 16)/25 × Vdiv`. The scale is exact; only the `+16` baseline
+offset is unresolved, which is why this path is used for shape, not measurement.
 
-```
-base   = (VERT-CHx-POS + 16) & 0xFF
-signal = ((byte − base + 128) mod 256) − 128     # AC counts
-y_div  = (VERT-CHx-POS + signal) / 25            # divisions, up = positive
-```
+### Rails and clipping
 
-Because `byte = POS + 16 + signal` (clamped, no surviving wrap), this collapses to
-`y_div = (s − 16)/25`. See **MSO5202D-protocol.md §6** for the full derivation. A
-trace parked off-screen saturates at the rails `0x7F` (+127) / `0x81` (−127), and
-the axis (fixed at ±4 div) clips it away.
+- `0x0A` / `0xF2` are signed **+10 / −14** — an ordinary on-screen signal
+  straddling the zero line, not rails. Do not reject them.
+- The **saturation rails** are `0x7F` (+127) and `0x81` (−127): a trace parked
+  fully above or below the graticule reads a solid run of one of them.
+- `0x80` never occurs. It is a framing-error tell, not a sample.
+- A trace parked off-screen is detected by **position**, not value:
+  `|VERT-CHx-POS| / 25 > 4` puts it outside the 8-division screen.
 
-## 3. Horizontal mapping (index → divisions)
+**[gap]** A block can come back split ~50/50 between `0x0A` and `0xF2` with
+nothing in between, after a trace is dragged off-screen and back. This is not the
+±127 clamp and is unexplained; treat such a block as invalid.
+
+### Horizontal
 
 ```
 x_div = sample_index / 200
 ```
 
-**200 samples per division** (hardware-verified; `SAMPLES_PER_DIV`). The time per
-division is in the settings blob (`TDIV-ns`); multiply `x_div` by it for seconds.
+**200 samples per division**, hardware-verified (`SAMPLES_PER_DIV` in
+`backend/src/settings/mod.rs`). Multiply by the timebase (`TDIV-ns`) for seconds.
 
-The **block width is not fixed** — read the sample count from the acquire *size*
-frame, don't assume 3840. It is **3840** (19.2 div) normally but **3200** (16 div)
-when a soft-menu panel is open on the scope, and it does **not** depend on the
-timebase (MSO5202D-protocol.md §6.3). The viewer extends the grid to whatever width
-came back.
+The block width is **not fixed** — read the count from the acquire size frame.
+It is 3840 (19.2 div) normally and 3200 (16 div) while a soft-menu panel is open
+on the scope, and it does not depend on the timebase.
 
-## 4. Rail values and off-screen blocks
+## 3. Exported CSV: volts and real time
 
-The signed-int8 model (§2) settles what the near-"rail" bytes are:
+An export carries its own axes, so there is nothing to calibrate
+(`backend/src/waveform.rs`, `parse_csv`):
 
-- `0x0A` / `0xF2` are just signed **+10 / −14** — a normal on-screen signal
-  straddling the zero line, **not** rails. Do not reject them. (Earlier versions
-  wrongly treated ≈`0x08`/`0xF2` first as clipped rails, then as "wrapped signal";
-  both were unsigned mis-readings.)
-- The **real saturation rails** are `0x7F` (+127) and `0x81` (−127): a trace parked
-  fully above/below the graticule reads a solid run of one of these. `0x80` never
-  occurs, so it is a framing-error tell, not a sample.
-- Off-screen is detected by **position**: `|VERT-CHx-POS| / 25 > 4` means the trace
-  is parked off the 8-division screen (the viewer flags it in the title).
+- The **value column is volts** for an analog export, already scope-calibrated.
+- The **time column is seconds**. The sample interval is taken as the **median
+  step between timestamps**, not from the `#timebase` header — that header is the
+  screen time/div (in picoseconds), and a deep record samples faster than the
+  screen does, so deriving `dt` from it would be wrong.
+- `#voltbase` is **µV/div**: the scope's own vertical scale, carried through as
+  `voltsPerDiv` so the viewer can annotate a lane with the instrument's V/div.
+- A logic-analyzer export replaces `#voltbase` with `#threshold` (millivolts) and
+  its value column holds a **16-bit word per sample**, bit `N` being channel D`N`.
 
-**[open] genuine off-screen bimodal block:** separately, a whole block can come
-back split ~50/50 between `0x0A` and `0xF2` (nothing in between) after a trace is
-dragged off-screen and back. This is **not** the ±127 clamp and is unexplained;
-treat such a block as invalid/off-screen and don't plot it
-(MSO5202D-protocol.md §6 GAP).
+## 4. Axes in the viewer
 
-## 5. Drawing style
+The viewer draws **one lane per channel**, stacked, sharing a single time axis.
 
-- **Vectors** (default): connect consecutive points with straight line segments
-  (a polyline) — what `DISPLAY-MODE` = 0 shows on the scope.
-- **Dots**: plot the points without connecting them — `DISPLAY-MODE` = 1.
-- One colour per channel (CH1 yellow, CH2 blue, matching the instrument).
+**Vertical.** Each lane is fitted **once per record** to that channel's own
+min/max, then the user's zoom and pan are applied on top of that fitted range.
+The fit is per record, not per frame: nothing re-scales underneath a trace while
+it is being read, which is the property that makes a scope face readable. Because
+CH1 and CH2 can be on different V/div, each lane keeps its own volt range and
+prints its scale, pk-pk and probe factor in its corner rather than forcing a
+shared axis.
 
-## 6. Analog vs. logic-analyzer traces
+**Horizontal.** Time is shown **signed about the trigger**, which sits at the
+midpoint of the record — the acquisition centres it — so the axis reads
+`−…, 0, +…` around the trigger event rather than from an arbitrary zero. Labels
+use one unit for the whole axis, with just enough decimals to keep adjacent ticks
+distinct at any zoom.
 
-The coordinate mapping (§2–§4) is shared. The difference is layout:
+**Colours.** One per channel, matching the instrument: CH1 yellow, CH2 blue.
 
-- **Analog** — one polyline per enabled channel, mapped as above and centred on
-  the graticule.
-- **Logic analyzer (D0–D15)** — the *same* index→x mapping, but each digital
-  channel is drawn in **its own horizontal row**: a 0/1 value scaled to a small
-  fixed row height and offset to that channel's baseline, with the channel label
-  (D0…D15) beside it (`draw_la` in `mso5202d_plot.py`: enabled channels from
-  `LA-CHANNEL-STATE` stacked lowest-Dn-at-bottom, green,
-  `y = row_center − amp/2 + bit·amp`).
-  - **The live viewer never reads LA.** The only raw LA read (`02 01 05`) is a
-    broken firmware path — unreliable data AND it **corrupts the scope itself**
-    while reading (confirmed on hardware; see MSO5202D-protocol.md §5). So no LA
-    acquire is ever issued live; the digital pod is not shown in the live view.
-  - **`draw_la` is kept for LA from a saved waveform** — if/when a file format that
-    carries the digital channels is found, the row-renderer can draw it offline
-    (the same way deep analog captures come from Save→CSV, §7.5). The scope's
-    **`0x20` framebuffer** (its rendered screen, with firmware-drawn D-rows) remains
-    the only way to *see* LA over USB today.
+## 5. Logic-analyzer traces
 
-## 7. Where this rendering model is used
+The index→x mapping is shared; only the vertical layout differs. Each digital
+channel is drawn as **its own horizontal row** — a 0/1 value scaled to a small
+fixed row height, offset to that channel's baseline, labelled D0…D15, stacked
+lowest-Dn-at-bottom.
 
-The byte→division model above (`to_divs`/`x_divs`/`style_scope`, all in
-`scripts/mso5202d_plot.py`) applies to the **3840-sample screen block** returned by
-the USB acquire (`02 01 <ch>`). It is what the screen-buffer decode CLI
-(`scripts/mso5202d_decode.py`) draws.
+The pod can only be rendered from a **saved CSV** (Source = LA in the export
+menu). There is no live path: the raw LA acquire is a broken firmware route that
+returns unreliable data *and* corrupts the scope's own display while reading, so
+it is never issued. Enabling the pod also clamps store depth to 4K — deep memory
+is analog-only. The other way to *see* the pod over USB is the `0x20`
+framebuffer, which is the scope's own rendered screen including its D-rows.
 
-The main GUI (`scripts/mso5202d_plot.py`) is a **triggered protocol decoder**, not a
-live scope: it captures a **deep record** (arm SINGLE at 4K/40K/512K/1M → front-panel
-Save→CSV → read the `WaveData*.csv` back over USB, protocol.md §10.7), whose value
-column is **already scope-calibrated volts** (protocol.md §7.5). So that path does
-**not** use the byte model at all — it plots volts vs time directly and, if a protocol
-is selected, thresholds the volts (`serial_decode.threshold_volts`) and draws the
-decoded bytes beneath the visible part of the wave. All scope I/O runs on a single
-worker thread; the GUI only drains its event queue. `python3 mso5202d_plot.py --load
-WaveData*.csv --proto uart --png out.png` runs the decode headless.
+## 6. Decoded-byte overlay
 
-## 8. Known limits carried over from the protocol
+When a protocol decode is active, each decoded byte is drawn over the stretch of
+waveform it was read from: a pill carrying the value, plus faint alternating
+byte-boundary slices tying it to the samples underneath. Slices too narrow to
+read at the current zoom are culled — the pills still carry those — and anything
+off-screen is skipped, so the overlay stays legible at every magnification.
 
-- **counts→volts** — the *scale* is now known exactly: **volts-per-count = Vdiv/25**
-  (the ADC's own 25 counts/div, confirmed against the scope's exported CSV; see
-  protocol.md §7). The viewer still shows **divisions** (each = that channel's
-  V/div, in the title) because the *absolute* offset — the `+16`-count baseline
-  (§2) — is the one unresolved constant. To label volts: `volts ≈ (s − 16)/25 × Vdiv`.
-- **Inter-channel phase** is not preserved (CH1/CH2 are sequential acquires), so
-  cross-channel timing on the plot is not meaningful (protocol.md §5).
+## 7. Known limits
+
+- The **`+16`-count baseline** in §2 is the one unresolved constant in the
+  counts→volts model. It does not affect the CSV path, which is pre-calibrated.
+- **Inter-channel phase** holds only for a frozen acquisition. While the scope is
+  running, CH1 and CH2 are separate sequential acquires and their relative timing
+  is meaningless; a stop freezes one simultaneous two-channel acquisition, and
+  both channels then read from that same buffer. Every capture the app takes is
+  of the frozen kind, which is what makes two-channel protocol decode possible.
