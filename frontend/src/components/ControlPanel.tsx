@@ -211,13 +211,27 @@ function Acquisition({
  * samples/clock, the memory depth, and the scope's fixed SEC/DIV ladder. The ladder snap is
  * why the achieved samples/clock can differ from what was asked for. */
 function CaptureWindow({ config }: { config: CaptureConfig }) {
-  const plan = capturePlan(config.maxFreqHz, config.samplesPerCycle, config.depth);
+  const plan = capturePlan(
+    config.maxFreqHz,
+    config.samplesPerCycle,
+    config.depth,
+    config.channels.length,
+  );
   if (!plan) return <span className="hint">Set a frequency to size the capture.</span>;
   return (
     <span className="hint">
       Captures <strong>{formatDuration(plan.windowS)}</strong> at{" "}
       {formatDuration(plan.timePerDivNs * 1e-9)}/div — {Math.round(plan.samplesPerClock)}{" "}
-      samples/clock actual.
+      samples/clock actual
+      {plan.rateLimited && (
+        <>
+          {" "}
+          <span style={{ color: "var(--warn)" }}>
+            (ADC-limited to {formatDuration(plan.sampleIntervalS)}/sample)
+          </span>
+        </>
+      )}
+      .
     </span>
   );
 }

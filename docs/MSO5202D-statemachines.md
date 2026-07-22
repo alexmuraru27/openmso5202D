@@ -263,9 +263,38 @@ fine → the 20-div window holds too few bytes. Aim for **~10–12 samples/clock
 `TDIV = period · (200·mult) / samples_per_clock` = `period·(deep_samples−64)/(20·samples_per_clock)`
 — `deep_tdiv_for_bit()`, set closed-loop via the SEC/DIV ± keys. No signal probe: the earlier
 `auto_tb` (`_probe_pulse_ns`/`_direct_acquire`) was **removed** — you know the rate, so you state it.
-Two limits from the sample-rate behaviour (§below): past the ADC ceiling a finer SEC/DIV stops
+Two limits from the sample-rate behaviour: past the ADC ceiling a finer SEC/DIV stops
 helping (200 ns = 8 ns/div → same CSV); zooming out drops the rate (`rate = 200·mult/SEC_per_div`,
-capped at the ADC max) — 1 ms/div on 40K is only ~2 MSa/s. Examples: 40K @ 20 kHz → **101 bytes**;
+capped at the ADC max) — 1 ms/div on 40K is only ~2 MSa/s.
+
+**Measured sample rates `[verified 2026-07-22, backend/src/bin/rate_sweep.rs, 4K]`.** The
+`200·mult samples/div` geometry is an *upper bound*, not what you get. The scope snaps its
+sample rate to a **1-2-4-8 ladder** and caps it at a **real-time ceiling that halves with the
+second channel** (the ADC is shared). Measured `dt` per SEC/DIV rung:
+
+| SEC/DIV | geometric dt | 1 ch | 2 ch |
+|---|---|---|---|
+| 2 ns | 0.01 ns | **1.00 ns** | **2.00 ns** |
+| 8 ns | 0.04 ns | **1.00 ns** | **2.00 ns** |
+| 20 ns | 0.10 ns | 1.25 ns | 2.50 ns |
+| 40 ns | 0.20 ns | 1.25 ns | 2.50 ns |
+| 80 ns | 0.40 ns | 1.25 ns | 2.50 ns |
+| 200 ns | 1.00 ns | 1.25 ns | 2.50 ns |
+| 400 ns | 2.00 ns | 2.50 ns | 2.50 ns |
+| 800 ns | 4.00 ns | 5.00 ns | 5.00 ns |
+
+So: **real-time ceiling ≈ 800 MSa/s (1 ch) / 400 MSa/s (2 ch)** — exactly halved — and even
+well below it the rate-ladder snap makes the true `dt` **1.25×** the geometric figure (at
+800 ns/div the geometry wants 250 MSa/s; the scope delivers 200). The 1 ns / 2 ns figures at
+≤8 ns/div beat the real-time ceiling and are **equivalent-time** sampling of a repetitive
+signal — not something a one-shot capture can rely on. Predicting resolution therefore means
+`rate = ladder_snap(min(200·mult/SEC_per_div, ceiling(channels)))`, which is what the UI's
+`capturePlan` does.
+
+**Vertical scaling is exact.** Across every rung and both channel counts the export reported
+`#voltbase` = the V/div actually set (1 V/div), and a 3.3 V logic signal read
+−0.12 … +3.40 V — the CSV's volts column is already scope-calibrated, so no counts→volts
+conversion is needed or wanted on the host. Examples: 40K @ 20 kHz → **101 bytes**;
 512K @ 20 kHz → **1012 bytes**; 4K @ 20 MHz → 800 ns/div, 12.5 samples/clock; 2M @ 40K → 8 µs/div.
 
 ---

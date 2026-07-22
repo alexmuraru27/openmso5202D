@@ -30,7 +30,7 @@ const MAX_STEPS: u32 = 40;
 /// stop. The single-slot key mailbox drops presses, so one dropped nudge looks exactly like
 /// an end stop — the Python setters (`_step_key`) just keep pressing, so a transient
 /// non-move must not abort the whole plan.
-const NONMOVE_RETRIES: u32 = 3;
+const NONMOVE_RETRIES: u32 = 4;
 
 /// Attempts to open a menu before giving up.
 const MENU_ATTEMPTS: u32 = 4;
@@ -71,11 +71,16 @@ pub fn converge(
         sleep(SETTLE);
 
         // A knob that appears not to have moved is usually a dropped press, not an end
-        // stop — the mailbox is single-slot. Re-nudge a few times before concluding it
-        // really cannot move, so one lost press does not abort the whole prepare/capture.
+        // stop — the mailbox is single-slot, and the scope drops keys outright while it is
+        // busy (straight after a capture, for instance, where it is resuming and
+        // re-acquiring). Re-nudge, waiting longer each time, before concluding it really
+        // cannot move: verified on hardware that the SEC/DIV keys walk the ladder one rung
+        // per press once the scope is idle, so a stall here means "not listening yet",
+        // not "end stop".
         let mut moved = current(device)?;
         let mut stalls = 0;
         while moved == value && stalls < NONMOVE_RETRIES {
+            sleep(SETTLE * (stalls + 1));
             device.turn(knob, direction, 1)?;
             sleep(SETTLE);
             moved = current(device)?;

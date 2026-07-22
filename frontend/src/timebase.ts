@@ -26,6 +26,39 @@ const DEPTH_ROWS: Record<Depth, number> = {
   "1m": 800_064,
 };
 
+/**
+ * Real-time sample-rate ceiling, in Sa/s, by channel count.
+ *
+ * Measured on hardware (`cargo run --bin rate_sweep`, 2026-07-22): with one channel the
+ * exported record never samples faster than 800 MSa/s, and with two it never beats
+ * 400 MSa/s — the ADC is shared, so a second channel halves it exactly.
+ *
+ * Below ~8 ns/div the scope reports a *faster* interval still (1 ns and 2 ns respectively),
+ * which is equivalent-time sampling of a repetitive signal rather than a real-time rate. It
+ * is not modelled: treating it as real would over-promise on a one-shot capture, and
+ * under-stating there is the safe direction.
+ */
+function realtimeCeiling(channelCount: number): number {
+  return channelCount > 1 ? 400e6 : 800e6;
+}
+
+/**
+ * Snap a sample rate down to the ladder the instrument actually offers (1-2-4-8 per decade).
+ *
+ * The scope does not sample at whatever rate the division geometry implies; it picks a rung.
+ * That is why a measured interval runs 1.25× the naive `time_per_div / samples_per_div` even
+ * well below the ceiling — at 800 ns/div the geometry wants 250 MSa/s and the scope delivers
+ * 200.
+ */
+function quantiseRate(rate: number): number {
+  if (!(rate > 0)) return 0;
+  const decade = Math.pow(10, Math.floor(Math.log10(rate)));
+  for (const step of [8, 4, 2, 1]) {
+    if (step * decade <= rate * 1.000001) return step * decade;
+  }
+  return decade;
+}
+
 /** What a capture at a given configuration will actually deliver. */
 export interface CapturePlan {
   /** The SEC/DIV rung the scope will land on, in nanoseconds. */
@@ -36,6 +69,8 @@ export interface CapturePlan {
   sampleIntervalS: number;
   /** Samples per bit actually achieved — differs from the request after the ladder snap. */
   samplesPerClock: number;
+  /** True when the ADC ceiling (or rate ladder), not the timebase, set the interval. */
+  rateLimited: boolean;
 }
 
 /**
@@ -53,6 +88,7 @@ export function capturePlan(
   maxFreqHz: number,
   samplesPerClock: number,
   depth: Depth,
+  channelCount = 1,
 ): CapturePlan | null {
   const rows = DEPTH_ROWS[depth];
   if (!rows || !(maxFreqHz > 0) || !(samplesPerClock > 0)) return null;
@@ -67,13 +103,21 @@ export function capturePlan(
     if (TB_TO_NS[i] <= ideal) index = i;
   }
   const timePerDivNs = TB_TO_NS[index];
-  const dtNs = timePerDivNs / samplesPerDiv;
+
+  // What the instrument will really sample at: the division geometry asks for a rate, the
+  // ADC caps it, and the scope snaps to a rung. Without this the readout claims resolution
+  // the hardware cannot deliver — at 8 ns/div the naive figure over-states it 25-fold.
+  const wantedRate = samplesPerDiv / (timePerDivNs * 1e-9);
+  const rate = quantiseRate(Math.min(wantedRate, realtimeCeiling(channelCount)));
+  const sampleIntervalS = rate > 0 ? 1 / rate : 0;
+  const dtNs = sampleIntervalS * 1e9;
 
   return {
     timePerDivNs,
     windowS: 20 * timePerDivNs * 1e-9,
-    sampleIntervalS: dtNs * 1e-9,
-    samplesPerClock: bitNs / dtNs,
+    sampleIntervalS,
+    samplesPerClock: dtNs > 0 ? bitNs / dtNs : 0,
+    rateLimited: rate < wantedRate * 0.999,
   };
 }
 
