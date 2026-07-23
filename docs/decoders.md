@@ -613,7 +613,7 @@ git diff backend/tests/decoder_scores_triggered.json
 
 ## Diagrams
 
-- [Decoder pipeline](diagrams/decoder-pipeline.drawio) — volts → threshold → decode → events → UI.
-- [UART decode](diagrams/uart-decode.drawio) — bit grid, frame layout, tiling vs walk.
-- [SPI decode](diagrams/spi-decode.drawio) — edge selection, burst splitting, word assembly.
-- [I²C decode](diagrams/i2c-decode.drawio) — START/STOP handling and the end-anchored fallback.
+- [Decoder pipeline](diagrams/decoder-pipeline.drawio.png) — volts → threshold → decode → events → UI.
+- [UART decode](diagrams/uart-decode.drawio.png) — bit grid, frame layout, tiling vs walk.
+- [SPI decode](diagrams/spi-decode.drawio.png) — edge selection, burst splitting, word assembly.
+- [I²C decode](diagrams/i2c-decode.drawio.png) — START/STOP handling and the end-anchored fallback.

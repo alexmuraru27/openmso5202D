@@ -10,26 +10,14 @@ reverse-engineered from USB captures of the vendor Windows app.
 
 ![The app decoding an SPI ramp captured at 40K memory depth](docs/screenshots/openmso5202D_spi.png)
 
-The app is a **triggered capture-and-decode workbench**, not a live scope face. You set up the
-acquisition on the left, take one deep, trigger-aligned record with the two buttons at the
-bottom, and then read it: pan and zoom the traces, drop measurement cursors, and — if the
-signal is UART, SPI or I²C — see every decoded byte both as a pill under the waveform and as a
-list on the right. Records go up to **1M samples**, far past the 3,840 samples the scope will
-serve over USB for a screen refresh.
+A **triggered capture-and-decode workbench** — not a live scope face. You arm the scope, it
+records one trigger-aligned snapshot into deep memory, and the app reads it back over USB to plot
+and decode. With it you can:
 
-- **`backend/`** — `mso5202d`, a reusable Rust driver crate. The lowest layer is the USB
-  transport (`usb::Transport`): connect / reconnect / reset, interface binding, and the
-  reader-thread-before-write transaction dance the scope requires. `Device` sits on top of
-  it as the device-operations facade, and `control` plans the semantic operations.
-- **`frontend/`** — a [Tauri 2](https://tauri.app) desktop app. It depends on the
-  `mso5202d` crate directly, so **the app *is* the backend**: the driver runs in-process
-  and is exposed to the webview through Tauri commands. There is no server or daemon.
-- **`docs/`**, **`scripts/`**, **`scope_dump/`** — the reverse-engineering record: the
-  wire-protocol spec, the Python reference tooling the Rust port is based on, and the raw
-  captures.
-
-The repo is one **Cargo workspace** (`backend` + `frontend/src-tauri`) and one **pnpm
-workspace** (`frontend`).
+- **Capture deep records** — up to **1M samples**, far past the 3,840 the scope serves over USB.
+- **Decode serial buses** — UART, SPI and I²C, every byte shown as a pill on the trace and in a list.
+- **Read the waveform** — pan, zoom, and drop measurement cursors.
+- **Work offline** — reopen and re-decode any saved capture with no scope attached.
 
 ## Prerequisites
 
@@ -151,17 +139,12 @@ back to their defaults.
 
 Two buttons, in order:
 
-1. **① Prepare** — the slow one. It resets the scope to a known state and applies the whole
-   sidebar configuration to it — channels, probe, V/div, timebase, trigger and memory depth —
-   one front-panel key at a time, checking each landed. A few seconds. Changing any
-   acquisition setting invalidates it and you must prepare again; the button for step ②
-   greys out to say so.
-2. **② Arm capture** — the fast one, re-pressable. It arms a single-sequence capture, waits
-   for the trigger, and reads the record back. Each press gives a fresh record with the same
-   setup.
+1. **① Prepare** — applies your whole sidebar configuration to the scope. Takes a few seconds;
+   run it once. Changing any acquisition setting greys out step ② until you prepare again.
+2. **② Arm capture** — waits for the trigger and reads the record back. Re-pressable: each
+   press gives a fresh record with the same setup.
 
-The top bar shows a labelled progress bar for each phase, and any error stays there until
-dismissed.
+The top bar shows progress for each phase and holds any error until you dismiss it.
 
 ### 3. Read the record
 
@@ -198,7 +181,7 @@ re-decoded offline.
 
 ### Requirements & caveats
 
-- **Every** capture, 4K included, routes through the scope's front-panel **USB flash drive** —
+- **Every** capture routes through the scope's front-panel **USB flash drive** —
   it must be plugged in and mounted, or the save is a silent no-op and no record comes back.
 - The 16-channel **logic analyser pod cannot be read live over USB** (the firmware path is
   broken and corrupts the scope's own display). LA data is only available through a saved CSV,
@@ -221,22 +204,14 @@ The full reverse-engineering record and the developer guides live in `docs/`.
 
 ### Diagrams
 
-Editable [draw.io](https://app.diagrams.net) sources in [`docs/diagrams/`](docs/diagrams) —
-open them at [app.diagrams.net](https://app.diagrams.net) or with the VS Code Draw.io
-extension.
-
 | Diagram | Shows |
 | --- | --- |
-| [System architecture](docs/diagrams/system-architecture.drawio) | Webview ⇄ Tauri commands ⇄ driver layers ⇄ USB ⇄ instrument, with the progress channels. |
-| [Backend layers](docs/diagrams/backend-layers.drawio) | The crate's four layers module by module, and the downward-only dependency rule. |
-| [Capture state machine](docs/diagrams/capture-statemachine.drawio) | The prepare and capture plans as closed-loop flowcharts, with every guard, poll and abort path. |
-| [USB transaction](docs/diagrams/usb-transaction.drawio) | The reader-thread-before-write sequence, the retry/resync loop, and multi-frame collection. |
-| [Decoder pipeline](docs/diagrams/decoder-pipeline.drawio) | Volts → threshold → protocol decode → events → byte list and pill overlay. |
-| [UART decode](docs/diagrams/uart-decode.drawio) | The bit-grid algorithm and frame layout, with a timing illustration. |
-| [SPI decode](docs/diagrams/spi-decode.drawio) | Clock-edge selection, burst splitting and word assembly. |
-| [I²C decode](docs/diagrams/i2c-decode.drawio) | The bus state machine: START, address, ACK, data, STOP. |
-| [Trigger menu navigation](docs/diagrams/trigger-menu-navigation.drawio) | The scope's trigger menus as a navigable graph, with the softkey that performs each move. |
-| [Frontend state](docs/diagrams/frontend-state.drawio) | UI states, what invalidates a prepare, and what only re-decodes. |
+| [System architecture](docs/diagrams/system-architecture.drawio.png) | Webview ⇄ Tauri commands ⇄ driver layers ⇄ USB ⇄ instrument, with the progress channels. |
+| [Backend layers](docs/diagrams/backend-layers.drawio.png) | The crate's four layers module by module, and the downward-only dependency rule. |
+| [Capture state machine](docs/diagrams/capture-statemachine.drawio.png) | The prepare and capture plans as closed-loop flowcharts, with every guard, poll and abort path. |
+| [USB transaction](docs/diagrams/usb-transaction.drawio.png) | The reader-thread-before-write sequence, the retry/resync loop, and multi-frame collection. |
+| [Trigger menu navigation](docs/diagrams/trigger-menu-navigation.drawio.png) | The scope's trigger menus as a navigable graph, with the softkey that performs each move. |
+| [Frontend state](docs/diagrams/frontend-state.drawio.png) | UI states, what invalidates a prepare, and what only re-decodes. |
 
 Alongside them, `scope_dump/` holds the raw material — the firmware filesystem dump, the
 Wireshark captures of the vendor Windows app that the protocol was decoded from, and sample
