@@ -220,7 +220,48 @@ function valuesFor(config: TriggerConfig): string[] {
 }
 
 /** Sources whose trigger level the scope reports as a voltage. */
-const VOLTAGE_SOURCES: TriggerConfig["source"][] = ["ch1", "ch2"];
+const VOLTAGE_SOURCES: TriggerConfig["source"][] = ["ch1", "ch2", "ext", "ext5"];
+
+/**
+ * Whether the trigger exposes a settable level for its current type and source.
+ *
+ * None do for Slope (it compares against two thresholds of its own) or the AC-line source
+ * (it triggers on the mains zero-crossing). A **Video** trigger exposes a level only on the
+ * external inputs — a channel's video trigger uses its sync separator, not a manual level.
+ */
+function levelAppliesTo(config: TriggerConfig): boolean {
+  if (config.kind === "slope" || config.source === "acline") return false;
+  if (config.kind === "video") return config.source === "ext" || config.source === "ext5";
+  return true;
+}
+
+/**
+ * Fixed trigger-level sensitivity, in millivolts per **knob step** (one 1/25-division unit),
+ * for the external sources.
+ *
+ * EXT and EXT/5 have no V/div of their own — their comparator runs at a fixed sensitivity,
+ * measured off the scope's own stepping: **8 mV/step** on EXT and **40 mV/step** on EXT/5 (the
+ * ÷5 input divider spreads 5× the voltage over the same steps). A channel's mV/step is its
+ * V/div ÷ 25, so 40 mV/step equals a 1 V/div channel and 8 mV/step a 200 mV/div one. Unlike a
+ * channel level, no probe attenuation applies — the external input is not behind a probe.
+ */
+const EXT_MV_PER_UNIT: Partial<Record<TriggerConfig["source"], number>> = {
+  ext: 8,
+  ext5: 40,
+};
+
+/** The mV-per-unit and ground offset a trigger level is measured in, for its source. */
+function levelScaleFor(
+  source: TriggerConfig["source"],
+  chScale: { perUnit: number; zero: number },
+  probeFactor: number,
+): { perUnit: number; zero: number } {
+  const perUnit = EXT_MV_PER_UNIT[source];
+  // EXT / EXT-5: their own fixed per-step sensitivity, ground at centre.
+  if (perUnit !== undefined) return { perUnit, zero: 0 };
+  // CH1 / CH2: the channel's V/div ÷ 25, multiplied up by its probe attenuation.
+  return { perUnit: chScale.perUnit * probeFactor, zero: chScale.zero };
+}
 
 /**
  * Trigger setup.
@@ -252,15 +293,15 @@ export function TriggerPanel({ busy, probeFactor, value, onChange }: Props) {
     if (!SOURCES[merged.kind].some((s) => s.id === merged.source)) {
       merged.source = SOURCES[merged.kind][0].id;
     }
-    // Slope compares between two thresholds rather than against a level.
-    merged.levelApplies = merged.kind !== "slope";
+    merged.levelApplies = levelAppliesTo(merged);
     onChange(merged);
   };
 
   // Nothing here talks to the scope, so the only reason to lock is that a plan is running
   // and its settings are about to be read.
-  // The stored scale is at the probe tip's 1× value; the attenuation multiplies it.
-  const scaled = { perUnit: scale.perUnit * probeFactor, zero: scale.zero };
+  // The level is measured in the units of its source: a channel's V/div (scaled by the probe
+  // attenuation), or the external input's own fixed sensitivity.
+  const scaled = levelScaleFor(value.source, scale, probeFactor);
 
   const locked = busy;
   const isAlter = value.kind === "alter";
@@ -388,7 +429,7 @@ export function TriggerPanel({ busy, probeFactor, value, onChange }: Props) {
         </span>
       )}
 
-      {value.levelApplies && (
+      {levelAppliesTo(value) && (
         <Row name={value.kind === "alter" ? "CH1 level" : "Level"}>
           <div className="level-row">
             <button
@@ -605,8 +646,8 @@ function levelText(
   config: TriggerConfig,
   scale: { perUnit: number; zero: number },
 ): string {
-  // EXT, EXT/5 and the mains have no calibrated volts figure on this instrument, so for
-  // those the level stays in the divisions the knob actually moves in.
+  // Only the mains (AC line) has no calibrated volts figure, and it carries no settable
+  // level anyway; everything else — CH1/CH2 and the external inputs — reads in volts.
   if (!VOLTAGE_SOURCES.includes(config.source)) {
     return `${(config.level / 25).toFixed(2)} div`;
   }

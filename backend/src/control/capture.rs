@@ -182,9 +182,9 @@ impl CaptureSpec {
         for &(what, target) in &self.trigger_values {
             plan.push(Op::SetTriggerValue { what, target });
         }
-        // The level is meaningless in the modes whose knob is inert, and converging on it
-        // there fails with a phantom end stop.
-        if self.trigger.is_none_or(|setup| setup.kind.has_level()) {
+        // The level is meaningless where the knob is inert — the Slope type, or the AC-line
+        // source — and converging on it there fails with a phantom end stop.
+        if self.trigger.is_none_or(|setup| setup.has_level()) {
             plan.push(Op::SetTriggerLevel {
                 position: self.trigger_position,
             });

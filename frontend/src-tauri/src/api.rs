@@ -278,13 +278,20 @@ pub async fn prepare(
     // would undo it, so it has to happen inside the same sequence, after the reset and the
     // channels.
     spec.trigger = trigger.as_ref().map(|t| t.to_setup()).transpose()?;
-    // The knob-only values are walked to during prepare too — that is the whole reason the
-    // panel can treat them as settings rather than as a live control.
     if let Some(config) = trigger.as_ref() {
+        // The level the panel is showing, in the scope's 1/25-division units. Without this the
+        // spec keeps CaptureSpec::default()'s level and the panel's value is silently ignored.
+        spec.trigger_position = config.level;
+        // The knob-only values are walked to during prepare too — that is the whole reason the
+        // panel can treat them as settings rather than as a live control. The panel remembers
+        // every type's values, so keep only those the live type actually offers; walking to
+        // one it does not (e.g. a Pulse width while the type is Edge) fails outright.
+        let kind = spec.trigger.map(|setup| setup.kind);
         spec.trigger_values = config
             .value_targets
             .iter()
             .filter_map(|(id, &target)| Some((adjustable_from_id(id)?, target)))
+            .filter(|(what, _)| kind == Some(what.belongs_to()))
             .collect();
     }
     let guard = state.device.lock().unwrap();

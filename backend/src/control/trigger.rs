@@ -550,7 +550,7 @@ impl Adjustable {
     }
 
     /// The trigger type this parameter belongs to.
-    fn belongs_to(self) -> TriggerType {
+    pub fn belongs_to(self) -> TriggerType {
         match self {
             Self::PulseWidth => TriggerType::Pulse,
             Self::SlopeV1 | Self::SlopeV2 | Self::SlopeTime => TriggerType::Slope,
@@ -667,6 +667,28 @@ impl Default for TriggerSetup {
 }
 
 impl TriggerSetup {
+    /// Whether this trigger exposes a settable level that prepare should apply.
+    ///
+    /// Three cases have none:
+    /// - the type is **Slope**, which compares against two thresholds of its own — the level
+    ///   knob is inert there and converging on it reports a phantom end stop
+    ///   ([`TriggerType::has_level`]);
+    /// - the source is the **AC line**, which triggers on the mains zero-crossing;
+    /// - a **Video** trigger on a channel, which locks to its sync separator rather than a
+    ///   manual level — only the external inputs expose one.
+    pub fn has_level(&self) -> bool {
+        if !self.kind.has_level() || self.source == TriggerSource::AcLine {
+            return false;
+        }
+        if self.kind == TriggerType::Video {
+            return matches!(
+                self.source,
+                TriggerSource::External | TriggerSource::ExternalDiv5
+            );
+        }
+        true
+    }
+
     /// Whether the scope holding `self` counts as holding `wanted`.
     ///
     /// Only the fields that belong to the requested type are compared. The rest are carried
