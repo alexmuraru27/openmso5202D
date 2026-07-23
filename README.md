@@ -114,15 +114,15 @@ prerequisites above).
 The left sidebar is the whole setup, in four foldable sections. Each one shows a summary of
 its current state while collapsed, so nothing is hidden.
 
-- **Acquisition** — which channels to record (CH1, CH2 or both), the **max frequency** of the
-  signal you expect and how many **samples per clock** you want of it, and the **memory
-  depth** (4K / 40K / 512K / 1M).
+- **Acquisition** — which channels to record (CH1, CH2 or both), the **signal frequency** (the
+  fastest edge rate you expect — for a serial line, its bit rate/baud) and how many **samples
+  per clock** you want of it, and the **memory depth** (4K / 40K / 512K / 1M).
 
   Frequency and samples-per-clock are how you pick a timebase: the app works out the SEC/DIV
   the scope needs, snaps it to the instrument's fixed ladder, and tells you what you actually
   get — *"Captures 400 µs at 20 µs/div — 100 samples/clock actual"*. If the ADC cannot sample
   that fast the hint says so. Deeper memory at the same timebase means the same time window
-  with more samples; to record a *longer* stretch, lower the max frequency.
+  with more samples; to record a *longer* stretch, lower the signal frequency.
 
   1M is single-channel only, and picking a second channel drops it to 512K automatically.
 - **Channel setup** — probe attenuation (1× / 10× / 100× / 1000×), coupling (DC / AC / GND),

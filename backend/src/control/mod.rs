@@ -889,15 +889,32 @@ fn download(context: &Context, source: CsvSource) -> Result<()> {
         (file.path(), file.size)
     };
 
-    let data = device.download_with(&path, |done| context.advance(done, expected))?;
-
     // The transfer declares no length, so the real danger is a **truncated** read looking
-    // like a short file. The card's own size catches that. A read that is a byte or two
-    // LONGER than the card's size is not truncation — the size was sampled just before the
-    // file's final flush settled — so only a genuine shortfall is an error.
+    // like a short file. The card's own size catches that. The file is already complete on
+    // the card (its size settled before this ran), so a shortfall is a truncated transfer,
+    // not a partial file — re-read the whole thing. `download_with` resyncs on the way out,
+    // so each attempt starts from a clean endpoint. A read a byte or two LONGER than the
+    // card's size is not truncation — the size was sampled just before the final flush
+    // settled — so only a genuine shortfall retries.
+    const DOWNLOAD_ATTEMPTS: usize = 3;
+    let mut data = Vec::new();
+    for attempt in 0..DOWNLOAD_ATTEMPTS {
+        data = device.download_with(&path, |done| context.advance(done, expected))?;
+        if (data.len() as u64) >= expected {
+            break;
+        }
+        debug!(
+            %path,
+            got = data.len(),
+            expected,
+            attempt = attempt + 1,
+            "short download — re-reading"
+        );
+    }
+
     if (data.len() as u64) < expected {
         return Err(Error::Unexpected(format!(
-            "{path}: downloaded {} bytes but the card reports {expected} — truncated",
+            "{path}: downloaded {} bytes but the card reports {expected} — truncated after {DOWNLOAD_ATTEMPTS} attempts",
             data.len()
         )));
     }

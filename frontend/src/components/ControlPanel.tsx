@@ -188,7 +188,7 @@ function Acquisition({
       </div>
 
       <div className="field">
-        <span className="name">Max frequency</span>
+        <span className="name">Signal frequency</span>
         <FrequencyInput
           hz={config.maxFreqHz}
           onChange={(hz) => onChange({ maxFreqHz: hz })}

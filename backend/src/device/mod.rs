@@ -373,14 +373,26 @@ impl Device {
             .transact_with(&request, DOWNLOAD_TIMEOUT, 2)?;
 
         const DATA_OFFSET: usize = 2; // selector echo + subtype
+        // The stream always finishes with an END frame — it never just stops — so a recv
+        // that times out mid-transfer is a transient gap, not the end. Retry a few times
+        // before giving up; a single hiccup would otherwise silently truncate a multi-
+        // megabyte file and only surface downstream as a "truncated" size mismatch.
+        const RECV_RETRIES: usize = 4;
         let mut frame = first;
         let mut data = Vec::new();
         while let Some(subtype::DATA) = frame.get(1).copied() {
             data.extend_from_slice(&frame[DATA_OFFSET..]);
             on_progress(data.len() as u64);
-            match self.transport.recv(DOWNLOAD_TIMEOUT) {
-                Ok(next) => frame = next,
-                Err(_) => break,
+            let mut next = None;
+            for _ in 0..RECV_RETRIES {
+                if let Ok(received) = self.transport.recv(DOWNLOAD_TIMEOUT) {
+                    next = Some(received);
+                    break;
+                }
+            }
+            match next {
+                Some(received) => frame = received,
+                None => break,
             }
         }
         // A large transfer can leave a tail queued on the endpoint. Left there, the next
