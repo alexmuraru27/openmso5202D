@@ -8,6 +8,12 @@ reverse-engineered from USB captures of the vendor Windows app.
 > is routed through the scope's own Save-to-CSV export, which writes to that drive and is read
 > back over USB. With no drive mounted the save is a silent no-op and the app gets no data.
 
+> [!NOTE]
+> **Tested against a single unit only:** the **200 MHz** MSO5202D variant, firmware
+> **3.2.35 (180502.0)**, hardware **1020x55778344** (from the scope's Utility → System Status).
+> Other firmware revisions, or the lower-bandwidth MSO5000-series models, may behave
+> differently — the protocol was reverse-engineered, not documented by the vendor.
+
 ![The app decoding an SPI ramp captured at 40K memory depth](docs/screenshots/openmso5202D_spi.png)
 
 A **triggered capture-and-decode workbench** — not a live scope face. You arm the scope, it
